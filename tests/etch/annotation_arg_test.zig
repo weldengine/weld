@@ -1,5 +1,6 @@
 //! An annotation argument follows `etch-grammar.md` §1.5, and a reader that
-//! takes a positional argument refuses a named one.
+//! takes a positional argument refuses a named one. An annotation on a
+//! declaration no builtin annotation applies to is misapplied.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");
@@ -63,4 +64,33 @@ test "a positional structural observer argument is accepted" {
         \\@on_added(Health)
         \\rule r(entity: Entity, value: Health) {}
     , "E1209"));
+}
+
+test "an annotation on a const is misapplied" {
+    try std.testing.expect(try reportsCode(
+        \\@phase(.update)
+        \\const MAX: int = 3
+    , "E0502"));
+}
+
+test "an annotation on a type alias is misapplied" {
+    try std.testing.expect(try reportsCode(
+        \\@phase(.update)
+        \\type Hp = int
+    , "E0502"));
+}
+
+test "an annotation on an import is misapplied" {
+    try std.testing.expect(try reportsCode(
+        \\@phase(.update)
+        \\import lib { Health }
+    , "E0502"));
+}
+
+test "an annotation on an impl is misapplied" {
+    try std.testing.expect(try reportsCode(
+        \\struct Cnt { v: int = 0 }
+        \\@phase(.update)
+        \\impl Cnt { fn bump(mut self) { self.v += 1 } }
+    , "E0502"));
 }

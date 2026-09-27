@@ -870,14 +870,18 @@ pub const Parser = struct {
     /// `Name` is a PascalCase type identifier; `Type` is any type node. The
     /// `kw_type` starter is mirrored in `recoverToTopLevel`'s stop-set.
     fn parseTypeAliasDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
-        _ = annotations; // type aliases carry no annotations in the v0.6 subset
         const kw_span = (try self.advance()).span; // 'type'
         const name_tok = try self.expect(.type_ident, "expected PascalCase alias name after 'type'");
         const name_id = try self.internSlice(name_tok.span);
         _ = try self.expect(.eq, "expected '=' in type alias declaration");
         const target = try self.parseType();
         const target_span = self.arena.typeNodeSpan(target);
-        _ = try self.arena.addTypeAlias(self.gpa, name_id, target, .{
+        _ = try self.arena.addTypeAlias(self.gpa, .{
+            .name = name_id,
+            .target = target,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{
             .byte_start = kw_span.byte_start,
             .byte_end = target_span.byte_end,
         });
@@ -893,10 +897,8 @@ pub const Parser = struct {
     /// checked at resolve. Top-level ONLY — `parseStmt` does not handle
     /// `kw_const`, so a `const` inside a block falls through to a parse error
     /// (part1 §4.5). The `kw_const` starter is mirrored in `recoverToTopLevel`'s
-    /// stop-set + the `parseTopLevel` error enumeration. Like `import` / `type`,
-    /// the v0.6 subset attaches no annotations to a const (range discarded).
+    /// stop-set + the `parseTopLevel` error enumeration.
     fn parseConstDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
-        _ = annotations; // const carries no annotations in the v0.6 subset
         const kw_span = (try self.advance()).span; // 'const'
         const name_tok = if (self.peek() == .ident or self.peek() == .type_ident)
             try self.advance()
@@ -911,6 +913,8 @@ pub const Parser = struct {
             .name = name_id,
             .type_node = type_node,
             .value = value,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = self.arena.exprSpan(value).byte_end });
     }
 
@@ -3635,7 +3639,6 @@ pub const Parser = struct {
     /// `parseTypeAliasDecl` precedent). The `kw_import` starter is mirrored in
     /// `recoverToTopLevel`'s stop-set.
     fn parseImportDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
-        _ = annotations; // imports carry no annotations in the v0.6 subset
         const kw_span = (try self.advance()).span; // 'import'
 
         // module_path = IDENT { "." IDENT }  (≥1 segment)
@@ -3682,6 +3685,8 @@ pub const Parser = struct {
             .module_alias = module_alias,
             .items_start = items_start,
             .items_len = items_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = end_span.byte_end });
     }
 
@@ -4939,7 +4944,6 @@ pub const Parser = struct {
     /// name is rejected with a clear pointer. Methods reuse `parseFnLike` with
     /// `allow_self = true` and are stored in `arena.impl_methods`.
     fn parseImplDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
-        _ = annotations; // inherent impl carries no annotations in this subset
         const kw_span = self.current.span;
         _ = try self.advance(); // 'impl'
         // Optional impl-level generic params `impl<T> …`; in
@@ -5001,6 +5005,8 @@ pub const Parser = struct {
             .methods_len = methods_len,
             .generics_start = impl_generics.start,
             .generics_len = impl_generics.len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 

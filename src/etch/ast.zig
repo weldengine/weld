@@ -437,6 +437,8 @@ pub const ImportDecl = struct {
     module_alias: StringId, // `as m` alias (0 if absent or selective form)
     items_start: u32, // index into `arena.import_items`
     items_len: u32, // 0 for the whole-module forms (1 and 3)
+    annotations_extra: u32 = 0,
+    annotations_len: u32 = 0,
 };
 
 /// Side-slab entry for a `component` declaration: name + range into
@@ -718,6 +720,8 @@ const RuleParam = struct {
 pub const TypeAliasDecl = struct {
     name: StringId,
     target: NodeId,
+    annotations_extra: u32 = 0,
+    annotations_len: u32 = 0,
 };
 
 /// Side-slab entry for a top-level `const` declaration (`etch-grammar.md` §4.1:
@@ -730,6 +734,8 @@ pub const ConstDecl = struct {
     name: StringId,
     type_node: NodeId,
     value: NodeId,
+    annotations_extra: u32 = 0,
+    annotations_len: u32 = 0,
 };
 
 /// Side-slab entry for a top-level `test` block (`etch-grammar.md` §17:
@@ -1345,6 +1351,8 @@ pub const ImplDecl = struct {
     /// `arena.generic_params`. In scope for every method body.
     generics_start: u32 = 0,
     generics_len: u32 = 0,
+    annotations_extra: u32 = 0,
+    annotations_len: u32 = 0,
 };
 
 /// Shape of an enum variant (`etch-grammar.md` §5.8).
@@ -3069,9 +3077,9 @@ pub const AstArena = struct {
         _ = try self.addItem(gpa, .struct_decl, struct_idx, zero_span);
     }
 
-    pub fn addTypeAlias(self: *AstArena, gpa: std.mem.Allocator, name: StringId, target: NodeId, span: SourceSpan) !NodeId {
+    pub fn addTypeAlias(self: *AstArena, gpa: std.mem.Allocator, decl: TypeAliasDecl, span: SourceSpan) !NodeId {
         const idx: u32 = @intCast(self.type_alias_decls.items.len);
-        try self.type_alias_decls.append(gpa, .{ .name = name, .target = target });
+        try self.type_alias_decls.append(gpa, decl);
         return try self.addItem(gpa, .type_alias, idx, span);
     }
 

@@ -12,6 +12,8 @@ const const_eval = @import("const_eval.zig");
 const diag_mod = @import("diagnostics.zig");
 const tags_mod = @import("tags.zig");
 const token_mod = @import("token.zig");
+const lexer_mod = @import("lexer.zig");
+const descriptor_mod = @import("descriptor.zig");
 /// The storage-mode domain, read from the owner of the EFFECT rather than
 /// re-listed here (`etch-resolver-types.md` §13.3.1). `weld_etch` already
 /// depends on `weld_core` (`build.zig:50`) and `weld_core` imports only
@@ -446,7 +448,23 @@ fn numericLitValue(gpa: std.mem.Allocator, arena: *const AstArena, expr_id: Node
 /// construct targets arrive with their constructs. `data` / `routine` join with the
 /// Level-B constructs (no builtin annotation targets them — only `.custom` is accepted,
 /// like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader, scene, prefab, test_ };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader, scene, prefab, test_, const_, type_alias, import_, impl_ };
+
+/// The first import alias in `aliases` that the rendered hook `text` names
+/// while spelled like a builtin type or resource: once the cook respells each
+/// alias by the name it aliases, that name is no longer told from the builtin.
+fn builtinSpelledAlias(gpa: std.mem.Allocator, text: []const u8, aliases: anytype) !?[]const u8 {
+    var lx = lexer_mod.Lexer.init(text);
+    defer lx.deinit(gpa);
+    while (true) {
+        const tok = try lx.next(gpa);
+        if (tok.kind == .eof) return null;
+        if (tok.kind != .type_ident) continue;
+        const alias = text[tok.span.byte_start..tok.span.byte_end];
+        if (!aliases.contains(alias)) continue;
+        if (BuiltinType.fromName(alias) != null or builtinResourceByName(alias) != null) return alias;
+    }
+}
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -3665,6 +3683,7 @@ pub const TypeChecker = struct {
                     // trait impl (`impl Trait for Type`, §5.2) → `trait_impls`.
                     // Bodies are checked in pass 2 (`checkImplMethod`).
                     const impl = self.arena.impl_decls.items[data];
+                    try self.validateAnnotations(impl.annotations_extra, impl.annotations_len, .impl_);
                     if (impl.trait_name == 0) {
                         try self.collectImplMethods(impl, span);
                     } else {
@@ -3683,6 +3702,7 @@ pub const TypeChecker = struct {
                     // component/resource/rule (E0101); the target is validated
                     // in `validateTypeAliases` once all symbols are known.
                     const decl = self.arena.type_alias_decls.items[data];
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .type_alias);
                     try self.registerSymbol(.type_alias, decl.name, item_id, span);
                 },
                 .const_decl => {
@@ -3692,6 +3712,7 @@ pub const TypeChecker = struct {
                     // const-evaluable (E1101) and matches its declared type
                     // (E0200) — reusing the field-default const surface.
                     const decl = self.arena.const_decls.items[data];
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .const_);
                     try self.registerSymbol(.const_, decl.name, item_id, span);
                     try self.checkConstValue(decl.value, decl.type_node);
                 },
@@ -3832,6 +3853,10 @@ pub const TypeChecker = struct {
                     try self.registerSymbol(.audio_graph_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .audio_graph);
                     try self.checkParamDefaults(decl.params_start, decl.params_len);
+                },
+                .import_decl => {
+                    const decl = self.arena.import_decls.items[data];
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .import_);
                 },
                 else => {}, // forward-compatible: unknown items ignored
             }
