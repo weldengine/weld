@@ -1708,3 +1708,58 @@ test "a load credits a requirement an earlier extension provides" {
     const a = loaded.uuid_to_entity.get(uuidBytes(0xa1)).?;
     try std.testing.expect(h.weapon(a) != null);
 }
+
+const observer_program =
+    \\component Health { current: i32 = 100, max: i32 = 100 }
+    \\component Weapon { damage: i32 = 0 }
+    \\event Attached { }
+    \\resource Seen { n: i32 = 0 }
+    \\rule go(entity: Entity) when entity has Health and not entity has Weapon {
+    \\  entity.activate_extension("Forged")
+    \\}
+    \\@on_event(Attached)
+    \\rule seen() when resource Seen { get_mut(Seen).n += 1 }
+;
+
+fn seenCount(world: *World) i32 {
+    const id = world.registry.idOf("Seen").?;
+    const f = world.registry.findField(id, "n").?;
+    return std.mem.readInt(i32, world.resources.getResource(id).?[f.offset..][0..4], .little);
+}
+
+test "an event a hook emits at the tick boundary reaches the next tick's observers" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser.parse(gpa, observer_program);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{}, "emit Attached { }", null);
+    defer gpa.free(bytes);
+    var res = OneResolver{ .name = "Forged", .bytes = bytes };
+    interp.setExtensionResolver(res.ext());
+    _ = try spawnHealth(&world, gpa, 100, 100);
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i32, 1), seenCount(&world));
+}
+
+test "an event a hook emits outside a tick reaches the next tick's observers" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser.parse(gpa, observer_program);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{}, "emit Attached { }", null);
+    defer gpa.free(bytes);
+    const e = try spawnHealth(&world, gpa, 100, 100);
+    try scene.loader.activateExtension(&world, gpa, e, "Forged", bytes);
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i32, 1), seenCount(&world));
+}

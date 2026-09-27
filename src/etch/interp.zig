@@ -584,8 +584,10 @@ const EventVal = struct {
 /// cannot be driven by the dynamic tree-walker, so `emit` accumulates events
 /// here, each tagged by its type name; `@on_event` observers drain them. The
 /// observer/drain side is the observer path (resolver-types §12,
-/// deferred). Cleared at the start of each tick (`stepOnce`), matching the
-/// `Lifetime.tick` drain cadence (`src/core/events/lifetime.zig`).
+/// deferred). An event lives for one tick of rules, matching the
+/// `Lifetime.tick` drain cadence (`src/core/events/lifetime.zig`): one emitted
+/// at a boundary, after a tick's last rule or outside any tick, lives for the
+/// next tick's.
 const EventStore = struct {
     list: std.ArrayListUnmanaged(EventVal) = .empty,
     /// Store-owned deep copies of NON-AST string event field bytes:
@@ -599,6 +601,10 @@ const EventStore = struct {
     /// queue at the per-tick `clear`. (`.string_id` — the immortal AST table — is
     /// stable and never copied.)
     owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
+    /// The prefixes of `list` and `owned_strings` emitted before the last
+    /// `endRules`, which the next `startTick` drops.
+    ruled_events: usize = 0,
+    ruled_strings: usize = 0,
 
     fn deinit(self: *EventStore, gpa: std.mem.Allocator) void {
         for (self.list.items) |*e| e.fields.deinit(gpa);
@@ -612,6 +618,29 @@ const EventStore = struct {
         self.list.clearRetainingCapacity();
         for (self.owned_strings.items) |s| gpa.free(s);
         self.owned_strings.clearRetainingCapacity();
+        self.ruled_events = 0;
+        self.ruled_strings = 0;
+    }
+
+    /// Mark the end of a tick's rules.
+    fn endRules(self: *EventStore) void {
+        self.ruled_events = self.list.items.len;
+        self.ruled_strings = self.owned_strings.items.len;
+    }
+
+    /// Drop what the previous tick's rules could observe, keeping what was
+    /// emitted after them.
+    fn startTick(self: *EventStore, gpa: std.mem.Allocator) void {
+        for (self.list.items[0..self.ruled_events]) |*e| e.fields.deinit(gpa);
+        const kept = self.list.items.len - self.ruled_events;
+        std.mem.copyForwards(EventVal, self.list.items[0..kept], self.list.items[self.ruled_events..]);
+        self.list.shrinkRetainingCapacity(kept);
+        for (self.owned_strings.items[0..self.ruled_strings]) |s| gpa.free(s);
+        const kept_strings = self.owned_strings.items.len - self.ruled_strings;
+        std.mem.copyForwards([]u8, self.owned_strings.items[0..kept_strings], self.owned_strings.items[self.ruled_strings..]);
+        self.owned_strings.shrinkRetainingCapacity(kept_strings);
+        self.ruled_events = 0;
+        self.ruled_strings = 0;
     }
 
     /// Enqueue an event of `type_name`, taking ownership of `fields`.
@@ -2217,15 +2246,14 @@ pub const Interpreter = struct {
         // counter backing `GameTime.frame` — it no longer drives `wait`.
         self.async_tick += 1;
         self.advanceTime(world);
-        // Events have a per-tick lifetime (`Lifetime.tick`): clear the previous
-        // tick's queue before running this tick's rules. The test-world
-        // `tick(n)` suppresses exactly this first clear so events
+        // Events have a per-tick lifetime (`Lifetime.tick`). The test-world
+        // `tick(n)` suppresses exactly this first drop so events
         // emitted before the tick (`world.emit`, or a `spawn_with` observer)
         // survive into it — §32's `emit; tick(1)`.
         if (self.suppress_event_clear) {
             self.suppress_event_clear = false;
         } else {
-            self.events.clear(self.gpa);
+            self.events.startTick(self.gpa);
         }
         // Drain the external event sources — AFTER the clear and
         // BEFORE rule dispatch, which is the whole deliverable of the bridge.
@@ -2262,6 +2290,7 @@ pub const Interpreter = struct {
             // the pre-update value, so the filter saw the correct baseline.
             if (self.has_changed) rd.last_run_tick = world.current_tick;
         }
+        self.events.endRules();
         // Apply deferred tag mutations at the tick boundary — after every rule
         // has run, never mid-archetype-walk (`etch-grammar.md` §4.4).
         try self.flushPendingTags(world);
@@ -11688,13 +11717,13 @@ test "observable behaviour: all five observer kinds + emit/@on_event, determinis
     try std.testing.expectEqualSlices(i64, &[_]i64{ 1, 101, 312, 402, 5 }, log.items);
 
     // ── Then: a per-tick `@on_event` drain coexists in the same program ──
-    // `stepOnce` clears the event store first; produce_ping emits Ping, on_ping
-    // drains it same-tick → Log 6.
+    // The five logs were emitted outside a tick, so this tick keeps them;
+    // produce_ping emits Ping, on_ping drains it same-tick → Log 6.
     var report: RuntimeReport = .{};
     try interp.stepOnce(&world, &report);
     log.clearRetainingCapacity();
     try collectLog(&interp, log_id, code_id, &log, gpa);
-    try std.testing.expectEqualSlices(i64, &[_]i64{6}, log.items);
+    try std.testing.expectEqualSlices(i64, &[_]i64{ 1, 101, 312, 402, 5, 6 }, log.items);
 }
 
 test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter" {
