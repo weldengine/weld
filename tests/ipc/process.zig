@@ -37,6 +37,8 @@ test "spawn true(1) and reap with waitNonblock returns exit 0" {
 }
 
 extern "c" fn getpid() i32;
+extern "c" fn unlink(path: [*:0]const u8) c_int;
+extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
 
 test "isAlive returns true for current pid, false for impossible pid" {
     if (!is_posix) return error.SkipZigTest;
@@ -55,17 +57,21 @@ test "spawn-then-kill terminates a long-running child" {
     if (!is_posix) return error.SkipZigTest;
 
     const gpa = std.testing.allocator;
-    // Longer than `child_process.exit_polls` allow, so a kill that did nothing
-    // cannot pass for the child's own exit.
-    const argv = [_][]const u8{ "/bin/sleep", "600" };
+    var ready_buf: [64]u8 = undefined;
+    const ready = try std.fmt.bufPrintZ(&ready_buf, "/tmp/weld-test-kill-ready-{d}", .{getpid()});
+    _ = unlink(ready.ptr);
+    defer _ = unlink(ready.ptr);
+    const script = try std.fmt.allocPrint(gpa, ": > {s}; exec /bin/sleep 600", .{ready});
+    defer gpa.free(script);
+    // The sleep outlasts what `child_process.exit_polls` allow, so a kill that
+    // did nothing cannot pass for the child's own exit.
+    const argv = [_][]const u8{ "/bin/sh", "-c", script };
 
-    var proc = try process.spawnProcess(gpa, "/bin/sleep", &argv);
-    // Give the child a moment to actually become alive in the kernel
-    // table — without this, `kill(pid, SIGKILL)` can race against
-    // the spawn returning before the child is reapable on macOS.
-    sleepMs(20);
+    var proc = try process.spawnProcess(gpa, "/bin/sh", &argv);
+    while (access(ready.ptr, 0) != 0) sleepMs(1);
     try process.kill(&proc);
-    _ = try child_process.waitExit(&proc) orelse return error.ChildNeverDied;
+    const code = try child_process.waitExit(&proc) orelse return error.ChildNeverDied;
+    try std.testing.expectEqual(@as(i32, -9), code);
 }
 
 test "spawnProcess runs a Windows binary and reaps exit 0" {

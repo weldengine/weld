@@ -297,9 +297,10 @@ pub fn spawnProcess(
     }
 }
 
-/// Polls without blocking. Returns `null` if the child is still
-/// alive, or its exit code if it has terminated. Reaps zombies on
-/// POSIX so subsequent `isAlive(pid)` calls don't lie.
+/// Polls without blocking: `null` while the child runs, else its exit code —
+/// on POSIX minus the signal number when a signal killed it, on Windows the
+/// process exit code as `GetExitCodeProcess` returns it. Reaps zombies on POSIX
+/// so subsequent `isAlive(pid)` calls don't lie.
 pub fn waitNonblock(proc: *Process) Error!?i32 {
     switch (builtin.os.tag) {
         .linux, .macos => {
@@ -307,8 +308,9 @@ pub fn waitNonblock(proc: *Process) Error!?i32 {
             const r = posix.waitpid(proc.pid, &status, posix.WNOHANG);
             if (r == 0) return null; // still alive
             if (r < 0) return error.WaitFailed;
-            // WEXITSTATUS macro: (status >> 8) & 0xFF
-            return @intCast((status >> 8) & 0xFF);
+            const s: u32 = @bitCast(status);
+            if (std.c.W.IFSIGNALED(s)) return -@as(i32, @intCast(@intFromEnum(std.c.W.TERMSIG(s))));
+            return std.c.W.EXITSTATUS(s);
         },
         .windows => {
             const handle = proc.handle orelse return error.WaitFailed;
@@ -319,7 +321,7 @@ pub fn waitNonblock(proc: *Process) Error!?i32 {
             if (win.GetExitCodeProcess(handle, &code) == 0) return error.WaitFailed;
             _ = win.CloseHandle(handle);
             proc.handle = null;
-            return @intCast(code);
+            return @bitCast(code);
         },
         else => @compileError("waitNonblock: unsupported OS"),
     }
