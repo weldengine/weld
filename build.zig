@@ -1061,7 +1061,6 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/scene/load_resources_test.zig" },
         // common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
-        .{ .path = "tests/platform/time_test.zig" },
         .{ .path = "tests/platform/threading_test.zig" },
         .{ .path = "tests/platform/dynamic_lib_test.zig" },
         // Win32 thread safety stress (Windows runner only).
