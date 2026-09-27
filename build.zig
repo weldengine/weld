@@ -1109,7 +1109,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/vk_gen/raw_variants.zig" },
         // asset registry stale-handle (generation) acceptance.
         .{ .path = "tests/assets/handle_generation.zig", .asset_pipeline = true },
-        // async loader + lifecycle (internal 5 s watchdog).
+        // async loader + lifecycle.
         .{ .path = "tests/assets/loader_async.zig", .asset_pipeline = true },
         // DEFLATE/zlib inflate known-vector acceptance.
         .{ .path = "tests/assets/deflate_vectors.zig", .asset_pipeline = true },

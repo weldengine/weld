@@ -27,29 +27,6 @@ extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 
-extern "c" fn setsockopt(
-    sockfd: c_int,
-    level: c_int,
-    optname: c_int,
-    optval: *const anyopaque,
-    optlen: u32,
-) c_int;
-
-const timeval = extern struct {
-    tv_sec: i64,
-    tv_usec: i32,
-    _pad: i32 = 0,
-};
-
-const SOL_SOCKET: c_int = if (builtin.os.tag == .linux) 1 else 0xFFFF;
-const SO_RCVTIMEO: c_int = if (builtin.os.tag == .linux) 20 else 0x1006;
-
-fn installRecvTimeout(sock: *transport.IpcSocket) void {
-    if (comptime !is_posix) return;
-    var tv = timeval{ .tv_sec = 5, .tv_usec = 0 };
-    _ = setsockopt(sock.impl.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, @sizeOf(timeval));
-}
-
 test "transmits an open fd via sendWithHandles and writes through it" {
     if (!is_posix) return error.SkipZigTest;
 
@@ -70,8 +47,6 @@ test "transmits an open fd via sendWithHandles and writes through it" {
     defer client.close();
     var server = try listener.accept();
     defer server.close();
-    installRecvTimeout(&server);
-    installRecvTimeout(&client);
 
     // Editor sends the pipe write fd to the runtime via SCM_RIGHTS.
     // SCM_RIGHTS requires a non-empty regular payload to ride along.

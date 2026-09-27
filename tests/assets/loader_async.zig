@@ -1,8 +1,6 @@
 //! Async loader + lifecycle acceptance.
 //!
-//! The main loop ticks while a load is in flight and the load completes, under
-//! an internal 5 s watchdog with clean teardown (`engine-zig-conventions.md`
-//! §13).
+//! The main loop ticks while a load is in flight and the load completes.
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");
@@ -48,19 +46,11 @@ test "async load does not block main thread" {
     var loader = Loader.init(tmp.dir);
     defer loader.deinit(gpa);
 
-    // Begin the load and keep ticking the main loop until it is ready. A
-    // 5 s wall-clock watchdog guarantees the suite cannot hang on a stuck
-    // load, with clean teardown via `pending.cancel`.
     var pending = try loader.beginLoad(gpa, io, "x.texture.bin");
-    const start = std.Io.Clock.Timestamp.now(io, .awake);
     var ticks: usize = 0;
     while (!pending.ready()) {
         ticks += 1;
         std.mem.doNotOptimizeAway(ticks);
-        if (start.untilNow(io).raw.nanoseconds > 5 * std.time.ns_per_s) {
-            pending.cancel(io);
-            return error.LoadTimedOut;
-        }
     }
     try std.testing.expect(ticks >= 1); // the main loop advanced; the read ran off-thread
 

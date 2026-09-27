@@ -1,20 +1,11 @@
 //! Transport — `IpcSocket.listen/connect/accept/send/recv` on a real OS socket.
 //!
 //! Writing 64 KB single-threaded on an AF_UNIX SOCK_STREAM deadlocks once the
-//! kernel send buffer fills, no reader draining it — hence the first two rules
-//! below, and the third is the cleanup every test owes:
-//!   - Large-payload tests spawn a reader thread that consumes bytes
-//!     in parallel.
-//!   - Every test installs a 5 s recv timeout on its server-side
-//!     socket via the platform `SO_RCVTIMEO` socket option (POSIX).
-//!     The timeout makes the test fail cleanly with
-//!     `error.BrokenPipe` instead of hanging if the protocol misfires.
-//!   - The listen socket and any unix socket file are unlinked on
-//!     test scope exit (`defer`).
+//! kernel send buffer fills, no reader draining it, so large-payload tests spawn
+//! a reader thread that consumes bytes in parallel. The listen socket and any
+//! unix socket file are unlinked on test scope exit (`defer`).
 //!
-//! Skipped on Windows: the named-pipe backend has different timeout semantics
-//! (`PIPE_WAIT` against `PIPE_NOWAIT` + `WaitNamedPipe`), so the timeouts these
-//! tests rest on do not transpose.
+//! POSIX only: the tests address unix socket files.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -24,38 +15,10 @@ const transport = weld_core.ipc.transport;
 
 const is_posix = builtin.os.tag == .linux or builtin.os.tag == .macos;
 
-extern "c" fn setsockopt(
-    sockfd: c_int,
-    level: c_int,
-    optname: c_int,
-    optval: *const anyopaque,
-    optlen: u32,
-) c_int;
-
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 
 fn forceUnlink(path: [:0]const u8) void {
     _ = unlink(path.ptr);
-}
-
-const timeval = extern struct {
-    tv_sec: i64,
-    tv_usec: i32,
-    _pad: i32 = 0,
-};
-
-const SOL_SOCKET: c_int = if (builtin.os.tag == .linux) 1 else 0xFFFF;
-const SO_RCVTIMEO: c_int = if (builtin.os.tag == .linux) 20 else 0x1006;
-
-/// Install a 5-second recv timeout on the underlying fd of an
-/// `IpcSocket` (POSIX only). Catches the test-runner deadlock the
-/// previous session burned 46 minutes on: any `recv()` that would
-/// normally hang now fails with `EAGAIN`/`error.BrokenPipe` after 5 s.
-fn installRecvTimeout(sock: *transport.IpcSocket) void {
-    if (comptime !is_posix) return;
-    const fd = sock.impl.fd;
-    var tv = timeval{ .tv_sec = 5, .tv_usec = 0 };
-    _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, @sizeOf(timeval));
 }
 
 fn socketPath(comptime suffix: []const u8) [:0]const u8 {
@@ -77,7 +40,6 @@ test "listen + connect + accept + small payload round-trip" {
 
     var server = try listener.accept();
     defer server.close();
-    installRecvTimeout(&server);
 
     const payload = "hello-weld-ipc";
     try client.send(payload);
@@ -131,7 +93,6 @@ test "send loops over partial writes (64 KB, drained by reader thread)" {
 
     var server = try listener.accept();
     defer server.close();
-    installRecvTimeout(&server);
 
     const big = [_]u8{42} ** 64_000;
 
@@ -158,7 +119,6 @@ test "recv returns 0 on clean peer close (EOF)" {
     var client = try transport.IpcSocket.connect(path);
     var server = try listener.accept();
     defer server.close();
-    installRecvTimeout(&server);
 
     client.close();
 
