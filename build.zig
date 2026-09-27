@@ -1048,6 +1048,9 @@ pub fn build(b: *std.Build) void {
         // descriptors, the cook and its binary tables, `applyExtensions` and the
         // `on_attach` dispatch at load.
         .{ .path = "tests/scene/extensions_test.zig", .scene = true, .dedicated_step = "test-extensions" },
+        // A scene or prefab importing its components cooks as `etch check`
+        // resolves it, and a refused import refuses the cook.
+        .{ .path = "tests/scene/import_cook_test.zig", .scene = true, .dedicated_step = "test-import-cook" },
         // capstone: prefab instances + per-field override +
         // cross-ref + active extension in one scene, cook → load → ECS.
         .{ .path = "tests/scene/prefab_integration_test.zig", .scene = true, .dedicated_step = "test-prefab-integration" },

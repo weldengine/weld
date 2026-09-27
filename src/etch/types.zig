@@ -827,11 +827,25 @@ pub const TypeChecker = struct {
         try self.validateSceneDecls();
     }
 
+    /// The import half of `check`, for the cook: every `import` of `arena` is
+    /// resolved against `project`, and what `check` refuses is reported into
+    /// `diagnostics`.
+    pub fn checkImports(gpa: std.mem.Allocator, arena: *AstArena, project: *const ProjectContext, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+        var tc: TypeChecker = .{
+            .gpa = gpa,
+            .arena = arena,
+            .diagnostics = diagnostics,
+            .project = project,
+        };
+        defer tc.deinit();
+        try tc.bindImports();
+    }
+
     /// The prefab half of `check`, for the cook: the declarations are collected
     /// by `check`'s own passes, and only `requires` names and hook bodies are
     /// reported into `diagnostics`. A cook source reaches its base prefab through
     /// a resolver, so the rest of `check` (E1791 first) does not apply to it.
-    pub fn checkPrefabHooks(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+    pub fn checkPrefabHooks(gpa: std.mem.Allocator, arena: *AstArena, project: ?*const ProjectContext, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
         try arena.ensureErrorBuiltins(gpa);
         var scratch: std.ArrayListUnmanaged(Diagnostic) = .empty;
         defer {
@@ -842,7 +856,7 @@ pub const TypeChecker = struct {
             .gpa = gpa,
             .arena = arena,
             .diagnostics = &scratch,
-            .project = null,
+            .project = project,
         };
         defer tc.deinit();
         try tc.runDeclarationPasses();
@@ -2104,40 +2118,44 @@ pub const TypeChecker = struct {
     }
 
     /// Resolve a `component_instance` against the component RTTI: `code_type`
-    /// if the type is not a declared component, then per-field checks.
-    ///
-    /// The component type may be a SELECTIVELY-IMPORTED symbol
-    /// whose declaration lives in another file's arena. When it is, the decl is
-    /// fetched from `project.arenas[entry.arena_index]` and the fields are checked
-    /// CROSS-ARENA (field names compared by bytes — StringIds are per-arena). This
-    /// is the E1793 unblock: a `.prefab.etch` importing its components validates
-    /// clean instead of tripping `PrefabComponentTypeUnknown`.
+    /// if the type is not a declared component, then per-field checks. An
+    /// imported component's fields are read from the arena that declares it.
     fn checkComponentInstance(self: *TypeChecker, ci: ast_mod.ComponentInstance, code_type: DiagnosticCode, code_field: DiagnosticCode, code_field_type: DiagnosticCode) !void {
         const owner = self.arena.strings.slice(ci.type_name);
-        // 1. Local component (the single-file path).
-        if (self.symbols.get(ci.type_name)) |sym| {
-            if (sym.kind == .component) {
-                const decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
-                var f: u32 = 0;
-                while (f < ci.fields_len) : (f += 1) {
-                    try self.checkInstanceField(owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
-                }
-                return;
-            }
-            // A local symbol that is NOT a component → fall through to code_type.
-        } else if (self.imported_symbols.get(ci.type_name)) |entry| {
-            // 2. Imported component (cross-arena).
-            if (entry.kind == .component) {
-                const decl_arena = &self.project.?.arenas[entry.arena_index];
-                const decl = decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)];
-                var f: u32 = 0;
-                while (f < ci.fields_len) : (f += 1) {
-                    try self.checkInstanceFieldForeign(decl_arena, owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
-                }
-                return;
-            }
+        const component = self.componentNamed(ci.type_name) orelse {
+            try self.emit(code_type, .error_, ci.span, "'{s}' is not a declared component", .{owner});
+            return;
+        };
+        var f: u32 = 0;
+        while (f < ci.fields_len) : (f += 1) {
+            try self.checkComponentField(component, owner, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
         }
-        try self.emit(code_type, .error_, ci.span, "'{s}' is not a declared component", .{owner});
+    }
+
+    /// A component declaration and the arena it lives in.
+    const ComponentRef = struct { arena: *const AstArena, decl: ast_mod.ComponentDecl };
+
+    /// The component `name` names: a local symbol shadows an import, and a
+    /// symbol that is no component names none.
+    fn componentNamed(self: *TypeChecker, name: StringId) ?ComponentRef {
+        if (self.symbols.get(name)) |sym| {
+            if (sym.kind != .component) return null;
+            return .{ .arena = self.arena, .decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)] };
+        }
+        const entry = self.imported_symbols.get(name) orelse return null;
+        if (entry.kind != .component) return null;
+        const decl_arena = &self.project.?.arenas[entry.arena_index];
+        return .{ .arena = decl_arena, .decl = decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)] };
+    }
+
+    /// One instance field against `component`'s declared fields, the imported
+    /// ones matched by name across arenas.
+    fn checkComponentField(self: *TypeChecker, component: ComponentRef, owner: []const u8, field: ast_mod.StructLitField, code_field: DiagnosticCode, code_field_type: DiagnosticCode) !void {
+        if (component.arena == self.arena) {
+            try self.checkInstanceField(owner, component.decl.fields_start, component.decl.fields_len, field, code_field, code_field_type);
+        } else {
+            try self.checkInstanceFieldForeign(component.arena, owner, component.decl.fields_start, component.decl.fields_len, field, code_field, code_field_type);
+        }
     }
 
     /// Cross-arena field check for an imported component instance. The
@@ -2198,13 +2216,12 @@ pub const TypeChecker = struct {
     /// component type is unknown, E1784 if the field is absent, E1785 on a type
     /// mismatch.
     fn checkFieldOverride(self: *TypeChecker, fo: ast_mod.FieldOverride) !void {
-        const sym = self.symbols.get(fo.type_name);
-        if (sym == null or sym.?.kind != .component) {
-            try self.emit(.scene_component_type_unknown, .error_, fo.span, "'{s}' is not a declared component", .{self.arena.strings.slice(fo.type_name)});
+        const owner = self.arena.strings.slice(fo.type_name);
+        const component = self.componentNamed(fo.type_name) orelse {
+            try self.emit(.scene_component_type_unknown, .error_, fo.span, "'{s}' is not a declared component", .{owner});
             return;
-        }
-        const decl = self.arena.component_decls.items[self.arena.itemData(sym.?.item_id)];
-        try self.checkInstanceField(self.arena.strings.slice(fo.type_name), decl.fields_start, decl.fields_len, .{ .name = fo.field, .value = fo.value }, .scene_component_field_unknown, .scene_component_field_type_invalid);
+        };
+        try self.checkComponentField(component, owner, .{ .name = fo.field, .value = fo.value }, .scene_component_field_unknown, .scene_component_field_type_invalid);
     }
 
     /// E1782 helper — record `uuid_id` as seen, returning whether it was
@@ -2469,12 +2486,8 @@ pub const TypeChecker = struct {
         try self.checkPrefabRequiresAndHooks(decl);
     }
 
-    /// Whether `name` is a declared component, looked up as
-    /// `checkComponentInstance` does: a local symbol shadows an import.
     fn isComponentName(self: *TypeChecker, name: StringId) bool {
-        if (self.symbols.get(name)) |sym| return sym.kind == .component;
-        if (self.imported_symbols.get(name)) |entry| return entry.kind == .component;
-        return false;
+        return self.componentNamed(name) != null;
     }
 
     /// E1793 on a `requires` name that is no component, then each hook body.
@@ -3775,17 +3788,16 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Bind this file's `import` directives against the project exports index. For each
-    /// `ImportDecl`: - resolve the module path against `project.module_index`; a path
-    /// that names no project file is `E0103 NotAModule`. - selective `{ X }`: look X up
-    /// in the target module's exports — absent → `E0104 UnknownExport`; private →
-    /// `E0107`; else register it in `imported_symbols` under its
-    /// local name (alias if present). - module alias `as m` / bare `import a.b`: record
-    /// the alias → target binding in `imported_aliases` (D-F; qualified `m.Type`
-    /// resolution is additive, not done here). No-op in single-file mode
-    /// (`project == null`). This pass only records the bindings + emits the import
-    /// diagnostics; APPLYING the imports to `TYPE_IDENT` resolution + the cross-arena
-    /// component check runs in pass 2.
+    /// Bind this file's `import` directives against the project exports index.
+    /// For each `ImportDecl`:
+    ///   - a module path that names no project file is `E0103 NotAModule`;
+    ///   - selective `{ X }`: X absent from the target's exports is
+    ///     `E0104 UnknownExport`, private is `E0107`, else it is registered in
+    ///     `imported_symbols` under its local name;
+    ///   - module alias `as m` / bare `import a.b`: the alias → target binding
+    ///     goes to `imported_aliases`.
+    /// No-op in single-file mode (`project == null`). This pass only records the
+    /// bindings and emits the import diagnostics; pass 2 applies them.
     fn bindImports(self: *TypeChecker) !void {
         const project = self.project orelse return;
         const kinds = self.arena.items.items(.kind);
@@ -3797,16 +3809,10 @@ pub const TypeChecker = struct {
             const decl = self.arena.import_decls.items[datas[i]];
             const span = spans[i];
 
-            // Join the module-path segments ("a.b.c") and resolve to a file.
-            var path_buf: std.ArrayListUnmanaged(u8) = .empty;
-            defer path_buf.deinit(self.gpa);
-            var s: u32 = 0;
-            while (s < decl.path_len) : (s += 1) {
-                if (s != 0) try path_buf.append(self.gpa, '.');
-                try path_buf.appendSlice(self.gpa, self.arena.strings.slice(self.arena.import_path_segs.items[decl.path_start + s]));
-            }
-            const target_idx = project.module_index.get(path_buf.items) orelse {
-                try self.emit(.not_a_module, .error_, span, "import path '{s}' does not name a module in the project", .{path_buf.items});
+            const path = try importPath(self.gpa, self.arena, decl);
+            defer self.gpa.free(path);
+            const target_idx = project.module_index.get(path) orelse {
+                try self.emit(.not_a_module, .error_, span, "import path '{s}' does not name a module in the project", .{path});
                 continue;
             };
 
@@ -3822,24 +3828,45 @@ pub const TypeChecker = struct {
             }
 
             // Selective form (2 or 4): bind each item against the target exports.
-            const exports = &project.exports[target_idx];
             var j: u32 = 0;
             while (j < decl.items_len) : (j += 1) {
                 const item = self.arena.import_items.items[decl.items_start + j];
                 const item_name = self.arena.strings.slice(item.name);
-                const entry = exports.get(item_name) orelse {
-                    try self.emit(.unknown_export, .error_, span, "'{s}' is not exported by module '{s}'", .{ item_name, path_buf.items });
+                const entry = importedExport(project, self.arena, target_idx, item) orelse {
+                    try self.emit(.unknown_export, .error_, span, "'{s}' is not exported by module '{s}'", .{ item_name, path });
                     continue;
                 };
                 if (entry.visibility == .private) {
-                    // Dormant until `private` graduates.
-                    try self.emit(.import_private_item, .error_, span, "'{s}' is private to module '{s}'", .{ item_name, path_buf.items });
+                    try self.emit(.import_private_item, .error_, span, "'{s}' is private to module '{s}'", .{ item_name, path });
                     continue;
                 }
-                const local = if (item.alias != 0) item.alias else item.name;
-                try self.imported_symbols.put(self.gpa, local, entry);
+                try self.imported_symbols.put(self.gpa, importLocalName(item), entry);
             }
         }
+    }
+
+    /// The dotted module path `decl` names (`import a.b.c` → `"a.b.c"`),
+    /// `gpa`-owned.
+    pub fn importPath(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.ImportDecl) ![]u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(gpa);
+        var s: u32 = 0;
+        while (s < decl.path_len) : (s += 1) {
+            if (s != 0) try buf.append(gpa, '.');
+            try buf.appendSlice(gpa, arena.strings.slice(arena.import_path_segs.items[decl.path_start + s]));
+        }
+        return try buf.toOwnedSlice(gpa);
+    }
+
+    /// The name `item` binds in the importing module: its alias, else its own.
+    pub fn importLocalName(item: ast_mod.ImportItem) StringId {
+        return if (item.alias != 0) item.alias else item.name;
+    }
+
+    /// What `item`, imported by `arena` from the module at `target`, names in
+    /// that module's exports, whatever its visibility.
+    pub fn importedExport(project: *const ProjectContext, arena: *const AstArena, target: usize, item: ast_mod.ImportItem) ?ExportEntry {
+        return project.exports[target].get(arena.strings.slice(item.name));
     }
 
     fn registerSymbol(self: *TypeChecker, kind: SymbolKind, name: StringId, item_id: NodeId, span: SourceSpan) !void {
@@ -5227,14 +5254,9 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// The component declaration named by `sid`, or null when `sid` names no
-    /// local component.
-    ///
-    /// Through `symbols` + `component_decls`, which is the mechanism
-    /// `checkComponentInstance` already uses — a second lookup by byte
-    /// comparison would be a second answer to one question. Keyed by
-    /// `StringId` because the arena's pool INTERNS, so one name is one id and a
-    /// byte comparison would only re-derive that.
+    /// The component declaration named by `sid` among this file's own
+    /// declarations, or null: `@requires` names a component its module
+    /// declares, never one it imports.
     fn requisiteDecl(self: *TypeChecker, sid: ast_mod.StringId) ?ast_mod.ComponentDecl {
         const sym = self.symbols.get(sid) orelse return null;
         if (sym.kind != .component) return null;

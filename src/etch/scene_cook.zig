@@ -9,13 +9,14 @@
 //! job, and `World` appears nowhere below).
 //!
 //! Pipeline:
-//!   1. Parse the source → AST.
-//!   2. Register every `component`/`resource` declaration into a fresh
-//!      `Registry` via the shared `interp.compileTypeDecl` path, which takes a
-//!      bare `*Registry` so this cook needs no `World`. Unsupported field types
-//!      surface
+//!   1. Parse the project's files → ASTs, and resolve the cooked file's
+//!      imports as `etch check` resolves them.
+//!   2. Register every `component`/`resource` declaration, and every component
+//!      the file imports under its own name, into a fresh `Registry` via the
+//!      shared `interp.compileTypeDecl` path, which takes a bare `*Registry` so
+//!      this cook needs no `World`. Unsupported field types surface
 //!      `error.InvalidProgram` as a clear cook diagnostic.
-//!   3. Locate the single `scene`; reject `instance of`.
+//!   3. Locate the single `scene` (or `prefab`).
 //!   4. For each entity component-instance field and each `resources` field:
 //!      resolve against `Registry.findField`, const-eval the value, encode via
 //!      `ecs_bridge.writeValueAsBytes`. Resource `string` values are interned
@@ -40,6 +41,8 @@ const value_mod = @import("value.zig");
 // `renderStmtRunAlloc` renders an extends prefab's on_attach/on_detach
 // statement-runs to canonical Etch text (stored in the .prefab.bin hooks section).
 const descriptor = @import("descriptor.zig");
+const lexer = @import("lexer.zig");
+const project_mod = @import("project.zig");
 
 const weld_core = @import("weld_core");
 // persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
@@ -56,6 +59,8 @@ const accessor = weld_core.scene.accessor;
 const validate = weld_core.scene.validate;
 
 const AstArena = ast_mod.AstArena;
+const ProjectContext = types_mod.TypeChecker.ProjectContext;
+const ExportEntry = types_mod.TypeChecker.ExportEntry;
 const StringId = ast_mod.StringId;
 const NodeId = ast_mod.NodeId;
 const Bridge = bridge_mod.Bridge;
@@ -121,6 +126,9 @@ pub const CookError = error{
     HookRenderFailed,
     /// An extension hook, or its `requires` clause, fails the type checker.
     HookRefused,
+    /// An `import` the type checker refuses: a module the project lacks, an
+    /// item its module does not export or keeps private, or an import cycle.
+    ImportRefused,
     /// `prefab "Y" of "X"` but the base `X.prefab.bin` could not be resolved
     /// (no resolver, or the resolver returned null for the base name).
     BasePrefabMissing,
@@ -199,23 +207,63 @@ pub fn cookScene(
     base_resolver: ?BaseResolver,
     diag_out: ?*[]const u8,
 ) CookError!Cooked {
-    const parser = @import("parser.zig");
-    var pr = parser.parse(gpa, source) catch return fail(diag_out, error.ParseFailed, "Etch parse failed (allocator error)");
-    defer pr.deinit(gpa);
-    if (pr.diagnostics.len > 0) return fail(diag_out, error.ParseFailed, "Etch parse failed");
-    const ast = &pr.ast;
+    const files = [_]ProjectFile{.{ .name = "cook.scene.etch", .source = source }};
+    return cookSceneInProject(gpa, &files, 0, base_resolver, diag_out);
+}
+
+/// One source file of a multi-file project.
+pub const ProjectFile = project_mod.ProjectFile;
+
+/// Cook the `.scene.etch` at `index` in `files`, its imports resolved against
+/// the other files as `etch check` resolves them.
+pub fn cookSceneInProject(gpa: std.mem.Allocator, files: []const ProjectFile, index: usize, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!Cooked {
+    return cookInProject(gpa, files, index, base_resolver, diag_out, .scene);
+}
+
+/// Cook the `.prefab.etch` at `index` in `files`, its imports resolved against
+/// the other files as `etch check` resolves them.
+pub fn cookPrefabInProject(gpa: std.mem.Allocator, files: []const ProjectFile, index: usize, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!Cooked {
+    return cookInProject(gpa, files, index, base_resolver, diag_out, .prefab);
+}
+
+fn cookInProject(
+    gpa: std.mem.Allocator,
+    files: []const ProjectFile,
+    index: usize,
+    base_resolver: ?BaseResolver,
+    diag_out: ?*[]const u8,
+    comptime kind: enum { scene, prefab },
+) CookError!Cooked {
+    var parse_diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (parse_diags.items) |*d| d.deinit(gpa);
+        parse_diags.deinit(gpa);
+    }
+    var project = project_mod.Project.init(gpa, files, &parse_diags) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ParseError => fail(diag_out, error.ParseFailed, "Etch parse failed"),
+    };
+    defer project.deinit();
+    if (std.mem.indexOfScalar(bool, project.parse_failed, true) != null) return fail(diag_out, error.ParseFailed, "Etch parse failed");
+    if (project.has_cycle) return fail(diag_out, error.ImportRefused, "the project's imports form a cycle");
+    const ctx = project.context();
+    const ast = &project.arenas.items[index];
+    try checkImports(gpa, ast, &ctx, diag_out);
+    if (kind == .prefab) try checkHooks(gpa, ast, &ctx, diag_out);
 
     var registry = Registry.init();
     errdefer registry.deinit(gpa);
 
-    var b = Builder.init(gpa, ast, &registry);
+    var b = Builder.init(gpa, ast, &registry, &ctx, index);
     defer b.deinitScratch();
     errdefer b.arena.deinit();
 
     try b.registerDecls(diag_out);
     try b.finalizeDecls(diag_out);
-    const scene_decl = try b.findScene(diag_out);
-    const model = try b.build(scene_decl, base_resolver, diag_out);
+    const model = switch (kind) {
+        .scene => try b.build(try b.findScene(diag_out), base_resolver, diag_out),
+        .prefab => try b.buildPrefab(try b.findPrefab(diag_out), base_resolver, diag_out),
+    };
 
     // `model` owns the cook arena BY VALUE — a copy of `b.arena` — so the two
     // share one arena. Adding `errdefer model.deinit()` double-frees it; the
@@ -259,15 +307,28 @@ pub const BaseResolver = struct {
     }
 };
 
-/// Refuse an extension hook or `requires` clause the type checker refuses, so
-/// a cooked hook is one `etch check` accepts.
-fn checkHooks(gpa: std.mem.Allocator, ast: *AstArena, diag_out: ?*[]const u8) CookError!void {
+/// Refuse an `import` the type checker refuses.
+fn checkImports(gpa: std.mem.Allocator, ast: *AstArena, project: *const ProjectContext, diag_out: ?*[]const u8) CookError!void {
     var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
     defer {
         for (diags.items) |*d| d.deinit(gpa);
         diags.deinit(gpa);
     }
-    types_mod.TypeChecker.checkPrefabHooks(gpa, ast, &diags) catch |err| return switch (err) {
+    types_mod.TypeChecker.checkImports(gpa, ast, project, &diags) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+    };
+    if (diags.items.len > 0) return fail(diag_out, error.ImportRefused, "an import names a module the project lacks, or an item its module does not export or keeps private");
+}
+
+/// Refuse an extension hook or `requires` clause the type checker refuses, so
+/// a cooked hook is one `etch check` accepts.
+fn checkHooks(gpa: std.mem.Allocator, ast: *AstArena, project: *const ProjectContext, diag_out: ?*[]const u8) CookError!void {
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    types_mod.TypeChecker.checkPrefabHooks(gpa, ast, project, &diags) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
     };
     if (diags.items.len > 0) return fail(diag_out, error.HookRefused, "an extension hook or its requires clause fails the type checker");
@@ -294,27 +355,8 @@ pub fn cookPrefab(
     base_resolver: ?BaseResolver,
     diag_out: ?*[]const u8,
 ) CookError!Cooked {
-    const parser = @import("parser.zig");
-    var pr = parser.parse(gpa, source) catch return fail(diag_out, error.ParseFailed, "Etch parse failed (allocator error)");
-    defer pr.deinit(gpa);
-    if (pr.diagnostics.len > 0) return fail(diag_out, error.ParseFailed, "Etch parse failed");
-    const ast = &pr.ast;
-    try checkHooks(gpa, ast, diag_out);
-
-    var registry = Registry.init();
-    errdefer registry.deinit(gpa);
-
-    var b = Builder.init(gpa, ast, &registry);
-    defer b.deinitScratch();
-    errdefer b.arena.deinit();
-
-    try b.registerDecls(diag_out);
-    try b.finalizeDecls(diag_out);
-    const prefab_decl = try b.findPrefab(diag_out);
-    const model = try b.buildPrefab(prefab_decl, base_resolver, diag_out);
-
-    // Same shared-arena rule as `cookScene`: no `errdefer model.deinit()`.
-    return .{ .model = model, .registry = registry };
+    const files = [_]ProjectFile{.{ .name = "cook.prefab.etch", .source = source }};
+    return cookPrefabInProject(gpa, &files, 0, base_resolver, diag_out);
 }
 
 /// One in-progress entity, accumulated before archetype grouping. `comp_ids` is
@@ -346,6 +388,14 @@ const Builder = struct {
     ast: *const AstArena,
     registry: *Registry,
     arena: std.heap.ArenaAllocator,
+    project: *const ProjectContext,
+    /// `ast`'s file in `project`.
+    file_index: usize,
+    /// Each alias of an imported component → the component's own name. Keys
+    /// and values point into the project's string pools.
+    aliases: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// Each imported component registered, by its own name → its declaration.
+    imported: std.StringHashMapUnmanaged(ImportedDecl) = .empty,
 
     // Scratch (gpa-owned, freed by `deinitScratch`).
     bridge: Bridge,
@@ -372,12 +422,16 @@ const Builder = struct {
     prefab_id_table: std.ArrayListUnmanaged(u32) = .empty,
     prefab_id_map: std.AutoHashMapUnmanaged(u32, u32) = .empty,
 
-    fn init(gpa: std.mem.Allocator, ast: *const AstArena, registry: *Registry) Builder {
+    const ImportedDecl = struct { arena_index: usize, item_index: u32 };
+
+    fn init(gpa: std.mem.Allocator, ast: *const AstArena, registry: *Registry, project: *const ProjectContext, file_index: usize) Builder {
         return .{
             .gpa = gpa,
             .ast = ast,
             .registry = registry,
             .arena = std.heap.ArenaAllocator.init(gpa),
+            .project = project,
+            .file_index = file_index,
             .bridge = Bridge.init(),
         };
     }
@@ -396,6 +450,15 @@ const Builder = struct {
         self.ext_entries.deinit(self.gpa);
         self.prefab_id_table.deinit(self.gpa);
         self.prefab_id_map.deinit(self.gpa);
+        self.aliases.deinit(self.gpa);
+        self.imported.deinit(self.gpa);
+    }
+
+    /// The component a type name of this file names, by the component's own
+    /// name: an import alias spells the name it aliases.
+    fn nameOf(self: *const Builder, id: StringId) []const u8 {
+        const local = self.ast.strings.slice(id);
+        return self.aliases.get(local) orelse local;
     }
 
     fn a(self: *Builder) std.mem.Allocator {
@@ -423,6 +486,7 @@ const Builder = struct {
     }
 
     fn registerDecls(self: *Builder, diag_out: ?*[]const u8) CookError!void {
+        try self.registerImports(diag_out);
         const kinds = self.ast.items.items(.kind);
         const datas = self.ast.items.items(.data);
         var i: usize = 0;
@@ -430,6 +494,8 @@ const Builder = struct {
             switch (kinds[i]) {
                 .component_decl => {
                     const decl = self.ast.component_decls.items[datas[i]];
+                    const name = self.ast.strings.slice(decl.name);
+                    if (self.imported.contains(name)) return fail(diag_out, error.DuplicateType, "a component the file declares shares its name with an imported one");
                     // The cook resolves the mode through the SAME resolver the
                     // interpreter uses (`types.storageModeOf`). Its registry is
                     // a throwaway used for layout and size, and the on-disk
@@ -440,21 +506,80 @@ const Builder = struct {
                     const req = types_mod.requiresNamesOf(self.gpa, self.ast, decl) catch
                         return CookError.OutOfMemory;
                     defer self.gpa.free(req);
-                    _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .component, req, types_mod.storageModeOf(self.ast, decl), diag_out) catch |e| return e;
+                    // `@requires` names a component its own file declares.
+                    for (req) |r| if (self.imported.contains(r))
+                        return fail(diag_out, error.UndeclaredType, "`@requires` names a component this file imports rather than declares");
+                    _ = self.registerOne(self.ast, name, decl.fields_start, decl.fields_len, .component, req, types_mod.storageModeOf(self.ast, decl), diag_out) catch |e| return e;
                 },
                 .resource_decl => {
                     const decl = self.ast.resource_decls.items[datas[i]];
                     // `.table`: `@storage` is component-only, so a resource has
                     // no mode to read.
-                    _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .resource, &.{}, .table, diag_out) catch |e| return e;
+                    _ = self.registerOne(self.ast, self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .resource, &.{}, .table, diag_out) catch |e| return e;
                 },
                 else => {},
             }
         }
     }
 
+    /// Register each component this file imports by name, under the
+    /// component's own name.
+    fn registerImports(self: *Builder, diag_out: ?*[]const u8) CookError!void {
+        const kinds = self.ast.items.items(.kind);
+        const datas = self.ast.items.items(.data);
+        var i: usize = 0;
+        while (i < self.ast.items.len) : (i += 1) {
+            if (kinds[i] != .import_decl) continue;
+            const decl = self.ast.import_decls.items[datas[i]];
+            const path = types_mod.TypeChecker.importPath(self.gpa, self.ast, decl) catch return error.OutOfMemory;
+            defer self.gpa.free(path);
+            // `checkImports` refused an import that resolves to no module.
+            const target = self.project.module_index.get(path) orelse unreachable;
+            var j: u32 = 0;
+            while (j < decl.items_len) : (j += 1) {
+                const item = self.ast.import_items.items[decl.items_start + j];
+                const local = self.ast.strings.slice(types_mod.TypeChecker.importLocalName(item));
+                // A declaration of the file shadows an import of its name.
+                if (self.project.exports[self.file_index].contains(local)) continue;
+                const entry = types_mod.TypeChecker.importedExport(self.project, self.ast, target, item) orelse unreachable;
+                if (entry.kind != .component) continue;
+                const name = try self.registerImported(entry, diag_out);
+                if (item.alias != 0) try self.aliases.put(self.gpa, local, name);
+            }
+        }
+    }
+
+    /// Register the component `entry` names, after the requisites its own
+    /// module declares, returning the component's name.
+    fn registerImported(self: *Builder, entry: ExportEntry, diag_out: ?*[]const u8) CookError![]const u8 {
+        const arena = &self.project.arenas[entry.arena_index];
+        const decl = arena.component_decls.items[arena.itemData(entry.item_id)];
+        const name = arena.strings.slice(decl.name);
+        const key: ImportedDecl = .{ .arena_index = entry.arena_index, .item_index = entry.item_id.index };
+        if (self.imported.get(name)) |known| {
+            if (std.meta.eql(known, key)) return name;
+            return fail(diag_out, error.DuplicateType, "two imported components share one name");
+        }
+        try self.imported.put(self.gpa, name, key);
+        const req = types_mod.requiresNamesOf(self.gpa, arena, decl) catch return error.OutOfMemory;
+        defer self.gpa.free(req);
+        for (req) |r| {
+            // `@requires` names a component its own module declares.
+            const requisite = self.project.exports[entry.arena_index].get(r) orelse
+                return fail(diag_out, error.UndeclaredType, "`@requires` names a component its module does not declare");
+            switch (requisite.kind) {
+                .component => _ = try self.registerImported(requisite, diag_out),
+                .resource => return fail(diag_out, error.RequisiteIsResource, "`@requires` names a resource, which no entity carries"),
+                else => return fail(diag_out, error.UndeclaredType, "`@requires` names a component its module does not declare"),
+            }
+        }
+        _ = try self.registerOne(arena, name, decl.fields_start, decl.fields_len, .component, req, types_mod.storageModeOf(arena, decl), diag_out);
+        return name;
+    }
+
     fn registerOne(
         self: *Builder,
+        arena: *const AstArena,
         name: []const u8,
         fields_start: u32,
         fields_len: u32,
@@ -463,7 +588,7 @@ const Builder = struct {
         storage: weld_core.ecs.registry.StorageKind,
         diag_out: ?*[]const u8,
     ) CookError!ComponentId {
-        return interp.compileTypeDecl(self.gpa, self.ast, self.registry, &self.bridge, name, fields_start, fields_len, reg_kind, requires, storage) catch |e| switch (e) {
+        return interp.compileTypeDecl(self.gpa, arena, self.registry, &self.bridge, name, fields_start, fields_len, reg_kind, requires, storage) catch |e| switch (e) {
             error.InvalidProgram => fail(diag_out, error.UnsupportedFieldKind, "component/resource field has an unsupported type (only scalars, plus resource string/enum, are cookable)"),
             error.LayoutTooLarge => fail(diag_out, error.UnsupportedFieldKind, "component/resource declaration exceeds the registry's 64 KiB"),
             error.DuplicateComponent, error.SchemaChanged => fail(diag_out, error.DuplicateType, "component/resource type declared more than once"),
@@ -788,7 +913,7 @@ const Builder = struct {
         const content_version = try self.versionFromNode(pd.version, diag_out);
         const hooks = if (pd.relation == .extends) try self.buildExtendsHooks(pd, base_resolver, diag_out) else &[_]format.HookSet{};
         const requires = try self.a().alloc(u32, pd.requires_len);
-        for (requires, 0..) |*r, ri| r.* = try self.internString(self.ast.strings.slice(self.ast.prefab_requires.items[pd.requires_start + ri]));
+        for (requires, 0..) |*r, ri| r.* = try self.internString(self.nameOf(self.ast.prefab_requires.items[pd.requires_start + ri]));
 
         return .{
             .strings = try self.a().dupe([]const u8, self.strings.items),
@@ -825,7 +950,31 @@ const Builder = struct {
             else => return fail(diag_out, error.HookRenderFailed, "extension hook body could not be rendered to text"),
         };
         defer self.gpa.free(text);
-        return self.internString(text);
+        const spelled = try self.withOwnNames(text);
+        defer self.gpa.free(spelled);
+        return self.internString(spelled);
+    }
+
+    /// `text` with each import alias spelled by the name it aliases: the loader
+    /// checks and runs a hook against a program that declares the component
+    /// under that name.
+    fn withOwnNames(self: *Builder, text: []const u8) error{OutOfMemory}![]u8 {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.gpa);
+        var lx = lexer.Lexer.init(text);
+        defer lx.deinit(self.gpa);
+        var copied: usize = 0;
+        while (true) {
+            const tok = try lx.next(self.gpa);
+            if (tok.kind == .eof) break;
+            if (tok.kind != .type_ident) continue;
+            const own = self.aliases.get(text[tok.span.byte_start..tok.span.byte_end]) orelse continue;
+            try out.appendSlice(self.gpa, text[copied..tok.span.byte_start]);
+            try out.appendSlice(self.gpa, own);
+            copied = tok.span.byte_end;
+        }
+        try out.appendSlice(self.gpa, text[copied..]);
+        return out.toOwnedSlice(self.gpa);
     }
 
     /// Validate an `extends` prefab's `requires C1, C2, …`: each required component
@@ -839,7 +988,7 @@ const Builder = struct {
         const acc = try openResolvedPrefab(base_bytes, diag_out);
         var ri: u32 = 0;
         while (ri < pd.requires_len) : (ri += 1) {
-            const req = self.ast.strings.slice(self.ast.prefab_requires.items[pd.requires_start + ri]);
+            const req = self.nameOf(self.ast.prefab_requires.items[pd.requires_start + ri]);
             if (!baseHasComponent(acc, req)) return fail(diag_out, error.RequiresNotSatisfied, "`extends … requires` a component the base prefab does not declare");
         }
     }
@@ -942,7 +1091,7 @@ const Builder = struct {
         try blobs.appendSlice(self.gpa, eb.comp_blobs);
 
         for (instances) |ci| {
-            const type_name = self.ast.strings.slice(ci.type_name);
+            const type_name = self.nameOf(ci.type_name);
             const id = try self.entityComponentId(type_name, "variant entity references an undeclared component type", diag_out);
             if (indexOfId(ids.items, id)) |ci_idx| {
                 // Prefab cook (`collect_crossrefs` false) → `source_uuid_idx` is
@@ -1023,7 +1172,7 @@ const Builder = struct {
         var ids = try self.a().alloc(ComponentId, instances.len);
         var blobs = try self.a().alloc([]u8, instances.len);
         for (instances, 0..) |ci, k| {
-            const type_name = self.ast.strings.slice(ci.type_name);
+            const type_name = self.nameOf(ci.type_name);
             const id = try self.entityComponentId(type_name, "entity references an undeclared component type", diag_out);
             ids[k] = id;
             blobs[k] = try self.buildComponentBlob(id, ci, uuid_idx, diag_out);
@@ -1076,7 +1225,7 @@ const Builder = struct {
         for (members) |m| switch (m.kind) {
             .component => {
                 const ci = self.ast.component_instances.items[m.index];
-                const id = try self.entityComponentId(self.ast.strings.slice(ci.type_name), "instance component references an undeclared component type", diag_out);
+                const id = try self.entityComponentId(self.nameOf(ci.type_name), "instance component references an undeclared component type", diag_out);
                 if (indexOfId(ids.items, id)) |idx| {
                     blobs.items[idx] = try self.mergeComponentBlob(blobs.items[idx], id, ci, uuid_idx, diag_out);
                 } else {
@@ -1086,7 +1235,7 @@ const Builder = struct {
             },
             .field_override => {
                 const fo = self.ast.field_overrides.items[m.index];
-                const id = self.registry.idOf(self.ast.strings.slice(fo.type_name)) orelse return fail(diag_out, error.UndeclaredType, "instance field override references an undeclared component type");
+                const id = self.registry.idOf(self.nameOf(fo.type_name)) orelse return fail(diag_out, error.UndeclaredType, "instance field override references an undeclared component type");
                 const idx = indexOfId(ids.items, id) orelse return fail(diag_out, error.OverrideTargetMissing, "per-field override targets a component the instance does not carry");
                 const fname = self.ast.strings.slice(fo.field);
                 const fd = self.registry.findField(id, fname) orelse return fail(diag_out, error.UnknownField, "per-field override sets a field the component does not declare");
