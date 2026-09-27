@@ -1,16 +1,5 @@
-//! C0.3's shader hot reload in < 200 ms (`engine-phase-0-criteria.md`): from
-//! the write of an edited `.frag.glsl` to the watcher's `on_recompile` carrying
-//! its SPIR-V.
-//!
-//! The watcher runs with its default configuration on a private directory
-//! holding one probe, whose body alternates between two colours so every write
-//! is an edit. The first compile, from the watcher's initial scan, is not
-//! measured. Needs `glslc`. The verdict is on the maximum, the criterion
-//! bounding every reload.
-//!
-//! `--smoke` measures one reload and writes nothing. `--protocol` records that
-//! the run followed the cold-isolated protocol. Writes
-//! `bench/reports/shader_hot_reload_<date>.md`.
+//! `--smoke` measures one reload and writes no report; `--protocol` records a
+//! cold-isolated run.
 
 const std = @import("std");
 const hot_reload = @import("weld_render").shader_pipeline.hot_reload;
@@ -32,6 +21,8 @@ const probe_sources = [2][]const u8{
     \\
 };
 
+/// C0.3's bound (`engine-phase-0-criteria.md`), timed from the probe's write to
+/// its `on_recompile` carrying SPIR-V.
 const gate_ns: u64 = 200 * std.time.ns_per_ms;
 /// A recompile that has not arrived by then is reported as missing rather than
 /// waited for.

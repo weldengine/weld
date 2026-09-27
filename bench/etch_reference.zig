@@ -1,17 +1,5 @@
-//! C0.2's two time metrics (`engine-phase-0-criteria.md`), both kept by C1.6:
-//! the 500+ line reference file parsed in < 50 ms, and an interpreter hot
-//! reload in < 500 ms from the edited source to the first tick running it.
-//!
-//! A reload is re-parse, type-check, `Interpreter.compile` on the live world,
-//! then one tick; the source is already in memory, so reading the saved file is
-//! outside it. Two reloads are measured: a rule-body edit of a one-rule program,
-//! alternating between two bodies, and the reference file recompiled unchanged.
-//! The verdict is on the maximum, the criterion bounding every parse and every
-//! reload.
-//!
-//! `--smoke` runs each row once and writes nothing. `--protocol` records that
-//! the run followed the cold-isolated protocol. Writes
-//! `bench/reports/etch_reference_<date>.md`.
+//! `--smoke` runs each row once and writes no report; `--protocol` records a
+//! cold-isolated run.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");
@@ -44,6 +32,8 @@ const counter_bodies = [2][]const u8{
     \\}
 };
 
+/// C0.2's bounds (`engine-phase-0-criteria.md`). A reload is timed from the
+/// parse of a source already in memory to its first tick.
 const parse_gate_ns: u64 = 50 * std.time.ns_per_ms;
 const reload_gate_ns: u64 = 500 * std.time.ns_per_ms;
 
@@ -80,9 +70,7 @@ fn benchParse(gpa: std.mem.Allocator, io: std.Io, warmup: usize, samples: []u64)
     }
 }
 
-/// A program compiled on a world, with the parse its interpreter was built from.
-/// The interpreter binds where it first ticks, so a session is filled in place
-/// and never moved.
+/// Filled in place and never moved: its interpreter binds where it first ticks.
 const Session = struct {
     pr: weld_etch.parser.ParseResult,
     interp: Interpreter,

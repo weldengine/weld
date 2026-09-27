@@ -1,13 +1,6 @@
-//! Wayland concurrent createWindow + destroyWindow stress.
-//!
-//! Concurrent `createWindow` and `destroyWindow` on 8 threads against the
-//! Wayland backend's module-level state: the libwayland loader's once-init and
-//! `wayland.live_state`.
-//!
-//! This is the FUNCTIONAL pass. The explicit data-race check is the lefthook
-//! pre-push `-fsanitize=thread` rerun.
-//!
-//! Skipped on non-Linux runners.
+//! The state under stress is the libwayland loader's once-init and
+//! `wayland.live_state`. The data-race check is the pre-push rerun under
+//! ThreadSanitizer, `zig build test-tsan-wayland`.
 
 const std = @import("std");
 const test_env = @import("test_env");
@@ -15,9 +8,8 @@ const builtin = @import("builtin");
 const weld = @import("weld_core");
 
 const NUM_THREADS: u32 = 8;
-// Each iteration round-trips with the compositor, which a headless or nested
-// one stretches considerably; a deadlock is caught by the runner's per-test
-// deadline, which this count must stay well inside.
+// Each iteration round-trips with the compositor: this count must stay well
+// inside the runner's per-test deadline on a headless one.
 const ITERATIONS_PER_THREAD: u32 = 100;
 
 const Ctx = struct {
@@ -38,13 +30,12 @@ fn workerStress(ctx: *Ctx) void {
 }
 
 // Memory non-corruption under concurrent backend creation, not multi-backend
-// coherence, which the "one Backend per process" invariant leaves out: the
-// non-atomic `live_state` is raced between threads here, harmlessly for this
-// pattern.
+// coherence, which the "one Backend per process" invariant leaves out. The
+// global non-atomic live_state var is raced between threads here, with no
+// consequence on the tested pattern.
 test "concurrent createWindow + destroyWindow" {
     if (builtin.os.tag != .linux) return test_env.absent("a Linux host");
 
-    // Heap accounting is not what this test checks.
     const gpa = std.heap.page_allocator;
 
     // Probe first, so a missing compositor is reported as one and not as

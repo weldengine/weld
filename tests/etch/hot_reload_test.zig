@@ -1,15 +1,3 @@
-//! Interpreter hot-reload — edit a rule body → AST swap → behaviour change. Its
-//! < 500 ms is `bench/etch_reference.zig`'s.
-//!
-//! There is no in-place AST swap: the Interpreter compiles its own copy of the
-//! AST and derives its compiled tables eagerly, so a reload re-parses the edited
-//! source into a fresh AST and re-runs `Interpreter.compile` on the SAME
-//! `World`. Live world state (entities, component bytes) survives because the
-//! world is external to the interpreter and `compile` is idempotent w.r.t.
-//! already-registered components — it reuses the existing id rather than
-//! erroring `DuplicateComponent`. The reload contract is a rule-body edit with
-//! the declarations unchanged; a layout-changing reload is Phase 2+.
-
 const std = @import("std");
 const weld_etch = @import("weld_etch");
 const weld_core = @import("weld_core");
@@ -88,8 +76,6 @@ test "interpreter hot-reload: edit rule body -> AST swap -> behaviour change" {
     const v_a = readCounter(&world);
     try std.testing.expectEqual(@as(i64, 3), v_a);
 
-    // Edit to source B, re-parse, re-compile on the SAME world, then the first
-    // tick under the new rule.
     var pr_b = try weld_etch.parseSource(gpa, src_b);
     defer pr_b.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), pr_b.diagnostics.len);

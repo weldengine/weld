@@ -1,12 +1,6 @@
-//! The handshake — a full `ProtocolHello` ↔ `ProtocolHelloAck`
-//! round-trip via `IpcServer` + `IpcClient`, exercised in-process
-//! with a dedicated thread for the runtime side (the server's
-//! `acceptOne` is blocking).
-//!
-//! Each test closes its server and releases the runtime thread before
-//! joining it, so a failure before the ack ends the thread's wait and is
-//! reported instead of hanging the join. The Unix socket file is cleaned up on every scope
-//! exit via `defer forceUnlink`.
+//! Each test closes its server and releases the runtime thread before joining
+//! it, so a failure before the ack ends the thread's wait and is reported
+//! instead of hanging the join.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -31,11 +25,7 @@ const RuntimeArgs = struct {
     path: []const u8,
     capabilities: u32,
     accepted_out: *u8,
-    /// Flipped to 1 by the parent thread once `IpcServer.listen` has
-    /// returned. The runtime spins on this with a 10 ms sleep so a
-    /// rapid `connect()` does not race against an unarmed listener
-    /// (POSIX returns ECONNREFUSED on macOS when the listener has
-    /// not transitioned to LISTEN yet).
+    /// Set once the server listens: a `connect()` before that is refused.
     ready_flag: *std.atomic.Value(u8),
 };
 
@@ -87,9 +77,6 @@ test "full handshake completes" {
     defer server.deinit();
     try server.listen(path);
 
-    // Drop the starter pistol after the listener is armed. Without
-    // this the client thread can hit `connect()` before the server
-    // installs its socket — `ECONNREFUSED` on macOS.
     ready_flag.store(1, .release);
 
     try server.acceptOne();
@@ -133,12 +120,9 @@ test "version mismatch produces explicit rejection" {
 
     var hello_buf: [framing.frameSizeOf(messages.ProtocolHello)]u8 = undefined;
     var hello = try server.recvHello(&hello_buf);
-    // Simulate a mismatch by overwriting the runtime-supplied
-    // protocol version with a bogus future value. In a real
-    // scenario the field would carry the bogus value on its own.
     hello.protocol_version +%= 7;
     if (ipc.server.IpcServer.validateHello(hello)) |_| {
-        try std.testing.expect(false); // unreachable — validateHello should have failed
+        try std.testing.expect(false);
     } else |_| {
         try server.sendHelloAck(false, "protocol mismatch");
     }

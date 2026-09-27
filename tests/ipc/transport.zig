@@ -1,11 +1,6 @@
-//! Transport — `IpcSocket.listen/connect/accept/send/recv` on a real OS socket.
-//!
-//! Writing 64 KB single-threaded on an AF_UNIX SOCK_STREAM deadlocks once the
-//! kernel send buffer fills, no reader draining it, so large-payload tests spawn
-//! a reader thread that consumes bytes in parallel. The listen socket and any
-//! unix socket file are unlinked on test scope exit (`defer`).
-//!
-//! POSIX only: the tests address unix socket files.
+//! Writing 64 KB on one thread deadlocks once the kernel send buffer fills, so a
+//! large payload is drained by a reader thread. POSIX only: the tests address
+//! unix socket files.
 
 const std = @import("std");
 const builtin = @import("builtin");

@@ -1,7 +1,3 @@
-//! Shader hot-reload: the watcher compiles a probe `.frag.glsl` dropped into
-//! `assets/shaders/`. Needs `glslc` (`test_env`): without it the watcher does
-//! not start. The < 200 ms latency is `bench/shader_hot_reload.zig`'s.
-
 const std = @import("std");
 const test_env = @import("test_env");
 const hot_reload = @import("weld_render").shader_pipeline.hot_reload;

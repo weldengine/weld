@@ -1,7 +1,3 @@
-//! The header of an archived bench report (`engine-phase-0-criteria.md` § Rapport
-//! de bench): the commit measured, the machine, the build mode, and whether the
-//! run followed the cold-isolated protocol.
-
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -29,7 +25,8 @@ fn git(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) ?[]u8 {
     return null;
 }
 
-/// Writes the title and the four facts the protocol asks of every report.
+/// Writes the title and the four facts `engine-phase-0-criteria.md` § Rapport de
+/// bench asks of every archived report.
 pub fn write(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, title: []const u8, protocol: bool) !void {
     const commit = git(gpa, io, &.{ "git", "rev-parse", "HEAD" });
     defer if (commit) |c| gpa.free(c);

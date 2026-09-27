@@ -1,12 +1,3 @@
-# Lefthook configuration for the Weld engine.
-# See https://lefthook.dev/configuration/ for the reference.
-# Spec: briefs/S0-bootstrap.md, "lefthook.yml specification".
-# M0.0: `commit-msg` now invokes the Zig linter (`zig build lint-commit`)
-# instead of the shell-script fallback, and `pre-commit` adds a
-# `zig build lint` pass alongside `zig fmt --check`.
-# M0.3: `pre-push` adds a TSan rerun of the Wayland stress test
-# (Linux-only compensation for the absent TSan path in the CI matrix).
-
 pre-commit:
   parallel: true
   commands:
@@ -26,8 +17,6 @@ pre-push:
   commands:
     build:
       run: zig build
-    # --test-timeout is the only per-test deadline: without it a hung test
-    # hangs the push.
     test:
       run: zig build test --test-timeout 180s
     test-release:

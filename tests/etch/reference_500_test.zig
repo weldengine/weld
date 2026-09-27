@@ -1,20 +1,5 @@
-//! `reference_500_lines.etch` — the full-grammar integration reference.
-//!
-//! One 500+ line file mixing EVERY v0.6 construct: the Level-A foundations, the
-//! seventeen domain constructs, Level-C scene/prefab, generics and async. It is
-//! the at-scale integration proof:
-//!   • PARSE the whole file clean — its < 50 ms is `bench/etch_reference.zig`'s;
-//!   • TYPE-CHECK the whole file clean (every construct coexists in one unit);
-//!   • INTERPRET the Level-A behaviour (a dedicated `RefProbe` rule ticks the
-//!     live world — the byte-exact interp behaviour at scale).
-//!
-//! The file is NOT cooked (codegen): it carries async + generic fragments which
-//! are `UnsupportedConstruct` in codegen (the milestone-long invariant), so a
-//! whole-file cook would fail-loud. The byte-exact interp↔codegen proof and the
-//! Level-B/C codegen-compiles proof are carried by the exhaustive per-construct
-//! differential corpus (programs 01-83): 01-75 Level-A byte-exact both backends,
-//! 76-83 Level-B/C codegen-compiles + serialized-IR byte-identical. This split
-//! mirrors the established per-program world-state-vs-serialized-IR separation.
+//! The file is not cooked: its async and generic fragments are
+//! `UnsupportedConstruct` in codegen.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");

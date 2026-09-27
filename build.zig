@@ -958,11 +958,7 @@ pub fn build(b: *std.Build) void {
         // AST stable interface freeze: thirty Level-1 entry points (§10.3.1).
         // Compilation is the cross-phase invariant.
         .{ .path = "tests/etch/ast_stable_interface.zig", .etch = true, .dedicated_step = "test-ast-stable" },
-        // interpreter hot-reload: edit rule body → AST swap →
-        // behaviour change on the same live world.
         .{ .path = "tests/etch/hot_reload_test.zig", .etch = true, .dedicated_step = "test-hot-reload" },
-        // full-grammar 500+ line integration reference: parse +
-        // type-check clean + Level-A interpret.
         .{ .path = "tests/etch/reference_500_test.zig", .etch = true, .dedicated_step = "test-ref500" },
         // `@storage` consumed end to end: the mode reaches the registry, a
         // sparse component leaves the archetype signature, a rule selects on it
@@ -1099,7 +1095,6 @@ pub fn build(b: *std.Build) void {
         // GAL capture helper surface coverage (encodePpm +
         // Device.captureFrameToPPM); §13 consumer test, runs on every platform.
         .{ .path = "tests/render/capture_helper.zig", .render = true },
-        // hot-reload filewatch compiles a dropped shader.
         .{ .path = "tests/render/shader_hot_reload.zig", .render = true, .runtime_env = true },
         // vk_gen whitelist closure (variant filtering + closure
         // convergence under 20 iterations).
@@ -1109,7 +1104,6 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/vk_gen/raw_variants.zig" },
         // asset registry stale-handle (generation) acceptance.
         .{ .path = "tests/assets/handle_generation.zig", .asset_pipeline = true },
-        // async loader + lifecycle.
         .{ .path = "tests/assets/loader_async.zig", .asset_pipeline = true },
         // DEFLATE/zlib inflate known-vector acceptance.
         .{ .path = "tests/assets/deflate_vectors.zig", .asset_pipeline = true },
@@ -1246,9 +1240,7 @@ pub fn build(b: *std.Build) void {
         psnr_step.dependOn(&psnr_run.step);
     }
 
-    // The pre-push ThreadSanitizer rerun of the Wayland stress test, invoked on
-    // Linux by `lefthook.yml`. `weld_core` is instrumented too: the backend
-    // under stress lives there.
+    // `weld_core` is instrumented too: the backend under stress lives there.
     {
         const tsan_foundation = b.createModule(.{
             .root_source_file = b.path("src/foundation/root.zig"),
@@ -1416,6 +1408,12 @@ pub fn build(b: *std.Build) void {
         "tests/ipc/crash_recovery.zig",
         "tests/ipc/fuzz_short.zig",
     };
+    const child_process_module = b.createModule(.{
+        .root_source_file = b.path("tests/support/child_process.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    child_process_module.addImport("weld_core", core_module);
     for (ipc_test_paths) |p| {
         const t_mod = b.createModule(.{
             .root_source_file = b.path(p),
@@ -1430,6 +1428,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         t_mod.addImport("weld_core", core_module);
+        t_mod.addImport("child_process", child_process_module);
         const t = b.addTest(.{ .root_module = t_mod });
         const run_t = b.addRunArtifact(t);
         // `tests/ipc/crash_recovery.zig` and `tests/ipc/catalogue.zig`
@@ -1832,7 +1831,6 @@ pub fn build(b: *std.Build) void {
     );
     render_bench_step.dependOn(&render_bench_run.step);
 
-    // C0.3's shader hot reload; needs `glslc`.
     const shader_reload_bench_module = b.createModule(.{
         .root_source_file = b.path("bench/shader_hot_reload.zig"),
         .target = target,
@@ -2058,7 +2056,6 @@ pub fn build(b: *std.Build) void {
     );
     etch_bench_step.dependOn(&etch_bench_run.step);
 
-    // C0.2's reference-file parse and interpreter hot reload.
     const etch_reference_bench_module = b.createModule(.{
         .root_source_file = b.path("bench/etch_reference.zig"),
         .target = target,

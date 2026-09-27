@@ -1,7 +1,3 @@
-//! Async loader + lifecycle acceptance.
-//!
-//! The main loop ticks while a load is in flight and the load completes.
-
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");
 

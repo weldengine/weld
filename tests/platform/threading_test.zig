@@ -1,8 +1,3 @@
-//! `setAffinity` + `setPriority` smoke on spawned thread.
-//!
-//! A spawned thread completes its work after `setAffinity` and `setPriority`
-//! both return without error.
-
 const std = @import("std");
 const weld = @import("weld_core");
 const threading = weld.platform.threading;

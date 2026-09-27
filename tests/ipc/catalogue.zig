@@ -1,15 +1,3 @@
-//! The extended message catalogue, in two layers:
-//!
-//!   1. Pure framing round-trips (`encode` → `decode` parity) for every
-//!      message of the catalogue — portable, no runtime, validating the
-//!      wire format and `schema_hash` of each type.
-//!   2. End-to-end handler behaviour against the real `weld-runtime`
-//!      binary (POSIX-gated, like `crash_recovery.zig`; the SCM_RIGHTS
-//!      pivot makes the cross-process attach work on macOS too):
-//!      `SaveProject` → `ProjectSaved` (same seq_id), `LoadScene` with
-//!      an empty path → `RuntimeError` event, and `Play`/`Pause`/`Stop`
-//!      accepted without desync (an `Echo` after them still round-trips).
-
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -20,10 +8,9 @@ const messages = ipc.messages;
 const transport = ipc.transport;
 const viewport = ipc.viewport;
 const platform_process = weld_core.platform.process;
+const child_process = @import("child_process");
 
 const is_posix = builtin.os.tag == .linux or builtin.os.tag == .macos;
-
-// ----------------------------------------------- pure framing round-trips --
 
 /// Encode a message, parse its header, decode it back, and assert the
 /// bytes survive the round-trip. Exercises the wire format + schema_hash
@@ -67,18 +54,9 @@ test "catalogue messages round-trip through encode/decode" {
     try roundTrip(messages.RuntimeError, err);
 }
 
-// --------------------------------------------------- end-to-end fixtures --
-
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn shm_unlink(name: [*:0]const u8) i32;
-const timespec_t = extern struct { tv_sec: i64, tv_nsec: i64 };
-extern "c" fn nanosleep(req: *const timespec_t, rem: ?*timespec_t) c_int;
 extern "c" fn getpid() i32;
-
-fn sleepMs(ms: u64) void {
-    var ts = timespec_t{ .tv_sec = @intCast(ms / 1000), .tv_nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
-    _ = nanosleep(&ts, null);
-}
 
 /// The viewport + child process produced by `spawnRuntime`. The
 /// `IpcServer` is **not** returned — it is caller-owned and stable, so
@@ -129,23 +107,12 @@ fn spawnRuntime(
     return .{ .vp = vp, .proc = proc };
 }
 
-/// Polls of `sleepMs(10)` a runtime is given to exit before it is killed: no
-/// loaded runner reaches it, and it stays inside the runner's per-test deadline.
-const exit_polls: usize = 6_000;
-
-/// Graceful teardown: `Shutdown` → `ShutdownAck` → reap the runtime, killed
-/// once `exit_polls` have passed.
 fn teardown(server: *ipc.server.IpcServer, proc: *platform_process.Process) void {
     const sd = messages.Shutdown{};
     server.connection().sendMessage(messages.Shutdown, 0, &sd) catch {};
     var sa_buf: [framing.frameSizeOf(messages.ShutdownAck)]u8 = undefined;
     _ = server.connection().recvMessage(messages.ShutdownAck, &sa_buf) catch {};
-    var attempts: usize = 0;
-    while (attempts < exit_polls) : (attempts += 1) {
-        if (platform_process.waitNonblock(proc) catch null) |_| return;
-        sleepMs(10);
-    }
-    platform_process.kill(proc) catch {};
+    _ = child_process.waitExit(proc) catch null;
 }
 
 test "SaveProject is acked by ProjectSaved with the same seq_id" {

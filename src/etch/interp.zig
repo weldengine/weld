@@ -17322,7 +17322,6 @@ const observed_source =
     \\rule seen(entity: Entity, value: Health) {}
 ;
 
-/// Listeners on `cid`'s `on_add` list.
 fn onAddListeners(world: *World, cid: ComponentId) usize {
     return if (world.observer_registry.on_add.get(cid)) |list| list.items.len else 0;
 }

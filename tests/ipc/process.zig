@@ -1,14 +1,9 @@
-//! Process tests — `platform.process.spawnProcess` + `waitNonblock`
-//! + `isAlive` against the real `/bin/true` and `/bin/sleep` binaries
-//! (POSIX-gated). Plus `quoteArg`, the Windows command-line quoter, tested
-//! cross-platform through golden cases and a round-trip against a reference
-//! `CommandLineToArgvW` parser — so no Windows is needed to exercise it.
-
 const std = @import("std");
 const builtin = @import("builtin");
 
 const weld_core = @import("weld_core");
 const process = weld_core.platform.process;
+const child_process = @import("child_process");
 
 const is_posix = builtin.os.tag == .linux or builtin.os.tag == .macos;
 
@@ -26,22 +21,6 @@ fn sleepMs(ms: u64) void {
     _ = nanosleep(&ts, null);
 }
 
-/// Polls of `sleepMs(10)` a child is given to exit before it is killed: no
-/// loaded runner reaches it, and it stays inside the runner's per-test deadline.
-const exit_polls: usize = 6_000;
-
-/// `proc`'s exit code, or null once `exit_polls` have passed and it has been
-/// killed.
-fn waitExit(proc: *process.Process) !?i32 {
-    var attempts: usize = 0;
-    while (attempts < exit_polls) : (attempts += 1) {
-        if (try process.waitNonblock(proc)) |code| return code;
-        sleepMs(10);
-    }
-    process.kill(proc) catch {};
-    return null;
-}
-
 // `/bin/true` lives at `/usr/bin/true` on macOS (and is also at
 // `/bin/true` on Linux). `/bin/sleep` is canonical on both.
 const true_path = if (builtin.os.tag == .macos) "/usr/bin/true" else "/bin/true";
@@ -53,7 +32,7 @@ test "spawn true(1) and reap with waitNonblock returns exit 0" {
     const argv = [_][]const u8{true_path};
 
     var proc = try process.spawnProcess(gpa, true_path, &argv);
-    const code = try waitExit(&proc) orelse return error.ChildNeverExited;
+    const code = try child_process.waitExit(&proc) orelse return error.ChildNeverExited;
     try std.testing.expectEqual(@as(i32, 0), code);
 }
 
@@ -76,8 +55,8 @@ test "spawn-then-kill terminates a long-running child" {
     if (!is_posix) return error.SkipZigTest;
 
     const gpa = std.testing.allocator;
-    // Longer than `exit_polls` allow, so a kill that did nothing cannot pass
-    // for the child's own exit.
+    // Longer than `child_process.exit_polls` allow, so a kill that did nothing
+    // cannot pass for the child's own exit.
     const argv = [_][]const u8{ "/bin/sleep", "600" };
 
     var proc = try process.spawnProcess(gpa, "/bin/sleep", &argv);
@@ -86,26 +65,19 @@ test "spawn-then-kill terminates a long-running child" {
     // the spawn returning before the child is reapable on macOS.
     sleepMs(20);
     try process.kill(&proc);
-    _ = try waitExit(&proc) orelse return error.ChildNeverDied;
+    _ = try child_process.waitExit(&proc) orelse return error.ChildNeverDied;
 }
 
 test "spawnProcess runs a Windows binary and reaps exit 0" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    // Anti-regression: the first real Windows run hit `CreateProcessW` →
-    // `error.SpawnFailed`. The path is exercised with a binary guaranteed
-    // present, `cmd.exe /c exit 0`.
     const gpa = std.testing.allocator;
     const exe = "C:\\Windows\\System32\\cmd.exe";
     const argv = [_][]const u8{ exe, "/c", "exit 0" };
 
     var proc = try process.spawnProcess(gpa, exe, &argv);
-    const code = try waitExit(&proc) orelse return error.ChildNeverExited;
+    const code = try child_process.waitExit(&proc) orelse return error.ChildNeverExited;
     try std.testing.expectEqual(@as(i32, 0), code);
 }
-
-// ------------------------------------------------------- quoteArg tests --
-//
-// `quoteArg` is pure and cross-platform, so these run on every host.
 
 /// Reference re-implementation of `CommandLineToArgvW`, UTF-8 (the
 /// metacharacters are all ASCII). Used to prove `quoteArg` output parses
