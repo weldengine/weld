@@ -32,17 +32,24 @@ fn deinitDiags(gpa: std.mem.Allocator, diags: *std.ArrayListUnmanaged(etch.Diagn
     diags.deinit(gpa);
 }
 
+/// `diags` holds `n` diagnostics, every one `code`.
+fn expectOnly(diags: []const etch.Diagnostic, code: DiagnosticCode, n: usize) !void {
+    try std.testing.expectEqual(n, diags.len);
+    try std.testing.expectEqual(n, countCode(diags, code));
+}
+
 test "E1786 cross-file prefab ref" {
     const gpa = std.testing.allocator;
     const files = [_]etch.ProjectFile{
-        .{ .name = "prefabs.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "markers.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "wall_torch.prefab.etch", .source =
+        \\import markers { Marker }
         \\prefab "WallTorch" {
         \\  entity "torch" { Marker { id: 1 } }
         \\}
         },
-        .{ .name = "level.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "level.scene.etch", .source =
+        \\import markers { Marker }
         \\scene "Level" {
         \\  instance of "WallTorch" "t1" { Marker { id: 2 } }
         \\  instance of "Ghost" "t2" { Marker { id: 3 } }
@@ -54,23 +61,27 @@ test "E1786 cross-file prefab ref" {
     try validate(gpa, &files, &diags);
     // `WallTorch` resolves across files (no error); `Ghost` exists nowhere →
     // exactly one cross-file E1786.
-    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .prefab_ref_not_found));
+    try expectOnly(diags.items, .prefab_ref_not_found, 1);
 }
 
 test "E1791 cross-file prefab base" {
     const gpa = std.testing.allocator;
     const files = [_]etch.ProjectFile{
-        .{ .name = "base.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "markers.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "base.prefab.etch", .source =
+        \\import markers { Marker }
         \\prefab "Base" {
         \\  entity "e" { Marker { id: 0 } }
         \\}
         },
-        .{ .name = "derived.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "derived.prefab.etch", .source =
+        \\import markers { Marker }
         \\prefab "Derived" of "Base" {
         \\  entity "e" { Marker { id: 1 } }
         \\}
+        },
+        .{ .name = "orphan.prefab.etch", .source =
+        \\import markers { Marker }
         \\prefab "Orphan" of "MissingBase" {
         \\  entity "e" { Marker { id: 2 } }
         \\}
@@ -81,14 +92,15 @@ test "E1791 cross-file prefab base" {
     try validate(gpa, &files, &diags);
     // `Derived of Base` resolves across files; `Orphan of MissingBase` does not
     // → exactly one cross-file E1791.
-    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .prefab_base_not_found));
+    try expectOnly(diags.items, .prefab_base_not_found, 1);
 }
 
 test "E1782 cross-scene duplicate uuid" {
     const gpa = std.testing.allocator;
     const files = [_]etch.ProjectFile{
-        .{ .name = "scene_a.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "markers.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "scene_a.scene.etch", .source =
+        \\import markers { Marker }
         \\scene "SceneA" {
         \\  entity "e1" {
         \\    uuid: "11111111-1111-1111-1111-111111111111"
@@ -96,8 +108,8 @@ test "E1782 cross-scene duplicate uuid" {
         \\  }
         \\}
         },
-        .{ .name = "scene_b.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "scene_b.scene.etch", .source =
+        \\import markers { Marker }
         \\scene "SceneB" {
         \\  entity "e2" {
         \\    uuid: "11111111-1111-1111-1111-111111111111"
@@ -110,7 +122,7 @@ test "E1782 cross-scene duplicate uuid" {
     defer deinitDiags(gpa, &diags);
     try validate(gpa, &files, &diags);
     // Same UUID in two scenes across files → exactly one cross-scene E1782.
-    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .duplicate_uuid));
+    try expectOnly(diags.items, .duplicate_uuid, 1);
 }
 
 test "cross-file project green path resolves clean" {
@@ -145,12 +157,15 @@ test "cross-file project green path resolves clean" {
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 }
 
+/// The E0858 count of `files`, which carry no other diagnostic.
 fn e0858Count(files: []const etch.ProjectFile) !usize {
     const gpa = std.testing.allocator;
     var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
     defer deinitDiags(gpa, &diags);
     try validate(gpa, files, &diags);
-    return countCode(diags.items, .typed_extension_mismatch);
+    const n = countCode(diags.items, .typed_extension_mismatch);
+    try std.testing.expectEqual(n, diags.items.len);
+    return n;
 }
 
 test "E0858 on a type declared in a scene file" {
