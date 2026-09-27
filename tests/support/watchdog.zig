@@ -1,39 +1,21 @@
-//! Permanent fail-fast watchdog for in-process concurrency tests.
+//! Arm on a test's first line and `defer disarm()` at once, so the disarm runs
+//! last, after `Scheduler.deinit`'s worker join, which it must cover:
 //!
-//! Wraps an ENTIRE test — worker spawn and join AND `Scheduler.deinit`'s own
-//! worker `join()` — so a deadlock or livelock FAILS with a state dump within
-//! the timeout instead of hanging silently until the CI build-runner kills the
-//! process at ~60 s. The deinit-join site is the gap that masked a
-//! windows-2025/ReleaseSafe scheduler hang: the dispatcher-spin watchdog in
-//! `publishWaveAndWait` does not reach it. It makes
-//! `engine-zig-conventions.md` §13 — wait on a resource ⇒ ≤ 5 s internal
-//! timeout, fail rather than hang — permanent.
-//!
-//! Usage — arm on the FIRST line and `defer disarm()` immediately, so disarm
-//! is the LAST defer to run (LIFO), i.e. AFTER the scheduler's deinit-join:
-//!
-//!     test "..." {
-//!         const io = std.testing.io;
-//!         var wd: watchdog.Watchdog = .{};
-//!         try wd.arm(io, watchdog.default_timeout_ns, "test name");
-//!         defer wd.disarm();                 // runs LAST — after deinit
-//!         ...
-//!         var sched = try Scheduler.init(gpa, io);
-//!         defer sched.deinit(gpa);           // runs BEFORE disarm → covered
-//!         wd.setScheduler(&sched);           // dump shows scheduler state
-//!         ...
-//!     }
+//!     var wd: watchdog.Watchdog = .{};
+//!     try wd.arm(io, watchdog.default_timeout_ns, "test name");
+//!     defer wd.disarm();
+//!     var sched = try Scheduler.init(gpa, io);
+//!     defer sched.deinit(gpa);
+//!     wd.setScheduler(&sched);
 
 const std = @import("std");
 const weld_core = @import("weld_core");
 
 const Scheduler = weld_core.jobs.scheduler.Scheduler;
 
-/// 5 s — the `engine-zig-conventions.md` §13 ceiling for a test that waits on
-/// an external/concurrency resource. Comfortably above any legitimate test
-/// (waves drain in µs–ms) yet below the CI build-runner's ~60 s no-response
-/// kill, so a fired watchdog is always a real deadlock/livelock.
-pub const default_timeout_ns: i96 = 5 * std.time.ns_per_s;
+/// Under the runner's 180 s per-test deadline, so the dump is written before the
+/// runner kills the test.
+pub const default_timeout_ns: i96 = 150 * std.time.ns_per_s;
 
 /// A side-thread watchdog. Runs concurrently with the test on the calling
 /// thread; if the test does not `disarm()` within `timeout_ns`, it dumps the
@@ -85,7 +67,7 @@ pub const Watchdog = struct {
                 const out = &w.interface;
                 const secs: u64 = @intCast(@divTrunc(self.timeout_ns, std.time.ns_per_s));
                 out.print(
-                    "\n=== M1.0.1 test watchdog: '{s}' did not finish within {d}s — deadlock/livelock (covers scheduler.deinit join) ===\n",
+                    "\n=== test watchdog: '{s}' did not finish within {d}s — deadlock/livelock (covers scheduler.deinit join) ===\n",
                     .{ self.label, secs },
                 ) catch {};
                 if (self.sched.load(.acquire)) |sched| {

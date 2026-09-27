@@ -1118,10 +1118,6 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/assets/wav_roundtrip.zig", .asset_pipeline = true },
         .{ .path = "tests/assets/cache_diff.zig", .asset_pipeline = true },
     };
-    // The shared fail-fast watchdog for in-process concurrency tests. It covers
-    // the `Scheduler.deinit`-join site that masked a windows-2025/ReleaseSafe
-    // hang. Imported by tests as `@import("test_watchdog")` and compiled only
-    // into the specs that use it.
     const watchdog_module = b.createModule(.{
         .root_source_file = b.path("tests/support/watchdog.zig"),
         .target = target,
