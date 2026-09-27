@@ -13,48 +13,39 @@ const weld = @import("weld_core");
 const window_api = weld.platform.window;
 
 const NUM_THREADS: u32 = 8;
-// The target is 1000 iterations per thread, 8000 windows in all. CI
-// windows-2025 runners cannot create and destroy windows fast enough to reach
-// that within a 5 s budget — the observed failure was exit code 3, the
-// bail-on-timeout leaving worker threads running and tripping
-// `std.testing.allocator`'s leak detection at exit — so it is 100 per thread,
-// 800 windows, matching `wayland_thread_safety_test`'s cadence. The timeout is
-// 30 s to absorb CI variance: the assertions still mean what they meant, and a
-// real deadlock would never finish inside it.
+// A deadlock is caught by the runner's per-test deadline (`--test-timeout` in
+// CI), which this count must stay well inside on a loaded windows runner.
 const ITERATIONS_PER_THREAD: u32 = 100;
-const TIMEOUT_MS: u64 = 30000;
 
 const Ctx = struct {
     iterations: u32,
-    done: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     err_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     gpa: std.mem.Allocator,
 };
+
+/// `ok`, or the failure named on stderr, which a release build otherwise
+/// leaves empty.
+fn check(ok: bool, comptime what: []const u8, args: anytype) !void {
+    if (ok) return;
+    std.debug.print(what ++ "\n", args);
+    return error.TestUnexpectedResult;
+}
 
 fn workerStress(ctx: *Ctx) void {
     var i: u32 = 0;
     while (i < ctx.iterations) : (i += 1) {
         var w = window_api.Window.create(ctx.gpa, .{}) catch {
             _ = ctx.err_count.fetchAdd(1, .release);
-            ctx.done.store(1, .release);
             return;
         };
         w.destroy();
     }
-    ctx.done.store(1, .release);
 }
 
 test "concurrent createWindow + destroyWindow" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    // Use page_allocator instead of std.testing.allocator for this
-    // stress test: the timeout-bail path (error.Win32ThreadSafetyTimeout)
-    // returns from the test while worker threads are still running, and
-    // testing.allocator would then false-positive a leak on the worker-
-    // thread allocations that haven't completed their destroy cycle yet.
-    // The gate is "no deadlock + class_atom stable +
-    // class_open_count returns to 0" — heap accounting is not part of
-    // the contract here.
+    // Heap accounting is not what this test checks.
     const gpa = std.heap.page_allocator;
 
     var ctxs: [NUM_THREADS]Ctx = undefined;
@@ -71,7 +62,7 @@ test "concurrent createWindow + destroyWindow" {
         warmup.destroy();
     }
     const atom_before = window_api.classAtom();
-    try std.testing.expect(atom_before != 0);
+    try check(atom_before != 0, "the class atom is 0 after the warm-up", .{});
 
     var i: u32 = 0;
     while (i < NUM_THREADS) : (i += 1) {
@@ -82,25 +73,10 @@ test "concurrent createWindow + destroyWindow" {
         threads[i] = try std.Thread.spawn(.{}, workerStress, .{&ctxs[i]});
     }
 
-    const start_ns = weld.platform.time.nowNanos();
-    while (true) {
-        var all_done = true;
-        for (&ctxs) |*c| {
-            if (c.done.load(.acquire) == 0) {
-                all_done = false;
-                break;
-            }
-        }
-        if (all_done) break;
-        const elapsed_ms = (weld.platform.time.nowNanos() - start_ns) / 1_000_000;
-        if (elapsed_ms >= TIMEOUT_MS) return error.Win32ThreadSafetyTimeout;
-        std.Thread.yield() catch {};
-    }
-
     for (&threads) |*t| t.join();
 
     const atom_after = window_api.classAtom();
-    try std.testing.expect(atom_after != 0);
+    try check(atom_after != 0, "the class atom is 0 after the stress", .{});
     try std.testing.expectEqual(atom_before, atom_after);
     try std.testing.expectEqual(@as(u32, 0), window_api.classOpenCount());
 
@@ -119,5 +95,5 @@ test "concurrent createWindow + destroyWindow" {
     var total_errs: u32 = 0;
     for (&ctxs) |*c| total_errs += c.err_count.load(.acquire);
     const total_attempts: u32 = NUM_THREADS * ITERATIONS_PER_THREAD;
-    try std.testing.expect(total_errs * 20 < total_attempts); // < 5%
+    try check(total_errs * 20 < total_attempts, "{d} of {d} window creates failed", .{ total_errs, total_attempts });
 }

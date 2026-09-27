@@ -125,8 +125,9 @@ jobs:
         run: |
           set -euo pipefail
           s=$SECONDS
-          # --test-timeout raises Zig's 60 s response floor: on windows a compiler spawned beside a
-          # test can inherit its pipe and hold the end of stream until that compiler exits.
+          # --test-timeout gives each test a deadline, the only one: without it a hung test hangs
+          # the build. It also raises Zig's 60 s response floor: on windows a compiler spawned
+          # beside a test can inherit its pipe and hold the end of stream until that compiler exits.
           zig build test --summary all --test-timeout 180s -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }} 2>&1 | tee test-out.txt
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then exit "$rc"; fi
