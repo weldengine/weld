@@ -1,5 +1,5 @@
-//! Interpreter hot-reload — edit a rule body → AST swap → behaviour change,
-//! measured under 500 ms.
+//! Interpreter hot-reload — edit a rule body → AST swap → behaviour change. Its
+//! < 500 ms is `bench/etch_reference.zig`'s.
 //!
 //! There is no in-place AST swap: the Interpreter compiles its own copy of the
 //! AST and derives its compiled tables eagerly, so a reload re-parses the edited
@@ -19,7 +19,6 @@ const EntityId = weld_core.ecs.entity.EntityId;
 const ComponentId = weld_core.ecs.registry.ComponentId;
 const Interpreter = weld_etch.Interpreter;
 const Diagnostic = weld_etch.Diagnostic;
-const time = weld_core.platform.time;
 
 // Source A and source B differ ONLY in the rule body (+= 1 vs += 5); the
 // `Counter` declaration is byte-identical so the reload preserves its id.
@@ -66,7 +65,7 @@ fn readCounter(world: *World) i64 {
     return v;
 }
 
-test "interpreter hot-reload: edit rule body -> AST swap -> behaviour change < 500 ms" {
+test "interpreter hot-reload: edit rule body -> AST swap -> behaviour change" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -89,9 +88,8 @@ test "interpreter hot-reload: edit rule body -> AST swap -> behaviour change < 5
     const v_a = readCounter(&world);
     try std.testing.expectEqual(@as(i64, 3), v_a);
 
-    // The hot-reload critical section: edit to source B, re-parse, re-compile on
-    // the SAME world, then the first tick under the new rule.
-    const t0 = time.nowNanos();
+    // Edit to source B, re-parse, re-compile on the SAME world, then the first
+    // tick under the new rule.
     var pr_b = try weld_etch.parseSource(gpa, src_b);
     defer pr_b.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), pr_b.diagnostics.len);
@@ -100,19 +98,12 @@ test "interpreter hot-reload: edit rule body -> AST swap -> behaviour change < 5
     var interp_b = try Interpreter.compile(gpa, &pr_b.ast, &world);
     defer interp_b.deinit();
     _ = try interp_b.runFor(&world, 1);
-    const elapsed_ns = time.nowNanos() - t0;
 
     // The behaviour changed on the SAME entity of the SAME live world: the new
     // rule adds 5, so 3 -> 8 and the old += 1 rule no longer runs.
     const v_b = readCounter(&world);
     try std.testing.expectEqual(@as(i64, 8), v_b);
     try std.testing.expect(v_b != v_a);
-
-    std.debug.print(
-        "[hot-reload] edit -> AST swap -> first new tick: {d} ns ({d:.3} ms)\n",
-        .{ elapsed_ns, @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms },
-    );
-    try std.testing.expect(elapsed_ns < 500 * std.time.ns_per_ms);
 }
 
 /// Source A's `Counter`, one more field. Same name, different layout.

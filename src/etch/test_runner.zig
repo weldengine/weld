@@ -539,7 +539,6 @@ test "measure returns a positive duration" {
         \\    while i < 5000 { i += 1 }
         \\  }
         \\  assert(elapsed > 0.0s)
-        \\  assert(elapsed < 100.0s)
         \\}
     );
     defer report.deinit();

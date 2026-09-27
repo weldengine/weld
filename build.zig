@@ -959,10 +959,10 @@ pub fn build(b: *std.Build) void {
         // Compilation is the cross-phase invariant.
         .{ .path = "tests/etch/ast_stable_interface.zig", .etch = true, .dedicated_step = "test-ast-stable" },
         // interpreter hot-reload: edit rule body → AST swap →
-        // behaviour change on the same live world, measured < 500 ms.
+        // behaviour change on the same live world.
         .{ .path = "tests/etch/hot_reload_test.zig", .etch = true, .dedicated_step = "test-hot-reload" },
-        // full-grammar 500+ line integration reference: parse
-        // < 50 ms + type-check clean + Level-A interpret.
+        // full-grammar 500+ line integration reference: parse +
+        // type-check clean + Level-A interpret.
         .{ .path = "tests/etch/reference_500_test.zig", .etch = true, .dedicated_step = "test-ref500" },
         // `@storage` consumed end to end: the mode reaches the registry, a
         // sparse component leaves the archetype signature, a rule selects on it
@@ -1832,6 +1832,27 @@ pub fn build(b: *std.Build) void {
     );
     render_bench_step.dependOn(&render_bench_run.step);
 
+    // C0.3's shader hot reload; needs `glslc`.
+    const shader_reload_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/shader_hot_reload.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    shader_reload_bench_module.addImport("weld_render", render_module);
+    const shader_reload_bench_exe = b.addExecutable(.{
+        .name = "shader-hot-reload-bench",
+        .root_module = shader_reload_bench_module,
+    });
+    b.installArtifact(shader_reload_bench_exe);
+    const shader_reload_bench_run = b.addRunArtifact(shader_reload_bench_exe);
+    shader_reload_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| shader_reload_bench_run.addArgs(args);
+    const shader_reload_bench_step = b.step(
+        "bench-shader-hot-reload",
+        "Run the shader hot-reload bench (writes bench/reports/shader_hot_reload_<date>.md)",
+    );
+    shader_reload_bench_step.dependOn(&shader_reload_bench_run.step);
+
     // ------------------------------------------- adler32 baseline bench --
     //
     // Inaugural foundation/simd kernel throughput baseline. No parity target
@@ -2036,6 +2057,31 @@ pub fn build(b: *std.Build) void {
         "Run the Etch parse bench (pass `-- --smoke` for a CI sanity run)",
     );
     etch_bench_step.dependOn(&etch_bench_run.step);
+
+    // C0.2's reference-file parse and interpreter hot reload.
+    const etch_reference_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/etch_reference.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    etch_reference_bench_module.addImport("weld_etch", etch_module);
+    etch_reference_bench_module.addImport("weld_core", core_module);
+    etch_reference_bench_module.addAnonymousImport("reference_500_lines", .{
+        .root_source_file = b.path("tests/etch/reference_500_lines.etch"),
+    });
+    const etch_reference_bench_exe = b.addExecutable(.{
+        .name = "etch-reference-bench",
+        .root_module = etch_reference_bench_module,
+    });
+    b.installArtifact(etch_reference_bench_exe);
+    const etch_reference_bench_run = b.addRunArtifact(etch_reference_bench_exe);
+    etch_reference_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| etch_reference_bench_run.addArgs(args);
+    const etch_reference_bench_step = b.step(
+        "bench-etch-reference",
+        "Run the reference-file parse and hot-reload bench (writes bench/reports/etch_reference_<date>.md)",
+    );
+    etch_reference_bench_step.dependOn(&etch_reference_bench_run.step);
 
     // --------------------------------------- Etch → Zig codegen tool ---
     //
