@@ -130,6 +130,8 @@ pub const CookError = error{
     /// An `import` the type checker refuses: a module the project lacks, an
     /// item its module does not export or keeps private, or an import cycle.
     ImportRefused,
+    /// The file holds what its typed extension refuses (E0858).
+    TypedExtensionMismatch,
     /// `prefab "Y" of "X"` but the base `X.prefab.bin` could not be resolved
     /// (no resolver, or the resolver returned null for the base name).
     BasePrefabMissing,
@@ -208,12 +210,16 @@ pub fn cookScene(
     base_resolver: ?BaseResolver,
     diag_out: ?*[]const u8,
 ) CookError!Cooked {
-    const files = [_]ProjectFile{.{ .name = "cook.scene.etch", .source = source }};
+    const files = [_]ProjectFile{.{ .name = source_name, .source = source }};
     return cookSceneInProject(gpa, &files, 0, base_resolver, diag_out);
 }
 
 /// One source file of a multi-file project.
 pub const ProjectFile = project_mod.ProjectFile;
+
+/// The name of a source cooked without a path: no `.etch` suffix, so, like a
+/// source checked without a path, it is judged on no typed extension.
+const source_name = "cook";
 
 /// Cook the `.scene.etch` at `index` in `files`, its imports resolved against
 /// the other files as `etch check` resolves them.
@@ -249,6 +255,7 @@ fn cookInProject(
     if (project.has_cycle) return fail(diag_out, error.ImportRefused, "the project's imports form a cycle");
     const ctx = project.context();
     const ast = &project.arenas.items[index];
+    try checkTypedExtension(gpa, ast, diag_out);
     var scope = try resolveScope(gpa, ast, &ctx, diag_out);
     defer scope.deinit(gpa);
     if (kind == .prefab) try checkHooks(gpa, ast, &ctx, diag_out);
@@ -309,6 +316,19 @@ pub const BaseResolver = struct {
     }
 };
 
+/// Refuse a file E0858 refuses.
+fn checkTypedExtension(gpa: std.mem.Allocator, ast: *AstArena, diag_out: ?*[]const u8) CookError!void {
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    types_mod.TypeChecker.checkTypedExtensionOf(gpa, ast, &diags) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+    };
+    if (diags.items.len > 0) return fail(diag_out, error.TypedExtensionMismatch, "the file holds a construct its typed extension refuses");
+}
+
 /// The file's names as the type checker resolves them, refusing an `import` it
 /// refuses.
 fn resolveScope(gpa: std.mem.Allocator, ast: *AstArena, project: *const ProjectContext, diag_out: ?*[]const u8) CookError!CookScope {
@@ -360,7 +380,7 @@ pub fn cookPrefab(
     base_resolver: ?BaseResolver,
     diag_out: ?*[]const u8,
 ) CookError!Cooked {
-    const files = [_]ProjectFile{.{ .name = "cook.prefab.etch", .source = source }};
+    const files = [_]ProjectFile{.{ .name = source_name, .source = source }};
     return cookPrefabInProject(gpa, &files, 0, base_resolver, diag_out);
 }
 

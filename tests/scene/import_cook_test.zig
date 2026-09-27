@@ -273,23 +273,23 @@ test "an instance override of an imported component passes etch check and cooks"
 
 test "an import of a module the project lacks refuses the cook" {
     const files = [_]ProjectFile{
+        .{ .name = "src/arms.etch", .source = "component Weapon { damage: i32 = 0 }" },
         .{ .name = "src/goblin.prefab.etch", .source =
         \\import ghost { Health }
-        \\component Weapon { damage: i32 = 0 }
+        \\import arms { Weapon }
         \\prefab "Goblin" {
         \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Weapon { damage: 3 } }
         \\}
         },
     };
-    try expectPrefabRefused(error.ImportRefused, &files, 0);
+    try expectPrefabRefused(error.ImportRefused, &files, 1);
 }
 
 test "an import of an item its module does not export refuses the cook" {
     const files = [_]ProjectFile{
         .{ .name = "src/combat.etch", .source = combat },
         .{ .name = "src/goblin.prefab.etch", .source =
-        \\import combat { Armor }
-        \\component Weapon { damage: i32 = 0 }
+        \\import combat { Armor, Weapon }
         \\prefab "Goblin" {
         \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Weapon { damage: 3 } }
         \\}
@@ -300,10 +300,9 @@ test "an import of an item its module does not export refuses the cook" {
 
 test "an import of a private item refuses the cook" {
     const files = [_]ProjectFile{
-        .{ .name = "src/combat.etch", .source = "private component Secret { v: i32 = 0 }" },
+        .{ .name = "src/combat.etch", .source = "private component Secret { v: i32 = 0 }\ncomponent Weapon { damage: i32 = 0 }" },
         .{ .name = "src/goblin.prefab.etch", .source =
-        \\import combat { Secret }
-        \\component Weapon { damage: i32 = 0 }
+        \\import combat { Secret, Weapon }
         \\prefab "Goblin" {
         \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Weapon { damage: 3 } }
         \\}
@@ -312,64 +311,29 @@ test "an import of a private item refuses the cook" {
     try expectPrefabRefused(error.ImportRefused, &files, 1);
 }
 
-test "a local declaration shadows an import of its name, as in etch check" {
-    const gpa = std.testing.allocator;
-    const local =
+test "a .prefab.etch declaring a component refuses the cook, as E0858 refuses it" {
+    const files = [_]ProjectFile{.{ .name = "src/goblin.prefab.etch", .source =
         \\component Health { hp: i32 = 7 }
         \\prefab "Goblin" {
         \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Health { hp: 3 } }
         \\}
-    ;
-    const files = [_]ProjectFile{
-        .{ .name = "src/combat.etch", .source = combat },
-        .{ .name = "src/goblin.prefab.etch", .source = "import combat { Health }\n" ++ local },
-    };
+    }};
     try expectCheckReports(&files, .typed_extension_mismatch);
-    const imported = try prefabBytes(&files, 1, null);
-    defer gpa.free(imported);
-    const declared = try inlinePrefabBytes(local, null);
-    defer gpa.free(declared);
-    try std.testing.expectEqualSlices(u8, declared, imported);
+    try expectPrefabRefused(error.TypedExtensionMismatch, &files, 0);
 }
 
-test "an alias naming a component the file also declares refuses the cook" {
+test "a scene in a plain .etch file refuses the cook, as E0858 refuses it" {
     const files = [_]ProjectFile{
         .{ .name = "src/combat.etch", .source = combat },
-        .{ .name = "src/goblin.prefab.etch", .source =
-        \\import combat { Health as HP }
-        \\component Health { hp: i32 = 7 }
-        \\prefab "Goblin" {
-        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" HP { current: 5 } }
-        \\}
-        },
-    };
-    try expectCheckReports(&files, .duplicate_symbol);
-    try expectPrefabRefused(error.DuplicateType, &files, 1);
-}
-
-test "a requisite the file imports rather than declares refuses the cook, as it fails etch check" {
-    const gpa = std.testing.allocator;
-    const files = [_]ProjectFile{
-        .{ .name = "src/combat.etch", .source = combat },
-        .{ .name = "src/goblin.prefab.etch", .source =
+        .{ .name = "src/level.etch", .source =
         \\import combat { Health }
-        \\@requires(Health)
-        \\component Tag { t: i32 = 0 }
-        \\prefab "Goblin" {
-        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Tag { t: 1 } }
+        \\scene "Level" {
+        \\  entity "npc" { uuid: "00000000-0000-0000-0000-000000000002" Health { max: 40 } }
         \\}
         },
     };
-    var diags: std.ArrayListUnmanaged(weld_etch.Diagnostic) = .empty;
-    defer {
-        for (diags.items) |*d| d.deinit(gpa);
-        diags.deinit(gpa);
-    }
-    try weld_etch.validateProject(gpa, &files, &diags);
-    try std.testing.expectEqual(@as(usize, 2), diags.items.len);
-    try expectCheckReports(&files, .unknown_requisite);
     try expectCheckReports(&files, .typed_extension_mismatch);
-    try expectPrefabRefused(error.UndeclaredType, &files, 1);
+    try std.testing.expectError(error.TypedExtensionMismatch, scene_cook.cookSceneInProject(std.testing.allocator, &files, 1, null, null));
 }
 
 test "an import cycle in the project refuses the cook, as it fails etch check" {

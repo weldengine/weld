@@ -936,6 +936,18 @@ pub const TypeChecker = struct {
         }
     };
 
+    /// What E0858 refuses in `arena`, reported into `diagnostics`.
+    pub fn checkTypedExtensionOf(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+        var tc: TypeChecker = .{
+            .gpa = gpa,
+            .arena = arena,
+            .diagnostics = diagnostics,
+            .project = null,
+        };
+        defer tc.deinit();
+        try tc.checkTypedExtension();
+    }
+
     /// `arena`'s scope resolved against `project`; what `check` refuses on an
     /// `import` is reported into `diagnostics`.
     pub fn cookScope(gpa: std.mem.Allocator, arena: *AstArena, project: *const ProjectContext, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !CookScope {
