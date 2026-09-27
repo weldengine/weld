@@ -2271,7 +2271,7 @@ pub const Interpreter = struct {
         // Apply deferred structural mutations (spawn/despawn/add/remove) last, so
         // any extension hook's structural change (enqueued just above) drains in
         // the same boundary, with observers firing per op.
-        try self.flushStructural(world);
+        try self.flushStructural(world, report);
         // Every invocation of the tick has ended, async drives included, which
         // never reset the arena.
         if (!self.suppress_body_store_resets) self.drainDeferredDecrefs();
@@ -5621,14 +5621,21 @@ pub const Interpreter = struct {
     /// add-on-present → `on_replaced`; add → `on_add`; remove → `on_remove`).
     /// Drains until empty: an observer body may itself enqueue more structural
     /// commands (routed back to the same buffer), and those apply in a later
-    /// round of this same boundary. Never runs mid-`iterateArchetype`.
-    fn flushStructural(self: *Interpreter, world: *World) !void {
+    /// round of this same boundary. Never runs mid-`iterateArchetype`. A command
+    /// on a dead entity is a no-op, as a stale tag is; any other refusal counts
+    /// as a runtime error of the tick and the batch goes on; only an allocation
+    /// failure ends the tick.
+    fn flushStructural(self: *Interpreter, world: *World, report: *RuntimeReport) !void {
         const reg = &world.observer_registry;
         if (reg.deferred == null) return;
         while (reg.deferred.?.commands.items.len > 0) {
             const batch = try reg.deferred.?.commands.toOwnedSlice(reg.deferred.?.gpa);
             defer reg.deferred.?.gpa.free(batch);
-            for (batch) |c| try observers_mod.applyWithObservers(c, reg, world, self.gpa);
+            for (batch) |c| observers_mod.applyWithObservers(c, reg, world, self.gpa) catch |err| switch (err) {
+                error.StaleEntityHandle => {},
+                error.OutOfMemory => return error.OutOfMemory,
+                else => report.runtime_errors += 1,
+            };
         }
         // All commands applied — reclaim the payload arena.
         reg.deferred.?.reset();
@@ -16511,6 +16518,85 @@ test "despawn defers — entity removed at flush" {
     try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
     try std.testing.expect(world.dynamicLocation(e) == null); // gone after the flush
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
+}
+
+test "a stale structural command is skipped and the rest of the flush applies" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Doomed { d: i32 = 0 }
+        \\component Marker { m: i32 = 0 }
+        \\component Shield { amount: i32 = 0 }
+        \\rule first(entity: Entity) when entity has Doomed {
+        \\  entity.despawn()
+        \\}
+        \\rule second(entity: Entity) when entity has Doomed {
+        \\  entity.despawn()
+        \\}
+        \\rule shield(entity: Entity) when entity has Marker {
+        \\  entity.add(Shield { amount: 7 })
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const doomed = world.registry.idOf("Doomed").?;
+    const marker = world.registry.idOf("Marker").?;
+    const shield = world.registry.idOf("Shield").?;
+    const d = try world.spawnDynamic(gpa, &[_]ComponentId{doomed});
+    const m = try world.spawnDynamic(gpa, &[_]ComponentId{marker});
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expect(world.dynamicLocation(d) == null);
+    try std.testing.expectEqual(@as(i32, 7), readI32(&world, m, shield, "amount").?);
+}
+
+fn refuseObserved(
+    _: ?*anyopaque,
+    _: *World,
+    _: CoreEntityId,
+    _: ?ComponentId,
+    _: ?*const anyopaque,
+    _: ?*const anyopaque,
+    _: *CommandBuffer,
+) anyerror!void {
+    return error.Refused;
+}
+
+test "a refused structural command counts as a runtime error and the flush goes on" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Doomed { d: i32 = 0 }
+        \\component Marker { m: i32 = 0 }
+        \\component Shield { amount: i32 = 0 }
+        \\rule shield(entity: Entity) when entity has Marker {
+        \\  entity.add(Shield { amount: 7 })
+        \\}
+        \\rule kill(entity: Entity) when entity has Doomed {
+        \\  entity.despawn()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const doomed = world.registry.idOf("Doomed").?;
+    const marker = world.registry.idOf("Marker").?;
+    const shield = world.registry.idOf("Shield").?;
+    try world.observer_registry.registerOnAdd(gpa, shield, null, &refuseObserved);
+    const d = try world.spawnDynamic(gpa, &[_]ComponentId{doomed});
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{marker});
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    try std.testing.expect(world.dynamicLocation(d) == null);
 }
 
 test "add defers — component present at flush" {
