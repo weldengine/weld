@@ -84,8 +84,8 @@ pub const Bridge = struct {
 
     /// optional runtime extension resolver (name → cooked `.prefab.bin`
     /// bytes). Borrowed, not owned — set when the interpreter is bound, used by
-    /// `entity.activate_extension` / `deactivate_extension`. Absent → those
-    /// methods fail with `error.MissingExtensionResolver`.
+    /// `entity.activate_extension` / `deactivate_extension`. Absent, those
+    /// methods fail the body that calls them.
     ext_resolver: ?ExtensionResolver = null,
 
     pub fn init() Bridge {

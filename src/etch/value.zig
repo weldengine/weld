@@ -291,6 +291,10 @@ pub const RuntimeErrorKind = enum {
     /// Its own kind rather than `UnsupportedExpr`, because §5.3 c requires a
     /// CLEAR message: the expression is supported and the handle is not.
     StaleComponentRef,
+    /// A deferred `activate_extension` / `deactivate_extension` the tick
+    /// boundary refused, or whose hook failed. The span covers the extension name
+    /// at the call.
+    ExtensionOpFailed,
 };
 
 /// Whether integer overflow wraps rather than panics: `ReleaseFast` and

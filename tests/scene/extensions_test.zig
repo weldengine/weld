@@ -924,6 +924,95 @@ test "multi-entity rule activate_extension defers without corrupting iteration" 
     }
 }
 
+test "a refused deferred activation leaves the rest of its tick applied" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const prog =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+        \\component Marker { v: i32 = 0 }
+        \\component Done { v: i32 = 0 }
+        \\rule again(entity: Entity) when entity has Weapon {
+        \\  entity.activate_extension("CombatModule")
+        \\}
+        \\rule first(entity: Entity) when entity has Health and not entity has Weapon {
+        \\  entity.activate_extension("CombatModule")
+        \\}
+        \\rule mark(entity: Entity) when entity has Marker {
+        \\  entity.add(Done { v: 1 })
+        \\}
+    ;
+    var pr = try parser.parse(gpa, prog);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    interp.setExtensionResolver(res.ext());
+
+    const active = try spawnHealth(&world, gpa, 100, 100);
+    try scene.loader.runtimeActivate(&world, gpa, active, "CombatModule", res.ext());
+    const fresh = try spawnHealth(&world, gpa, 100, 100);
+    const marked = try world.spawnDynamic(gpa, &[_]ComponentId{world.componentId("Marker").?});
+
+    const report = try interp.runFor(&world, 1);
+
+    try std.testing.expectEqual(@as(i32, 150), healthMax(&world, active));
+    try std.testing.expectEqual(@as(i32, 150), healthMax(&world, fresh));
+    try std.testing.expect(world.hasEntityExtension(fresh, "CombatModule"));
+    try std.testing.expect(world.componentBytes(marked, world.componentId("Done").?) != null);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    const failure = report.last_error orelse return error.TestExpectedTypedError;
+    try std.testing.expectEqualStrings("ExtensionOpFailed", @tagName(failure.kind));
+    try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOf(u8, prog, "\"CombatModule\"").?)), failure.span.byte_start);
+}
+
+test "an allocation failure in a deferred activation ends the tick" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    const prog =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+        \\rule first(entity: Entity) when entity has Health and not entity has Weapon {
+        \\  entity.activate_extension("CombatModule")
+        \\}
+    ;
+    var pr = try parser.parse(gpa, prog);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+
+    var tick_allocations: usize = 0;
+    while (true) : (tick_allocations += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{});
+        const fa = failing.allocator();
+        var world = World.init();
+        defer world.deinit(fa);
+        var interp = try Interpreter.compile(fa, &pr.ast, &world);
+        defer interp.deinit();
+        const fresh = try spawnHealth(&world, fa, 100, 100);
+        // Unresolved, the call fails and the rule's selection still takes in the
+        // entity's archetype, so the measured tick allocates only in the call and
+        // the flush: a selection rescan panics on an allocation failure.
+        _ = try interp.runFor(&world, 1);
+        var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+        interp.setExtensionResolver(res.ext());
+        failing.fail_index = failing.alloc_index + tick_allocations;
+        if (interp.runFor(&world, 1)) |report| {
+            try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+            try std.testing.expect(world.hasEntityExtension(fresh, "CombatModule"));
+            if (!failing.has_induced_failure) break;
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+}
+
 test "on_attach-issued structural command is drained before on_spawned" {
     const gpa = std.testing.allocator;
     const combat_bytes = try cookCombatModule(gpa);

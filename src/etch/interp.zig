@@ -213,6 +213,8 @@ const PendingExtension = struct {
     /// resolver's backing outlives the tick.
     bytes: []const u8,
     op: ExtOp,
+    /// The extension name at the call, where a refusal at the flush is reported.
+    span: SourceSpan,
 };
 
 /// Resolved view of a `when` clause node. The pool of these is a LOCAL of
@@ -1823,8 +1825,8 @@ pub const Interpreter = struct {
     /// give the interpreter a runtime extension resolver (name → cooked
     /// `.prefab.bin` bytes, the same interface the scene loader receives) so an
     /// Etch `entity.activate_extension("X")` / `deactivate_extension("X")`
-    /// resolves the extension at runtime. Absent → those methods fail with
-    /// `error.MissingExtensionResolver`.
+    /// resolves the extension at runtime. Absent, those methods fail the body
+    /// that calls them.
     pub fn setExtensionResolver(self: *Interpreter, resolver: scene_loader.ExtensionResolver) void {
         self.bridge.ext_resolver = resolver;
     }
@@ -2228,7 +2230,7 @@ pub const Interpreter = struct {
         try self.flushPendingTags(world);
         // Apply deferred extension activate/deactivate at the same boundary
         // — same never-mid-walk discipline.
-        try self.flushPendingExtensions(world);
+        try self.flushPendingExtensions(world, report);
         // Apply deferred structural mutations (spawn/despawn/add/remove) last, so
         // any extension hook's structural change (enqueued just above) drains in
         // the same boundary, with observers firing per op.
@@ -4271,18 +4273,29 @@ pub const Interpreter = struct {
     /// Tier-0 `on_attach`/`on_detach` seam via the loader's bytes-taking
     /// `activateExtension` / `deactivateExtension`. The batch is snapshotted
     /// (`toOwnedSlice`) so a hook fired during apply that enqueues more ops does
-    /// NOT drain recursively — new ops wait for the next flush.
-    fn flushPendingExtensions(self: *Interpreter, world: *World) !void {
+    /// NOT drain recursively — new ops wait for the next flush. An op the loader
+    /// refuses, or whose hook fails, is a runtime error of the tick and the rest
+    /// of the batch still applies; only an allocation failure ends the tick.
+    fn flushPendingExtensions(self: *Interpreter, world: *World, report: *RuntimeReport) !void {
         if (self.pending_extensions.items.len == 0) return;
         const batch = try self.pending_extensions.toOwnedSlice(self.gpa);
         defer {
             for (batch) |pe| self.gpa.free(pe.name);
             self.gpa.free(batch);
         }
-        for (batch) |pe| switch (pe.op) {
-            .activate => try scene_loader.activateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
-            .deactivate => try scene_loader.deactivateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
-        };
+        for (batch) |pe| {
+            const applied = switch (pe.op) {
+                .activate => scene_loader.activateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
+                .deactivate => scene_loader.deactivateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
+            };
+            applied catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    report.runtime_errors += 1;
+                    report.last_error = .{ .kind = .ExtensionOpFailed, .span = pe.span };
+                },
+            };
+        }
     }
 
     /// Resolve a `tag_path` operand node to its leaf bit via the global table,
@@ -5215,12 +5228,14 @@ pub const Interpreter = struct {
     /// mutate an archetype mid-`iterateArchetype`. Missing resolver / unknown name
     /// surface as `RuntimeFailure` (the interp's failure channel). The name is
     /// dup'd (the AST / run-string source may not outlive the flush).
-    fn enqueueExtension(self: *Interpreter, entity: CoreEntityId, name: []const u8, op: ExtOp) StmtError!void {
+    fn enqueueExtension(self: *Interpreter, world: *World, locals: *Locals, entity: CoreEntityId, mc: ast_mod.MethodCall, op: ExtOp) StmtError!void {
+        const name = try self.extensionNameArg(world, locals, mc);
+        const span = self.ast.exprSpan(@bitCast(self.ast.extra.items[mc.args_start]));
         const resolver = self.bridge.ext_resolver orelse return error.RuntimeFailure;
         const bytes = resolver.resolve(name) orelse return error.RuntimeFailure;
         const name_dup = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(name_dup);
-        try self.pending_extensions.append(self.gpa, .{ .entity = entity, .name = name_dup, .bytes = bytes, .op = op });
+        try self.pending_extensions.append(self.gpa, .{ .entity = entity, .name = name_dup, .bytes = bytes, .op = op, .span = span });
     }
 
     /// the Tier-0 `CommandBuffer` that a body's structural
@@ -5642,18 +5657,16 @@ pub const Interpreter = struct {
                 const mname = self.ast.strings.slice(mc.method_name);
                 // runtime extension API on an entity receiver. Checked
                 // before the `impl Trait for Entity` lookup (these are builtin
-                // methods, not user traits). activate/deactivate route through the
-                // shared loader entries; a missing resolver / unknown extension /
-                // component conflict surfaces as the interp's `RuntimeFailure`
-                // (the loader path keeps the named `MissingExtensionResolver` etc.).
+                // methods, not user traits). activate/deactivate ENQUEUE, never an
+                // immediate structural mutation (we may be mid-iteration): a
+                // missing resolver or unknown extension fails the call, and a
+                // refusal at the tick boundary is a runtime error of that tick.
                 if (std.mem.eql(u8, mname, "activate_extension")) {
-                    // B1: ENQUEUE (deferred to the tick boundary) — never an
-                    // immediate structural mutation here (we may be mid-iteration).
-                    try self.enqueueExtension(@bitCast(eid), try self.extensionNameArg(world, locals, mc), .activate);
+                    try self.enqueueExtension(world, locals, @bitCast(eid), mc, .activate);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "deactivate_extension")) {
-                    try self.enqueueExtension(@bitCast(eid), try self.extensionNameArg(world, locals, mc), .deactivate);
+                    try self.enqueueExtension(world, locals, @bitCast(eid), mc, .deactivate);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "has_extension")) {
@@ -7027,6 +7040,7 @@ fn defaultFailureMessage(kind: RuntimeErrorKind) []const u8 {
         .UncaughtThrow => "uncaught throw",
         .AssertFailed => "assertion failed",
         .StaleComponentRef => "component ref outlived its entity",
+        .ExtensionOpFailed => "extension activation or deactivation failed",
     };
 }
 
