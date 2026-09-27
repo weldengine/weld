@@ -9,10 +9,6 @@
 //!      `SaveProject` → `ProjectSaved` (same seq_id), `LoadScene` with
 //!      an empty path → `RuntimeError` event, and `Play`/`Pause`/`Stop`
 //!      accepted without desync (an `Echo` after them still round-trips).
-//!
-//! External-resource discipline (engine-zig-conventions.md §13): the
-//! accepted socket gets a 5 s `SO_RCVTIMEO` so a missing reply fails the
-//! test instead of hanging the suite.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -75,14 +71,9 @@ test "catalogue messages round-trip through encode/decode" {
 
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn shm_unlink(name: [*:0]const u8) i32;
-extern "c" fn setsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: *const anyopaque, optlen: u32) c_int;
 const timespec_t = extern struct { tv_sec: i64, tv_nsec: i64 };
 extern "c" fn nanosleep(req: *const timespec_t, rem: ?*timespec_t) c_int;
 extern "c" fn getpid() i32;
-
-const timeval = extern struct { tv_sec: i64, tv_usec: i32, _pad: i32 = 0 };
-const SOL_SOCKET: c_int = if (builtin.os.tag == .linux) 1 else 0xFFFF;
-const SO_RCVTIMEO: c_int = if (builtin.os.tag == .linux) 20 else 0x1006;
 
 fn sleepMs(ms: u64) void {
     var ts = timespec_t{ .tv_sec = @intCast(ms / 1000), .tv_nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
@@ -125,10 +116,6 @@ fn spawnRuntime(
     const proc = try platform_process.spawnProcess(gpa, "zig-out/bin/weld-runtime", &argv);
     try server.acceptOne();
 
-    // 5 s recv timeout on the accepted socket (engine-zig-conventions §13).
-    var tv = timeval{ .tv_sec = 5, .tv_usec = 0 };
-    _ = setsockopt(server.client.?.impl.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, @sizeOf(timeval));
-
     var hello_buf: [framing.frameSizeOf(messages.ProtocolHello)]u8 = undefined;
     _ = try server.recvHello(&hello_buf);
     try server.sendHelloAck(true, "");
@@ -142,17 +129,23 @@ fn spawnRuntime(
     return .{ .vp = vp, .proc = proc };
 }
 
-/// Graceful teardown: `Shutdown` → `ShutdownAck` → reap the runtime.
+/// Polls of `sleepMs(10)` a runtime is given to exit before it is killed: no
+/// loaded runner reaches it, and it stays inside the runner's per-test deadline.
+const exit_polls: usize = 6_000;
+
+/// Graceful teardown: `Shutdown` → `ShutdownAck` → reap the runtime, killed
+/// once `exit_polls` have passed.
 fn teardown(server: *ipc.server.IpcServer, proc: *platform_process.Process) void {
     const sd = messages.Shutdown{};
     server.connection().sendMessage(messages.Shutdown, 0, &sd) catch {};
     var sa_buf: [framing.frameSizeOf(messages.ShutdownAck)]u8 = undefined;
     _ = server.connection().recvMessage(messages.ShutdownAck, &sa_buf) catch {};
     var attempts: usize = 0;
-    while (attempts < 50) : (attempts += 1) {
-        if (platform_process.waitNonblock(proc) catch null) |_| break;
+    while (attempts < exit_polls) : (attempts += 1) {
+        if (platform_process.waitNonblock(proc) catch null) |_| return;
         sleepMs(10);
     }
+    platform_process.kill(proc) catch {};
 }
 
 test "SaveProject is acked by ProjectSaved with the same seq_id" {

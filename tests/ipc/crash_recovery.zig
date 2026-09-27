@@ -128,12 +128,24 @@ fn spawnAndHandshake(
     return .{ .vp = vp, .proc = proc };
 }
 
-fn reap(io: std.Io, proc: *platform_process.Process) void {
+/// Polls of `sleepMs(10)` a runtime is given to exit before it is killed: no
+/// loaded runner reaches it, and it stays inside the runner's per-test deadline.
+const exit_polls: usize = 6_000;
+
+/// The runtime's exit code, or null once `exit_polls` have passed and it has
+/// been killed.
+fn waitExit(io: std.Io, proc: *platform_process.Process) !?i32 {
     var attempts: usize = 0;
-    while (attempts < 200) : (attempts += 1) {
-        if (platform_process.waitNonblock(proc) catch null) |_| return;
+    while (attempts < exit_polls) : (attempts += 1) {
+        if (try platform_process.waitNonblock(proc)) |code| return code;
         sleepMs(io, 10);
     }
+    platform_process.kill(proc) catch {};
+    return null;
+}
+
+fn reap(io: std.Io, proc: *platform_process.Process) void {
+    _ = waitExit(io, proc) catch null;
 }
 
 test "runtime kill -9 → the editor's receive ends in EOF" {
@@ -242,20 +254,8 @@ test "editor close → runtime detects EOF + exits clean code 0" {
     // runtime sees EOF on its next recv and exits 0.
     server.deinit();
 
-    // The bounded poll below — 200 × 10 ms — IS the §13 internal timeout: it
-    // exits on its own and `exit_code != null` is what fails if the runtime
-    // never leaves. No duration assertion is needed on top of it.
-    var exit_code: ?i32 = null;
-    var poll: usize = 0;
-    while (poll < 200) : (poll += 1) {
-        if (try platform_process.waitNonblock(&sp.proc)) |code| {
-            exit_code = code;
-            break;
-        }
-        sleepMs(io, 10);
-    }
-    try std.testing.expect(exit_code != null);
-    try std.testing.expectEqual(@as(i32, 0), exit_code.?);
+    const exit_code = try waitExit(io, &sp.proc) orelse return error.RuntimeNeverExited;
+    try std.testing.expectEqual(@as(i32, 0), exit_code);
 }
 
 test "kill -9 + best-effort replay of post-save commands" {

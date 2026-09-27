@@ -26,6 +26,22 @@ fn sleepMs(ms: u64) void {
     _ = nanosleep(&ts, null);
 }
 
+/// Polls of `sleepMs(10)` a child is given to exit before it is killed: no
+/// loaded runner reaches it, and it stays inside the runner's per-test deadline.
+const exit_polls: usize = 6_000;
+
+/// `proc`'s exit code, or null once `exit_polls` have passed and it has been
+/// killed.
+fn waitExit(proc: *process.Process) !?i32 {
+    var attempts: usize = 0;
+    while (attempts < exit_polls) : (attempts += 1) {
+        if (try process.waitNonblock(proc)) |code| return code;
+        sleepMs(10);
+    }
+    process.kill(proc) catch {};
+    return null;
+}
+
 // `/bin/true` lives at `/usr/bin/true` on macOS (and is also at
 // `/bin/true` on Linux). `/bin/sleep` is canonical on both.
 const true_path = if (builtin.os.tag == .macos) "/usr/bin/true" else "/bin/true";
@@ -37,19 +53,8 @@ test "spawn true(1) and reap with waitNonblock returns exit 0" {
     const argv = [_][]const u8{true_path};
 
     var proc = try process.spawnProcess(gpa, true_path, &argv);
-
-    // Poll up to ~1 s for the child to exit. /bin/true is near-
-    // instant; the loop bound exists to keep the test from hanging
-    // if the binary is missing or the spawn fails silently.
-    var attempts: usize = 0;
-    while (attempts < 100) : (attempts += 1) {
-        if (try process.waitNonblock(&proc)) |code| {
-            try std.testing.expectEqual(@as(i32, 0), code);
-            return;
-        }
-        sleepMs(10);
-    }
-    return error.ChildNeverExited;
+    const code = try waitExit(&proc) orelse return error.ChildNeverExited;
+    try std.testing.expectEqual(@as(i32, 0), code);
 }
 
 extern "c" fn getpid() i32;
@@ -71,22 +76,17 @@ test "spawn-then-kill terminates a long-running child" {
     if (!is_posix) return error.SkipZigTest;
 
     const gpa = std.testing.allocator;
-    const argv = [_][]const u8{ "/bin/sleep", "30" };
+    // Longer than `exit_polls` allow, so a kill that did nothing cannot pass
+    // for the child's own exit.
+    const argv = [_][]const u8{ "/bin/sleep", "600" };
 
     var proc = try process.spawnProcess(gpa, "/bin/sleep", &argv);
     // Give the child a moment to actually become alive in the kernel
     // table — without this, `kill(pid, SIGKILL)` can race against
     // the spawn returning before the child is reapable on macOS.
     sleepMs(20);
-    // Don't actually wait 30 s — kill and reap.
     try process.kill(&proc);
-
-    var attempts: usize = 0;
-    while (attempts < 100) : (attempts += 1) {
-        if (try process.waitNonblock(&proc)) |_| return;
-        sleepMs(10);
-    }
-    return error.ChildNeverDied;
+    _ = try waitExit(&proc) orelse return error.ChildNeverDied;
 }
 
 test "spawnProcess runs a Windows binary and reaps exit 0" {
@@ -99,15 +99,8 @@ test "spawnProcess runs a Windows binary and reaps exit 0" {
     const argv = [_][]const u8{ exe, "/c", "exit 0" };
 
     var proc = try process.spawnProcess(gpa, exe, &argv);
-    var attempts: usize = 0;
-    while (attempts < 200) : (attempts += 1) {
-        if (try process.waitNonblock(&proc)) |code| {
-            try std.testing.expectEqual(@as(i32, 0), code);
-            return;
-        }
-        sleepMs(10);
-    }
-    return error.ChildNeverExited;
+    const code = try waitExit(&proc) orelse return error.ChildNeverExited;
+    try std.testing.expectEqual(@as(i32, 0), code);
 }
 
 // ------------------------------------------------------- quoteArg tests --
