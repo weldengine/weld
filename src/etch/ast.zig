@@ -12,8 +12,9 @@
 //!   component declaration). Each reference is a `(start, len)` pair on
 //!   the side slab.
 //! - `StringPool` interns identifier names and string literal contents.
-//! - `AnnotationMap`: hash table keyed by `NodeId` → `AnnotationSpan`
-//!   (range in `annot_pool`).
+//! - `annot_pool` holds every parsed annotation. A declaration carries its
+//!   own `(annotations_extra, annotations_len)` range into it, and each
+//!   annotation its `(args_start, args_len)` range into `annot_args`.
 //! - `comment_spans` is a parallel slab — not attached to NodeIds,
 //!   kept for a future trivia attachment.
 //! - `StableId` is absent (left at zero). It is owed by the editor, which
@@ -2749,8 +2750,6 @@ pub const AstArena = struct {
     generic_params: std.ArrayListUnmanaged(GenericParam) = .empty,
     generic_bounds: std.ArrayListUnmanaged(GenericBound) = .empty,
 
-    // Annotation storage.
-    annotations: std.AutoHashMapUnmanaged(NodeId, AnnotationSpan) = .empty,
     annot_pool: std.ArrayListUnmanaged(Annotation) = .empty,
     annot_args: std.ArrayListUnmanaged(AnnotationArg) = .empty,
 
@@ -2788,11 +2787,6 @@ pub const AstArena = struct {
     /// ones reference `Error`/`ErrorCode` by construction and would force
     /// the prelude into every program. `maxInt(u32)` = none injected.
     builtin_fields_from: u32 = std.math.maxInt(u32),
-
-    pub const AnnotationSpan = struct {
-        start: u32,
-        len: u32,
-    };
 
     /// `(start, len)` slice into a span pool (`comment_spans` for
     /// `leading_comments`, `doc_comment_spans` for `doc_comments`).
@@ -2970,7 +2964,6 @@ pub const AstArena = struct {
         self.generic_type_nodes.deinit(gpa);
         self.generic_params.deinit(gpa);
         self.generic_bounds.deinit(gpa);
-        self.annotations.deinit(gpa);
         self.annot_pool.deinit(gpa);
         self.annot_args.deinit(gpa);
         self.comment_spans.deinit(gpa);
