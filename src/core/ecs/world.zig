@@ -433,6 +433,20 @@ pub const World = struct {
         if (self.detach_hook) |h| try h.func(h.ctx, self, entity, extension_name, on_detach_text);
     }
 
+    /// Clear each extension seam registered with `ctx`.
+    pub fn unregisterExtensionHooks(self: *World, ctx: *anyopaque) void {
+        const own = @as(?*anyopaque, ctx);
+        if (self.attach_hook) |h| {
+            if (h.ctx == own) self.attach_hook = null;
+        }
+        if (self.detach_hook) |h| {
+            if (h.ctx == own) self.detach_hook = null;
+        }
+        if (self.check_hook) |h| {
+            if (h.ctx == own) self.check_hook = null;
+        }
+    }
+
     /// Register the extension hook check (one per world, last registration wins).
     pub fn registerExtensionCheck(self: *World, ctx: ?*anyopaque, callback: ExtensionCheckFn) void {
         self.check_hook = .{ .ctx = ctx, .func = callback };

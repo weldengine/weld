@@ -1079,9 +1079,7 @@ const StepAction = enum {
 
 /// Per-observer-rule context handed to the Tier-0 `ObserverRegistry` as the
 /// opaque `ctx` pointer. Points back at the interpreter + the
-/// descriptor index so the trampoline can run the right rule body. Allocated
-/// once per binding in `bindToWorld`, freed at `deinit` — the interpreter must
-/// outlive any flush that fires its observers.
+/// descriptor index so the trampoline can run the right rule body.
 const ObserverCtx = struct {
     interp: *Interpreter,
     rule_desc_idx: usize,
@@ -1352,12 +1350,15 @@ pub const Interpreter = struct {
     merge_seen: std.AutoHashMapUnmanaged(CoreEntityId, void) = .empty,
     /// Per-observer-rule contexts registered into the world's `ObserverRegistry`
     /// at `bindToWorld`. One entry per rule with `observer_kind`
-    /// set; the registry holds `&observer_ctxs[k]` as its opaque `ctx`. Freed at
-    /// `deinit` (the interpreter must outlive any observer-firing flush).
+    /// set; the registry holds `&observer_ctxs[k]` as its opaque `ctx`.
+    /// Unregistered and freed when the interpreter unbinds.
     observer_ctxs: []ObserverCtx = &.{},
     /// The address `bindToWorld` registered into the world, which holds it as
     /// the hooks' and observers' context. Non-null once bound.
     bound_at: ?*const Interpreter = null,
+    /// The world `bindToWorld` registered into, which must outlive the
+    /// interpreter.
+    bound_world: ?*World = null,
     /// Set while a cooked hook text runs: its spans index that text.
     in_hook_text: bool = false,
     /// Non-null while an observer body runs: the registry's deferred
@@ -1365,10 +1366,11 @@ pub const Interpreter = struct {
     /// route here instead of `pending_tags`, so they apply at the NEXT flush —
     /// never re-entrantly during the current one (the no-recursion contract).
     observer_deferred: ?*CommandBuffer = null,
-    /// Touches nothing of the world: its registrations, resource payloads and
+    /// Removes what it registered in the world it bound. Resource payloads and
     /// the blocks they point into belong to the world and outlive this
     /// interpreter.
     pub fn deinit(self: *Interpreter) void {
+        self.unbind();
         self.drainDeferredDecrefs();
         self.deferred_decrefs.deinit(self.gpa);
         self.event_sources.deinit(self.gpa);
@@ -1415,7 +1417,6 @@ pub const Interpreter = struct {
         self.descriptors.deinit(self.gpa);
         self.merge_cursors.deinit(self.gpa);
         self.merge_seen.deinit(self.gpa);
-        self.gpa.free(self.observer_ctxs);
         self.test_msg_buf.deinit(self.gpa);
         var hook_keys = self.hook_runs.keyIterator();
         while (hook_keys.next()) |k| self.gpa.free(k.*);
@@ -1834,12 +1835,19 @@ pub const Interpreter = struct {
     /// Register this program's observer rules into `world`'s `ObserverRegistry`.
     /// Idempotent: the first call allocates one `ObserverCtx` per observer rule and
     /// registers a trampoline keyed on the rule's lifecycle kind + target component;
-    /// later calls no-op, and refuse from a copy of the bound interpreter. Called
+    /// later calls no-op, and refuse from a copy of the bound interpreter or for
+    /// another world. An interpreter bound to `world` before is unbound. Called
     /// lazily by `runFor`, or explicitly by a test that drives a Tier-0 flush
     /// before any tick.
     pub fn bindToWorld(self: *Interpreter, world: *World) !void {
-        if (self.bound_at != null) return self.checkNotMoved();
+        if (self.bound_at != null) {
+            try self.checkNotMoved();
+            if (self.bound_world.? != world) return error.InterpreterBoundToAnotherWorld;
+            return;
+        }
+        if (boundTo(world)) |replaced| replaced.unbind();
         self.bound_at = self;
+        self.bound_world = world;
 
         // register the extension hook seams so the loader's
         // `dispatchOnAttach` / runtime `deactivate_extension` reach `execHookText`.
@@ -1872,6 +1880,32 @@ pub const Interpreter = struct {
                 .on_despawned => try reg.registerOnDespawned(self.gpa, ctx, &observerTrampoline),
             }
         }
+    }
+
+    /// The interpreter bound to `world`, found through any seam still holding
+    /// one of its trampolines.
+    fn boundTo(world: *const World) ?*Interpreter {
+        if (world.attach_hook) |h| {
+            if (h.func == &extensionAttachTrampoline) return @ptrCast(@alignCast(h.ctx.?));
+        }
+        if (world.detach_hook) |h| {
+            if (h.func == &extensionDetachTrampoline) return @ptrCast(@alignCast(h.ctx.?));
+        }
+        if (world.check_hook) |h| {
+            if (h.func == &extensionCheckTrampoline) return @ptrCast(@alignCast(h.ctx.?));
+        }
+        return null;
+    }
+
+    /// Remove from the world it bound what `bindToWorld` registered there.
+    fn unbind(self: *Interpreter) void {
+        const world = self.bound_world orelse return;
+        for (self.observer_ctxs) |*c| world.observer_registry.unregister(c);
+        world.unregisterExtensionHooks(@constCast(self.bound_at.?));
+        self.gpa.free(self.observer_ctxs);
+        self.observer_ctxs = &.{};
+        self.bound_world = null;
+        self.bound_at = null;
     }
 
     /// Refuse to run from an address other than the one the world holds: the
@@ -17280,6 +17314,146 @@ test "an interpreter moved after it bound its world refuses to bind again" {
     try interp.bindToWorld(&world);
     var moved = interp;
     try std.testing.expectError(error.InterpreterMovedAfterBind, moved.bindToWorld(&world));
+}
+
+const observed_source =
+    \\component Health { current: int = 0 }
+    \\@on_added(Health)
+    \\rule seen(entity: Entity, value: Health) {}
+;
+
+/// Listeners on `cid`'s `on_add` list.
+fn onAddListeners(world: *World, cid: ComponentId) usize {
+    return if (world.observer_registry.on_add.get(cid)) |list| list.items.len else 0;
+}
+
+test "a freed interpreter leaves no observer in the world it bound" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    try interp.bindToWorld(&world);
+    const health = world.registry.idOf("Health").?;
+    interp.deinit();
+    try std.testing.expectEqual(@as(usize, 0), onAddListeners(&world, health));
+}
+
+test "a freed interpreter leaves no extension seam in the world it bound" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    try interp.bindToWorld(&world);
+    interp.deinit();
+    try std.testing.expect(world.attach_hook == null);
+    try std.testing.expect(world.detach_hook == null);
+    try std.testing.expect(world.check_hook == null);
+}
+
+test "an interpreter bound to a world replaces the one bound before it" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var first = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer first.deinit();
+    try first.bindToWorld(&world);
+    var second = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer second.deinit();
+    try second.bindToWorld(&world);
+    try std.testing.expectEqual(@as(usize, 1), onAddListeners(&world, world.registry.idOf("Health").?));
+}
+
+test "a replaced interpreter freed leaves its successor bound" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var first = try Interpreter.compile(gpa, &pr.ast, &world);
+    try first.bindToWorld(&world);
+    var second = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer second.deinit();
+    try second.bindToWorld(&world);
+    first.deinit();
+    try std.testing.expectEqual(@as(usize, 1), onAddListeners(&world, world.registry.idOf("Health").?));
+    try std.testing.expect(world.check_hook.?.ctx == @as(?*anyopaque, &second));
+}
+
+fn standInAttach(_: ?*anyopaque, _: *World, _: CoreEntityId, _: []const u8, _: ?[]const u8) anyerror!void {}
+
+test "a freed interpreter leaves in place a seam another registered" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    try interp.bindToWorld(&world);
+    var other: u8 = 0;
+    world.registerOnAttach(&other, &standInAttach);
+    interp.deinit();
+    try std.testing.expect(world.attach_hook.?.ctx == @as(?*anyopaque, &other));
+}
+
+test "an interpreter bound to a world replaces the one bound before it through any of its seams" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var first = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer first.deinit();
+    try first.bindToWorld(&world);
+    var other: u8 = 0;
+    world.registerOnAttach(&other, &standInAttach);
+    var second = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer second.deinit();
+    try second.bindToWorld(&world);
+    try std.testing.expectEqual(@as(usize, 1), onAddListeners(&world, world.registry.idOf("Health").?));
+}
+
+test "an interpreter bound to one world refuses another" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var other = World.init();
+    defer other.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    try std.testing.expectError(error.InterpreterBoundToAnotherWorld, interp.bindToWorld(&other));
+}
+
+test "after a reload frees the old interpreter, a structural change calls only the new one" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Health { current: int = 0 }
+        \\@on_added(Health)
+        \\rule seen(entity: Entity, value: Health) {
+        \\  entity.get_mut(Health).current = 7
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var old = try Interpreter.compile(gpa, &pr.ast, &world);
+    try old.bindToWorld(&world);
+    var new = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer new.deinit();
+    try new.bindToWorld(&world);
+    old.deinit();
+    const health = world.registry.idOf("Health").?;
+    var zero: i64 = 0;
+    const e = try world.observer_registry.spawnWithObservers(gpa, &world, &[_]ComponentId{health}, &[_][]const u8{std.mem.asBytes(&zero)});
+    try std.testing.expectEqual(@as(i64, 7), std.mem.readInt(i64, world.componentBytes(e, health).?[0..8], .little));
 }
 
 test "an interpreter tickOnAcc ran ticks again" {
