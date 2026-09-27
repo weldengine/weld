@@ -149,6 +149,11 @@ pub const CookError = error{
     /// instantiation, and the hierarchy it would need, is not implemented
     /// anywhere: this error is the whole of the treatment.
     MultiEntityInstanceUnsupported,
+    /// An `extends` prefab holding more than one entity: an extension activates
+    /// on one entity.
+    MultiEntityExtensionUnsupported,
+    /// An `extends` prefab holding no entity.
+    EmptyExtension,
     /// A `Comp.field = value` per-field override targets a component the flattened
     /// instance does not carry (neither inherited from the prefab nor added by an
     /// earlier `Comp { … }` member of the same instance body).
@@ -907,6 +912,11 @@ const Builder = struct {
             return fail(diag_out, error.PrefabHookNotAllowed, "`requires`/`on_attach`/`on_detach` are valid only on an `extends` prefab");
 
         const prefab_entities = self.ast.scene_entities.items[pd.entities_start .. pd.entities_start + pd.entities_len];
+        if (pd.relation == .extends) switch (prefab_entities.len) {
+            0 => return fail(diag_out, error.EmptyExtension, "an `extends` prefab holds no entity"),
+            1 => {},
+            else => return fail(diag_out, error.MultiEntityExtensionUnsupported, "an `extends` prefab holds more than one entity"),
+        };
 
         var entities: std.ArrayListUnmanaged(EntityBuild) = .empty;
         defer entities.deinit(self.gpa);

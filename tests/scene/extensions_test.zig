@@ -293,6 +293,39 @@ const MultiResolver = struct {
     }
 };
 
+test "an extends prefab with two entities does not cook" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var resolver = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const twin =
+        \\component Weapon { damage: i32 = 0 }
+        \\prefab "TwinModule" extends "BaseCharacter" {
+        \\  entity "a" { uuid: "00000000-0000-0000-0000-0000000000f1" Weapon { damage: 1 } }
+        \\  entity "b" { uuid: "00000000-0000-0000-0000-0000000000f2" Weapon { damage: 2 } }
+        \\}
+    ;
+    try std.testing.expectError(error.MultiEntityExtensionUnsupported, scene_cook.cookPrefab(gpa, twin, resolver.base(), null));
+}
+
+test "an extends prefab with no entity does not cook" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var resolver = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const hollow =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\prefab "HollowModule" extends "BaseCharacter" requires Health {
+        \\  on_attach { entity.get_mut(Health).max += 1 }
+        \\}
+    ;
+    try std.testing.expectError(error.EmptyExtension, scene_cook.cookPrefab(gpa, hollow, resolver.base(), null));
+}
+
 /// Cook an `extends` prefab source to its `.prefab.bin` bytes (caller frees). No
 /// `requires` → the base need not exist, cookable with a null resolver. The bytes
 /// are a self-contained serialized artifact, independent of the (freed) `Cooked`.
