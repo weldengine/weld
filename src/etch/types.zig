@@ -2018,8 +2018,7 @@ pub const TypeChecker = struct {
                 }
                 if (kf.kind == .emit) {
                     const em = self.arena.emit_stmts.items[self.arena.stmtData(kf.value)];
-                    const sym = self.symbols.get(em.event_type);
-                    if (sym == null or sym.?.kind != .event_) {
+                    if (self.eventNamed(em.event_type) == null) {
                         try self.emit(.event_track_event_unknown, .error_, kf.span, "keyframe emits '{s}', which is not a declared event", .{self.arena.strings.slice(em.event_type)});
                     }
                 }
@@ -2331,6 +2330,56 @@ pub const TypeChecker = struct {
         const sym = self.symbols.get(name) orelse return null;
         if (sym.kind != .component) return null;
         return .{ .arena = self.arena, .decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    /// A resource declaration and the arena it lives in.
+    const ResourceRef = struct { arena: *const AstArena, decl: ast_mod.ResourceDecl };
+
+    /// The resource `name` names; a symbol that is no resource names none.
+    fn resourceNamed(self: *TypeChecker, name: StringId) ?ResourceRef {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .resource) return null;
+            const decl_arena = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = decl_arena, .decl = decl_arena.resource_decls.items[decl_arena.itemData(entry.item_id)] };
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .resource) return null;
+        return .{ .arena = self.arena, .decl = self.arena.resource_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    /// The event `name` names, the file's own or an imported one.
+    fn eventNamed(self: *TypeChecker, name: StringId) ?ForeignEvent {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .event_) return null;
+            const decl_arena = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = decl_arena, .decl = decl_arena.event_decls.items[decl_arena.itemData(entry.item_id)] };
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .event_) return null;
+        return .{ .arena = self.arena, .decl = self.arena.event_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    /// The kind of what `name` names, an import included.
+    fn kindNamed(self: *TypeChecker, name: StringId) ?SymbolKind {
+        if (self.importedBinding(name)) |entry| return entry.kind;
+        const sym = self.symbols.get(name) orelse return null;
+        return sym.kind;
+    }
+
+    /// The type of the field named `name` among `a.fields[start .. start + len]`,
+    /// matched by bytes in a foreign arena; null when there is none.
+    fn fieldTypeIn(self: *TypeChecker, a: *const AstArena, start: u32, len: u32, name: StringId) ?ResolvedType {
+        const want = self.arena.strings.slice(name);
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const f = a.fields.items[start + i];
+            if (a == self.arena) {
+                if (f.name == name) return self.namedTypeToResolved(f.type_node);
+            } else if (std.mem.eql(u8, a.strings.slice(f.name), want)) {
+                return self.foreignFieldType(a, f.type_node);
+            }
+        }
+        return null;
     }
 
     /// One instance field against `component`'s declared fields, the imported
@@ -3200,8 +3249,8 @@ pub const TypeChecker = struct {
                                 // Emit payload: E1550 on an unknown event
                                 // reference, else the regular emit checks.
                                 const em = self.arena.emit_stmts.items[self.arena.stmtData(h.payload)];
-                                if (self.symbols.get(em.event_type)) |sym| {
-                                    if (sym.kind != .event_) {
+                                if (self.kindNamed(em.event_type)) |k| {
+                                    if (k != .event_) {
                                         try self.emit(.event_reference_not_found, .error_, h.span, "'{s}' is not an event", .{self.arena.strings.slice(em.event_type)});
                                     } else {
                                         try self.checkStmt(ctx, h.payload);
@@ -3340,8 +3389,8 @@ pub const TypeChecker = struct {
                 .emit => {
                     const em_elem = self.arena.dialogue_emits.items[elem.index];
                     const em = self.arena.emit_stmts.items[self.arena.stmtData(em_elem.stmt)];
-                    if (self.symbols.get(em.event_type)) |sym| {
-                        if (sym.kind != .event_) {
+                    if (self.kindNamed(em.event_type)) |k| {
+                        if (k != .event_) {
                             try self.emit(.dialogue_event_type_unknown, .error_, em_elem.span, "'{s}' is not an event", .{self.arena.strings.slice(em.event_type)});
                         } else {
                             try self.checkStmt(ctx, em_elem.stmt);
@@ -5203,8 +5252,7 @@ pub const TypeChecker = struct {
         var comp_name: ?StringId = null;
         if (needs_component) {
             if (self.arena.observerComponentName(annot)) |cn| {
-                const sym = self.symbols.get(cn);
-                if (sym != null and sym.?.kind == .component) {
+                if (self.componentNamed(cn) != null) {
                     comp_name = cn;
                 } else {
                     try self.emit(.observer_component_invalid, .error_, annot.span, "@{s}(T) requires T to be a declared component; '{s}' is not", .{ aname, self.arena.strings.slice(cn) });
@@ -5266,12 +5314,10 @@ pub const TypeChecker = struct {
         // binding named `event`, self-style like `self` in a method).
         if (self.arena.onEventAnnotation(rule)) |annot| {
             if (self.arena.onEventTypeName(annot)) |event_type| {
-                const sym = self.symbols.get(event_type);
-                const local_event = sym != null and sym.?.kind == .event_;
                 // A `.d.etch`-declared event resolves here too —
                 // which is the whole point of admitting `event_decl` into §20.1
                 // a rule can only observe an event whose type Etch knows.
-                if (local_event or self.declaredEvent(event_type) != null) {
+                if (self.eventNamed(event_type) != null or self.declaredEvent(event_type) != null) {
                     const event_id = try self.arena.strings.intern(self.gpa, "event");
                     try ctx.locals.put(self.gpa, event_id, .{ .type_ = .{ .event_t = event_type }, .is_mut = false });
                 } else {
@@ -5704,12 +5750,10 @@ pub const TypeChecker = struct {
                 // filter on a non-component is just an unknown component); the
                 // resolver/ruling deliberately does NOT mint a new E12xx for it.
                 const tname_slice = self.arena.strings.slice(node.type_name);
-                if (self.symbols.get(node.type_name)) |sym| {
-                    if (sym.kind != .component) {
-                        try self.emit(.unknown_component_in_when, .error_, node.span, "'has' clause requires a component, '{s}' is a {s}", .{ tname_slice, @tagName(sym.kind) });
-                    } else {
-                        try ctx.components_in_when.put(self.gpa, node.type_name, {});
-                    }
+                if (self.componentNamed(node.type_name) != null) {
+                    try ctx.components_in_when.put(self.gpa, node.type_name, {});
+                } else if (self.kindNamed(node.type_name)) |k| {
+                    try self.emit(.unknown_component_in_when, .error_, node.span, "'has' clause requires a component, '{s}' is a {s}", .{ tname_slice, @tagName(k) });
                 } else {
                     try self.emit(.unknown_component_in_when, .error_, node.span, "unknown component '{s}' in when clause", .{tname_slice});
                 }
@@ -5720,12 +5764,10 @@ pub const TypeChecker = struct {
             },
             .resource, .resource_changed => {
                 const tname_slice = self.arena.strings.slice(node.type_name);
-                if (self.symbols.get(node.type_name)) |sym| {
-                    if (sym.kind != .resource) {
-                        try self.emit(.resource_expected_in_when, .error_, node.span, "'resource' clause requires a resource, '{s}' is a {s}", .{ tname_slice, @tagName(sym.kind) });
-                    } else {
-                        try ctx.resources_in_when.put(self.gpa, node.type_name, {});
-                    }
+                if (self.resourceNamed(node.type_name) != null) {
+                    try ctx.resources_in_when.put(self.gpa, node.type_name, {});
+                } else if (self.kindNamed(node.type_name)) |k| {
+                    try self.emit(.resource_expected_in_when, .error_, node.span, "'resource' clause requires a resource, '{s}' is a {s}", .{ tname_slice, @tagName(k) });
                 } else {
                     try self.emit(.resource_expected_in_when, .error_, node.span, "unknown resource '{s}' in when clause", .{tname_slice});
                 }
@@ -5748,14 +5790,11 @@ pub const TypeChecker = struct {
                 // fields bound by name) and must be bool (E1211). An unknown
                 // name inside the filter surfaces as the regular E0102.
                 const tname_slice = self.arena.strings.slice(node.type_name);
-                if (self.symbols.get(node.type_name)) |sym| {
-                    if (sym.kind != .component) {
-                        try self.emit(.unknown_component_in_when, .error_, node.span, "'has' clause requires a component, '{s}' is a {s}", .{ tname_slice, @tagName(sym.kind) });
-                    } else {
-                        try ctx.components_in_when.put(self.gpa, node.type_name, {});
-                        const decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
-                        try self.checkWhenExprFilter(node, decl.fields_start, decl.fields_len);
-                    }
+                if (self.componentNamed(node.type_name)) |c| {
+                    try ctx.components_in_when.put(self.gpa, node.type_name, {});
+                    try self.checkWhenExprFilter(node, c.arena, c.decl.fields_start, c.decl.fields_len);
+                } else if (self.kindNamed(node.type_name)) |k| {
+                    try self.emit(.unknown_component_in_when, .error_, node.span, "'has' clause requires a component, '{s}' is a {s}", .{ tname_slice, @tagName(k) });
                 } else {
                     try self.emit(.unknown_component_in_when, .error_, node.span, "unknown component '{s}' in when clause", .{tname_slice});
                 }
@@ -5764,14 +5803,11 @@ pub const TypeChecker = struct {
                 // `resource T { expression }` (— §6). Resource check
                 // identical to `.resource`; same fields-only filter typing.
                 const tname_slice = self.arena.strings.slice(node.type_name);
-                if (self.symbols.get(node.type_name)) |sym| {
-                    if (sym.kind != .resource) {
-                        try self.emit(.resource_expected_in_when, .error_, node.span, "'resource' clause requires a resource, '{s}' is a {s}", .{ tname_slice, @tagName(sym.kind) });
-                    } else {
-                        try ctx.resources_in_when.put(self.gpa, node.type_name, {});
-                        const decl = self.arena.resource_decls.items[self.arena.itemData(sym.item_id)];
-                        try self.checkWhenExprFilter(node, decl.fields_start, decl.fields_len);
-                    }
+                if (self.resourceNamed(node.type_name)) |r| {
+                    try ctx.resources_in_when.put(self.gpa, node.type_name, {});
+                    try self.checkWhenExprFilter(node, r.arena, r.decl.fields_start, r.decl.fields_len);
+                } else if (self.kindNamed(node.type_name)) |k| {
+                    try self.emit(.resource_expected_in_when, .error_, node.span, "'resource' clause requires a resource, '{s}' is a {s}", .{ tname_slice, @tagName(k) });
                 } else {
                     try self.emit(.resource_expected_in_when, .error_, node.span, "unknown resource '{s}' in when clause", .{tname_slice});
                 }
@@ -5796,13 +5832,18 @@ pub const TypeChecker = struct {
     /// `resource T`) in a FIELDS-ONLY scope: each field of the
     /// filtered component/resource is bound by name to its declared type.
     /// Non-bool filters are E1211 (the field-filter code family).
-    fn checkWhenExprFilter(self: *TypeChecker, node: ast_mod.WhenNode, fields_start: u32, fields_len: u32) !void {
+    fn checkWhenExprFilter(self: *TypeChecker, node: ast_mod.WhenNode, a: *const AstArena, fields_start: u32, fields_len: u32) !void {
         var scratch: RuleCtx = .{};
         defer scratch.deinit(self.gpa);
         var f: u32 = 0;
         while (f < fields_len) : (f += 1) {
-            const field = self.arena.fields.items[fields_start + f];
-            try scratch.locals.put(self.gpa, field.name, .{ .type_ = self.namedTypeToResolved(field.type_node), .is_mut = false });
+            const field = a.fields.items[fields_start + f];
+            if (a == self.arena) {
+                try scratch.locals.put(self.gpa, field.name, .{ .type_ = self.namedTypeToResolved(field.type_node), .is_mut = false });
+            } else {
+                const name = try self.arena.strings.intern(self.gpa, a.strings.slice(field.name));
+                try scratch.locals.put(self.gpa, name, .{ .type_ = self.foreignFieldType(a, field.type_node), .is_mut = false });
+            }
         }
         const t = try self.synthExprE(node.filter_value, &scratch);
         if (t != .unknown and !(t == .builtin and t.builtin == .bool_)) {
@@ -5837,27 +5878,14 @@ pub const TypeChecker = struct {
 
     fn checkFieldFilter(self: *TypeChecker, node: ast_mod.WhenNode) !void {
         // `entity has T { field == value }` — verify field on T and value type.
-        const comp_sym = self.symbols.get(node.type_name) orelse return;
-        if (comp_sym.kind != .component) return;
-        const comp_data = self.arena.itemData(comp_sym.item_id);
-        const comp_decl = self.arena.component_decls.items[comp_data];
-        var f_i: u32 = 0;
-        var found: ?ast_mod.Field = null;
-        while (f_i < comp_decl.fields_len) : (f_i += 1) {
-            const f = self.arena.fields.items[comp_decl.fields_start + f_i];
-            if (f.name == node.field_name) {
-                found = f;
-                break;
-            }
-        }
-        if (found == null) {
+        const comp = self.componentNamed(node.type_name) orelse return;
+        const declared = self.fieldTypeIn(comp.arena, comp.decl.fields_start, comp.decl.fields_len, node.field_name) orelse {
             const fname = self.arena.strings.slice(node.field_name);
             const tname = self.arena.strings.slice(node.type_name);
             try self.emit(.invalid_field_filter, .error_, node.span, "component '{s}' has no field '{s}'", .{ tname, fname });
             return;
-        }
+        };
         if (!try self.foldsAsConstant(node.filter_value, "field filter value must be a constant expression")) return;
-        const declared = self.namedTypeToResolved(found.?.type_node);
         const actual = self.synthExpr(node.filter_value, null);
         if (declared == .builtin and actual == .builtin and !try self.literalTypeFits(declared.builtin, node.filter_value, actual.builtin)) {
             try self.emit(.invalid_field_filter, .error_, node.span, "field filter type does not match field declared type", .{});
@@ -5869,28 +5897,20 @@ pub const TypeChecker = struct {
     /// `entity_event` / `global_event` payload filter: each `IDENT :
     /// expression` must name a field of `T` (`E1211 InvalidFieldFilter` else)
     /// and its value must fit that field's declared type (`E0200 TypeMismatch`
-    /// else). `event_decl_index` indexes `arena.event_decls`.
-    fn checkEventFieldRun(self: *TypeChecker, event_decl_index: u32, start: u32, len: u32, ctx_opt: ?*RuleCtx) !void {
-        const decl = self.arena.event_decls.items[event_decl_index];
+    /// else).
+    fn checkEventFieldRun(self: *TypeChecker, ev: ForeignEvent, start: u32, len: u32, ctx_opt: ?*RuleCtx) !void {
+        const decl = ev.decl;
         var i: u32 = 0;
         while (i < len) : (i += 1) {
             const flit = self.arena.struct_lit_fields.items[start + i];
-            var declared: ?ResolvedType = null;
-            var f_i: u32 = 0;
-            while (f_i < decl.fields_len) : (f_i += 1) {
-                const f = self.arena.fields.items[decl.fields_start + f_i];
-                if (f.name == flit.name) {
-                    declared = self.namedTypeToResolved(f.type_node);
-                    break;
-                }
-            }
+            const declared = self.fieldTypeIn(ev.arena, decl.fields_start, decl.fields_len, flit.name);
             const actual = self.synthExpr(flit.value, ctx_opt);
             if (declared) |d| {
                 if (d == .builtin and actual == .builtin and !try self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "event field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
                 }
             } else {
-                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(flit.value), "event '{s}' has no field '{s}'", .{ self.arena.strings.slice(decl.name), self.arena.strings.slice(flit.name) });
+                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(flit.value), "event '{s}' has no field '{s}'", .{ ev.arena.strings.slice(decl.name), self.arena.strings.slice(flit.name) });
             }
         }
     }
@@ -5902,20 +5922,18 @@ pub const TypeChecker = struct {
     /// `arena.resolveEventEntityTarget`). The optional payload filter is validated for
     /// both targets.
     fn checkEventTarget(self: *TypeChecker, await_id: NodeId, aw: ast_mod.AwaitExpr, entity_scoped: bool, ctx_opt: ?*RuleCtx) !void {
-        const sym = self.symbols.get(aw.event_type);
-        if (sym == null or sym.?.kind != .event_) {
+        const ev = self.eventNamed(aw.event_type) orelse {
             try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(await_id), "'{s}' is not a declared event", .{self.arena.strings.slice(aw.event_type)});
             return;
-        }
-        const decl_index = self.arena.itemData(sym.?.item_id);
+        };
         if (entity_scoped) {
-            switch (self.arena.resolveEventEntityTarget(self.arena.event_decls.items[decl_index])) {
+            switch (ev.arena.resolveEventEntityTarget(ev.decl)) {
                 .field => {},
                 .none_entity => try self.emit(.event_not_entity_scoped, .error_, self.arena.exprSpan(await_id), "event '{s}' has no Entity field — 'await entity_event' requires a designated entity target", .{self.arena.strings.slice(aw.event_type)}),
                 .ambiguous => try self.emit(.ambiguous_event_entity_target, .error_, self.arena.exprSpan(await_id), "event '{s}' has multiple Entity fields — annotate the target field with '@entity_target'", .{self.arena.strings.slice(aw.event_type)}),
             }
         }
-        try self.checkEventFieldRun(decl_index, aw.filter_start, aw.filter_len, ctx_opt);
+        try self.checkEventFieldRun(ev, aw.filter_start, aw.filter_len, ctx_opt);
     }
 
     fn checkStmt(self: *TypeChecker, ctx: *RuleCtx, stmt_id: NodeId) !void {
@@ -6245,13 +6263,12 @@ pub const TypeChecker = struct {
                 // enqueued at runtime (interp dynamic event store / codegen
                 // `world.event_bus.emit`).
                 const em = self.arena.emit_stmts.items[data];
-                const sym = self.symbols.get(em.event_type);
-                if (sym == null or sym.?.kind != .event_) {
-                    try self.emit(.undefined_symbol, .error_, self.arena.stmtSpan(stmt_id), "'{s}' is not a declared event", .{self.arena.strings.slice(em.event_type)});
-                } else {
+                if (self.eventNamed(em.event_type)) |ev| {
                     // Field-value validation is shared with the `entity_event` /
                     // `global_event` payload filter.
-                    try self.checkEventFieldRun(self.arena.itemData(sym.?.item_id), em.fields_start, em.fields_len, ctx);
+                    try self.checkEventFieldRun(ev, em.fields_start, em.fields_len, ctx);
+                } else {
+                    try self.emit(.undefined_symbol, .error_, self.arena.stmtSpan(stmt_id), "'{s}' is not a declared event", .{self.arena.strings.slice(em.event_type)});
                 }
             },
             .tag_mutation_stmt => {
@@ -6893,12 +6910,12 @@ pub const TypeChecker = struct {
                     if (builtinResourceByName(tname) != null) {
                         return .{ .resource = mg.type_name };
                     }
-                    if (self.symbols.get(mg.type_name)) |sym| {
-                        if (sym.kind == .component) {
+                    if (self.kindNamed(mg.type_name)) |k| {
+                        if (k == .component) {
                             try self.emit(.resource_expected_component_given, .error_, self.arena.exprSpan(id), "'{s}' is a component — receiver-less get(...) accesses a resource; use entity.get({s})", .{ tname, tname });
                             return ResolvedType.unknown;
                         }
-                        if (sym.kind != .resource) {
+                        if (k != .resource) {
                             try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a resource", .{tname});
                             return ResolvedType.unknown;
                         }
@@ -8159,23 +8176,21 @@ pub const TypeChecker = struct {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "emit needs an explicit event type ('T {{ ... }}')", .{});
             return;
         }
-        const sym = self.symbols.get(sl.type_name);
-        if (sym == null or sym.?.kind != .event_) {
+        const ev = self.eventNamed(sl.type_name) orelse {
             try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(arg), "'{s}' is not a declared event", .{self.arena.strings.slice(sl.type_name)});
             return;
-        }
-        try self.checkEventFieldRun(self.arena.itemData(sym.?.item_id), sl.fields_start, sl.fields_len, ctx_opt);
+        };
+        try self.checkEventFieldRun(ev, sl.fields_start, sl.fields_len, ctx_opt);
     }
 
     /// validate a type name used in a structural mutation
     /// (`entity.remove(T)` and the component-literal types of `spawn` / `add`)
-    /// resolves to a declared `component`. Mirrors the `when has` component
-    /// lookup (`self.symbols.get` + `SymbolKind.component`).
+    /// resolves to a declared `component`, as the `when has` lookup does.
     fn checkStructuralComponentName(self: *TypeChecker, name: StringId, span: SourceSpan) TypeError!void {
         const tname = self.arena.strings.slice(name);
-        if (self.symbols.get(name)) |sym| {
-            if (sym.kind != .component) {
-                try self.emit(.type_mismatch, .error_, span, "structural mutation requires a component, '{s}' is a {s}", .{ tname, @tagName(sym.kind) });
+        if (self.kindNamed(name)) |k| {
+            if (k != .component) {
+                try self.emit(.type_mismatch, .error_, span, "structural mutation requires a component, '{s}' is a {s}", .{ tname, @tagName(k) });
             }
         } else {
             try self.emit(.type_mismatch, .error_, span, "unknown component '{s}' in structural mutation", .{tname});
@@ -8882,13 +8897,8 @@ pub const TypeChecker = struct {
     fn lookupFieldType(self: *TypeChecker, receiver_type: ResolvedType, field_name: StringId, span: SourceSpan) !ResolvedType {
         switch (receiver_type) {
             .component => |name_id| {
-                const sym = self.symbols.get(name_id) orelse return ResolvedType.unknown;
-                const decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
-                var i: u32 = 0;
-                while (i < decl.fields_len) : (i += 1) {
-                    const f = self.arena.fields.items[decl.fields_start + i];
-                    if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
-                }
+                const c = self.componentNamed(name_id) orelse return ResolvedType.unknown;
+                if (self.fieldTypeIn(c.arena, c.decl.fields_start, c.decl.fields_len, field_name)) |t| return t;
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on component '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
@@ -8904,13 +8914,8 @@ pub const TypeChecker = struct {
                     try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on builtin resource '{s}'", .{ fname, br.name });
                     return ResolvedType.unknown;
                 }
-                const sym = self.symbols.get(name_id) orelse return ResolvedType.unknown;
-                const decl = self.arena.resource_decls.items[self.arena.itemData(sym.item_id)];
-                var i: u32 = 0;
-                while (i < decl.fields_len) : (i += 1) {
-                    const f = self.arena.fields.items[decl.fields_start + i];
-                    if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
-                }
+                const r = self.resourceNamed(name_id) orelse return ResolvedType.unknown;
+                if (self.fieldTypeIn(r.arena, r.decl.fields_start, r.decl.fields_len, field_name)) |t| return t;
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on resource '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
@@ -8931,25 +8936,8 @@ pub const TypeChecker = struct {
                 // Field of the implicit `event` binding inside an `@on_event(T)`
                 // observer — e.g. `event.amount`. An event is a POD
                 // struct of fields, resolved against its declaration.
-                if (self.symbols.get(name_id)) |sym| {
-                    const decl = self.arena.event_decls.items[self.arena.itemData(sym.item_id)];
-                    var i: u32 = 0;
-                    while (i < decl.fields_len) : (i += 1) {
-                        const f = self.arena.fields.items[decl.fields_start + i];
-                        if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
-                    }
-                } else if (self.declaredEvent(name_id)) |fe| {
-                    // Cross-arena field lookup, BY BYTES on both the field name
-                    // and the type — the discipline that holds for
-                    // `checkComponentInstance`, and bounded the same way:
-                    // builtins resolve, a named foreign type yields `unknown`.
-                    const want = self.arena.strings.slice(field_name);
-                    var i: u32 = 0;
-                    while (i < fe.decl.fields_len) : (i += 1) {
-                        const f = fe.arena.fields.items[fe.decl.fields_start + i];
-                        if (!std.mem.eql(u8, fe.arena.strings.slice(f.name), want)) continue;
-                        return self.foreignFieldType(fe.arena, f.type_node);
-                    }
+                if (self.eventNamed(name_id) orelse self.declaredEvent(name_id)) |ev| {
+                    if (self.fieldTypeIn(ev.arena, ev.decl.fields_start, ev.decl.fields_len, field_name)) |t| return t;
                 }
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on event '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;

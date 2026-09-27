@@ -217,3 +217,86 @@ test "a hook reaches imported requires and own components" {
     try etch.validateProject(gpa, &files, &diags);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 }
+
+const positions_lib =
+    \\component C { v: int = 0 }
+    \\component D { v: int = 0 }
+    \\resource R { v: int = 0 }
+    \\event P { v: int = 0 }
+    \\event Hit { who: Entity }
+    \\
+;
+
+const Case = struct { name: []const u8, body: []const u8 };
+const position_cases = [_]Case{
+    .{ .name = "when has", .body = "rule r(entity: Entity) when entity has C { }" },
+    .{ .name = "when has changed", .body = "rule r(entity: Entity) when entity has C changed { }" },
+    .{ .name = "when has field filter", .body = "rule r(entity: Entity) when entity has C { v == 1 } { }" },
+    .{ .name = "when has expr filter", .body = "rule r(entity: Entity) when entity has C { v > 0 } { }" },
+    .{ .name = "when resource", .body = "rule r() when resource R { }" },
+    .{ .name = "when resource changed", .body = "rule r() when resource R changed { }" },
+    .{ .name = "when resource filter", .body = "rule r() when resource R { v > 0 } { }" },
+    .{ .name = "body get", .body = "rule r(entity: Entity) when entity has C { let x = entity.get(C).v }" },
+    .{ .name = "body get_mut", .body = "rule r(entity: Entity) when entity has C { entity.get_mut(C).v += 1 }" },
+    .{ .name = "body resource get", .body = "rule r() when resource R { let x = get(R).v }" },
+    .{ .name = "emit", .body = "rule r() { emit P { v: 1 } }" },
+    .{ .name = "emit bad field", .body = "rule r() { emit P { w: 1 } }" },
+    .{ .name = "await global_event", .body = "async rule r(e: Entity) when e has C { await global_event(P) }" },
+    .{ .name = "await global_event filter", .body = "async rule r(e: Entity) when e has C { await global_event(P { v: 1 }) }" },
+    .{ .name = "await entity_event", .body = "async rule r(e: Entity) when e has C { await entity_event(e, Hit) }" },
+    .{ .name = "on_event", .body = "@on_event(P)\nrule r() { let x = event.v }" },
+    .{ .name = "on_added", .body = "@on_added(C)\nrule r(entity: Entity, value: C) {}" },
+    .{ .name = "body add", .body = "rule r(entity: Entity) when entity has C { entity.add(D { v: 1 }) }" },
+    .{ .name = "body remove", .body = "rule r(entity: Entity) when entity has C { entity.remove(D) }" },
+    .{ .name = "body spawn", .body = "rule r() { spawn(C { v: 1 }) }" },
+    .{ .name = "sequence emit", .body = "sequence S {\n  track T: EventTrack { 0.0s: emit P { v: 1 } }\n}" },
+    .{ .name = "quest emit", .body = "fn check() -> bool { true }\nquest Q {\n  stage a {\n    objective main: check()\n    on_complete: emit P { v: 1 }\n  }\n}" },
+    .{ .name = "dialogue emit", .body = "dialogue Talk {\n  speaker \"npc\" { line: \"x\" }\n  emit P { v: 1 }\n  -> end\n}" },
+    .{ .name = "dialogue has", .body = "dialogue Talk {\n  speaker \"npc\" { line: \"x\" when player has C { v < 5 } }\n}" },
+    .{ .name = "behavior has", .body = "behavior B {\n  selector {\n    sequence when self has C { v < 5 } {\n      action: emit P { v: 1 }\n    }\n  }\n}" },
+    .{ .name = "behavior get", .body = "behavior B {\n  selector {\n    condition: self.get(C).v > 0\n  }\n}" },
+    .{ .name = "malformed when has field filter", .body = "rule r(entity: Entity) when entity has C { w == 1 } { }" },
+    .{ .name = "malformed when has expr filter", .body = "rule r(entity: Entity) when entity has C { w > 0 } { }" },
+    .{ .name = "malformed when resource filter", .body = "rule r() when resource R { w > 0 } { }" },
+    .{ .name = "malformed body get", .body = "rule r(entity: Entity) when entity has C { let x = entity.get(C).w }" },
+    .{ .name = "malformed body get type", .body = "rule r(entity: Entity) when entity has C { entity.get_mut(C).v = true }" },
+    .{ .name = "malformed body resource get", .body = "rule r() when resource R { let x = get(R).w }" },
+    .{ .name = "malformed emit type", .body = "rule r() { emit P { v: true } }" },
+    .{ .name = "malformed await filter", .body = "async rule r(e: Entity) when e has C { await global_event(P { w: 1 }) }" },
+    .{ .name = "malformed on_event field", .body = "@on_event(P)\nrule r() { let x = event.w }" },
+    .{ .name = "malformed body add field", .body = "rule r(entity: Entity) when entity has C { entity.add(D { w: 1 }) }" },
+    .{ .name = "malformed body spawn field", .body = "rule r() { spawn(C { w: 1 }) }" },
+    .{ .name = "malformed when has resource", .body = "rule r(entity: Entity) when entity has R { }" },
+    .{ .name = "malformed when resource comp", .body = "rule r() when resource C { }" },
+    .{ .name = "malformed emit component", .body = "rule r() { emit C { v: 1 } }" },
+};
+
+fn codesOf(files: []const etch.ProjectFile, out: *std.ArrayListUnmanaged(DiagnosticCode)) !void {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, files, &diags);
+    for (diags.items) |d| try out.append(gpa, d.code);
+}
+
+test "a name an import binds is judged as its declaration is, position by position" {
+    const gpa = std.testing.allocator;
+    var differing: usize = 0;
+    for (position_cases) |c| {
+        const declared_src = try std.mem.concat(gpa, u8, &.{ positions_lib, c.body });
+        defer gpa.free(declared_src);
+        const imported_src = try std.mem.concat(gpa, u8, &.{ "import lib { C, D, R, P, Hit }\n", c.body });
+        defer gpa.free(imported_src);
+        var declared: std.ArrayListUnmanaged(DiagnosticCode) = .empty;
+        defer declared.deinit(gpa);
+        var imported: std.ArrayListUnmanaged(DiagnosticCode) = .empty;
+        defer imported.deinit(gpa);
+        try codesOf(&.{.{ .name = "main.etch", .source = declared_src }}, &declared);
+        try codesOf(&.{ .{ .name = "lib.etch", .source = positions_lib }, .{ .name = "main.etch", .source = imported_src } }, &imported);
+        if (!std.mem.eql(DiagnosticCode, declared.items, imported.items)) {
+            differing += 1;
+            std.debug.print("{s}: declared {any}, imported {any}\n", .{ c.name, declared.items, imported.items });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), differing);
+}
