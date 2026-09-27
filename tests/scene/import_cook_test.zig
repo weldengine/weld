@@ -343,6 +343,7 @@ test "an alias naming a component the file also declares refuses the cook" {
         \\}
         },
     };
+    try expectCheckReports(&files, .duplicate_symbol);
     try expectPrefabRefused(error.DuplicateType, &files, 1);
 }
 
@@ -408,8 +409,22 @@ test "two imported components under one name refuse the cook" {
         \\}
         },
     };
-    try expectChecked(&files);
+    try expectCheckReports(&files, .duplicate_symbol);
     try expectPrefabRefused(error.DuplicateType, &files, 2);
+}
+
+fn expectCheckReports(files: []const ProjectFile, code: weld_etch.diagnostics.DiagnosticCode) !void {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(weld_etch.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try weld_etch.validateProject(gpa, files, &diags);
+    for (diags.items) |d| {
+        if (d.code == code) return;
+    }
+    return error.TestExpectedDiagnostic;
 }
 
 fn expectCheckRefused(files: []const ProjectFile) !void {
@@ -540,8 +555,8 @@ test "an alias spelling a builtin type name refuses a hook's cook" {
         \\}
         },
     };
-    try expectChecked(&files);
-    try std.testing.expectError(error.HookRenderFailed, scene_cook.cookPrefabInProject(gpa, &files, 2, base_res.base(), null));
+    try expectCheckReports(&files, .duplicate_symbol);
+    try std.testing.expectError(error.HookRefused, scene_cook.cookPrefabInProject(gpa, &files, 2, base_res.base(), null));
 }
 
 test "a hook names what the last import of a name binds, as in etch check" {

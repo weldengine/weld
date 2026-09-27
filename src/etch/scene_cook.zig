@@ -955,16 +955,16 @@ const Builder = struct {
             else => return fail(diag_out, error.HookRenderFailed, "extension hook body could not be rendered to text"),
         };
         defer self.gpa.free(text);
-        const spelled = try self.withOwnNames(text, diag_out);
+        const spelled = try self.withOwnNames(text);
         defer self.gpa.free(spelled);
         return self.internString(spelled);
     }
 
     /// `text` with each import alias spelled by the name it aliases: the loader
     /// checks and runs a hook against a program that declares it under that
-    /// name. An alias spelled like a builtin type or resource refuses the cook,
-    /// the text no longer telling the two apart.
-    fn withOwnNames(self: *Builder, text: []const u8, diag_out: ?*[]const u8) CookError![]u8 {
+    /// name. `checkHooks` has refused an alias spelled like a builtin type or
+    /// resource, which the respelled text could not tell apart.
+    fn withOwnNames(self: *Builder, text: []const u8) CookError![]u8 {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         errdefer out.deinit(self.gpa);
         var lx = lexer.Lexer.init(text);
@@ -976,8 +976,6 @@ const Builder = struct {
             if (tok.kind != .type_ident) continue;
             const alias = text[tok.span.byte_start..tok.span.byte_end];
             const own = self.aliases.get(alias) orelse continue;
-            if (types_mod.BuiltinType.fromName(alias) != null or types_mod.builtinResourceByName(alias) != null)
-                return fail(diag_out, error.HookRenderFailed, "an import alias spelled like a builtin type or resource names the extension hook's component ambiguously");
             try out.appendSlice(self.gpa, text[copied..tok.span.byte_start]);
             try out.appendSlice(self.gpa, own);
             copied = tok.span.byte_end;

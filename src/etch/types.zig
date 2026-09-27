@@ -814,7 +814,73 @@ pub const TypeChecker = struct {
     fn runDeclarationPasses(self: *TypeChecker) !void {
         try self.collectDeclarations();
         try self.bindImports();
+        try self.checkComponentIdentities();
         try self.validateDeclarations();
+    }
+
+    /// E0101 on two components reaching this file under one name, a component's
+    /// runtime identity being its name.
+    fn checkComponentIdentities(self: *TypeChecker) !void {
+        const project = self.project orelse return;
+        const Owner = struct { arena: *const AstArena, item: u32 };
+        var owners: std.StringHashMapUnmanaged(Owner) = .empty;
+        defer owners.deinit(self.gpa);
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        const spans = self.arena.items.items(.span);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .component_decl) continue;
+            const name = self.arena.strings.slice(self.arena.component_decls.items[datas[i]].name);
+            try owners.put(self.gpa, name, .{ .arena = self.arena, .item = i });
+        }
+        i = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .import_decl) continue;
+            const decl = self.arena.import_decls.items[datas[i]];
+            var j: u32 = 0;
+            while (j < decl.items_len) : (j += 1) {
+                const item = self.arena.import_items.items[decl.items_start + j];
+                const entry = self.importedBinding(importLocalName(item)) orelse continue;
+                if (entry.kind != .component) continue;
+                const decl_arena = &project.arenas[entry.arena_index];
+                const name = decl_arena.strings.slice(decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)].name);
+                const owner: Owner = .{ .arena = decl_arena, .item = entry.item_id.index };
+                const gop = try owners.getOrPut(self.gpa, name);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = owner;
+                } else if (!std.meta.eql(gop.value_ptr.*, owner)) {
+                    try self.emit(.duplicate_symbol, .error_, spans[i], "two components named '{s}' reach this file, and a component's runtime identity is its name", .{name});
+                }
+            }
+        }
+    }
+
+    /// The import aliases of this file the cook respells: those whose item is
+    /// the one binding the alias.
+    fn boundAliases(self: *TypeChecker) !std.StringHashMapUnmanaged(void) {
+        var out: std.StringHashMapUnmanaged(void) = .empty;
+        errdefer out.deinit(self.gpa);
+        const project = self.project orelse return out;
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: usize = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .import_decl) continue;
+            const decl = self.arena.import_decls.items[datas[i]];
+            const path = try importPath(self.gpa, self.arena, decl);
+            defer self.gpa.free(path);
+            const target = project.module_index.get(path) orelse continue;
+            var j: u32 = 0;
+            while (j < decl.items_len) : (j += 1) {
+                const item = self.arena.import_items.items[decl.items_start + j];
+                if (item.alias == 0) continue;
+                const bound = self.importedBinding(item.alias) orelse continue;
+                const own = importedExport(project, self.arena, target, item) orelse continue;
+                if (std.meta.eql(own, bound)) try out.put(self.gpa, self.arena.strings.slice(item.alias), {});
+            }
+        }
+        return out;
     }
 
     /// The passes before the imports bind: the file's own symbols.
@@ -2593,7 +2659,23 @@ pub const TypeChecker = struct {
                 try scope.put(self.gpa, self.arena.component_instances.items[ent.components_start + c].type_name, {});
             }
         }
+        try self.checkHookAliases(decl, start, len);
         try self.checkHookBody(&scope, start, len);
+    }
+
+    /// E0101 on a hook naming an import alias `builtinSpelledAlias` refuses.
+    fn checkHookAliases(self: *TypeChecker, decl: ast_mod.PrefabDecl, start: u32, len: u32) !void {
+        if (self.project == null) return;
+        const text = descriptor_mod.renderStmtRunAlloc(self.gpa, self.arena, start, len) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return,
+        };
+        defer self.gpa.free(text);
+        var aliases = try self.boundAliases();
+        defer aliases.deinit(self.gpa);
+        if (try builtinSpelledAlias(self.gpa, text, &aliases)) |alias| {
+            try self.emit(.duplicate_symbol, .error_, decl.name_span, "import alias '{s}' is spelled like a builtin type or resource, and an extension hook cannot tell the two apart", .{alias});
+        }
     }
 
     /// A hook body gated on the components `scope` holds, in a hook's context.
