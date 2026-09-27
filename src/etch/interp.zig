@@ -1351,8 +1351,9 @@ pub const Interpreter = struct {
     /// set; the registry holds `&observer_ctxs[k]` as its opaque `ctx`. Freed at
     /// `deinit` (the interpreter must outlive any observer-firing flush).
     observer_ctxs: []ObserverCtx = &.{},
-    /// Set once observers have been registered (idempotent `bindToWorld`).
-    observers_bound: bool = false,
+    /// The address `bindToWorld` registered into the world, which holds it as
+    /// the hooks' and observers' context. Non-null once bound.
+    bound_at: ?*const Interpreter = null,
     /// Non-null while an observer body runs: the registry's deferred
     /// command buffer. Structural mutations issued by the body (tag mutations)
     /// route here instead of `pending_tags`, so they apply at the NEXT flush —
@@ -1710,11 +1711,10 @@ pub const Interpreter = struct {
     }
 
     pub fn runFor(self: *Interpreter, world: *World, ticks: u32) !RuntimeReport {
-        // Register this program's observer rules into the world's
-        // `ObserverRegistry` — lazily, once, now that `self` is at a
-        // stable address (the caller holds the interpreter; `compile` returns by
-        // value). A test that drives a Tier-0 flush directly calls `bindToWorld`
-        // itself before flushing.
+        // Bound here and not in `compile`, which returns by value: the world
+        // keeps this address, so the interpreter must not move once it runs. A
+        // test that drives a Tier-0 flush directly calls `bindToWorld` itself
+        // before flushing.
         try self.bindToWorld(world);
         var report: RuntimeReport = .{};
         var t: u32 = 0;
@@ -1832,11 +1832,12 @@ pub const Interpreter = struct {
     /// Register this program's observer rules into `world`'s `ObserverRegistry`.
     /// Idempotent: the first call allocates one `ObserverCtx` per observer rule and
     /// registers a trampoline keyed on the rule's lifecycle kind + target component;
-    /// later calls no-op. Called lazily by `runFor`, or explicitly by a test that
-    /// drives a Tier-0 flush before any tick.
+    /// later calls no-op, and refuse from a copy of the bound interpreter. Called
+    /// lazily by `runFor`, or explicitly by a test that drives a Tier-0 flush
+    /// before any tick.
     pub fn bindToWorld(self: *Interpreter, world: *World) !void {
-        if (self.observers_bound) return;
-        self.observers_bound = true;
+        if (self.bound_at != null) return self.checkNotMoved();
+        self.bound_at = self;
 
         // register the extension hook seams so the loader's
         // `dispatchOnAttach` / runtime `deactivate_extension` reach `execHookText`.
@@ -1869,6 +1870,12 @@ pub const Interpreter = struct {
                 .on_despawned => try reg.registerOnDespawned(self.gpa, ctx, &observerTrampoline),
             }
         }
+    }
+
+    /// Refuse to run from an address other than the one the world holds: the
+    /// world would call back into the interpreter this one was copied from.
+    fn checkNotMoved(self: *const Interpreter) error{InterpreterMovedAfterBind}!void {
+        if (self.bound_at) |at| if (at != self) return error.InterpreterMovedAfterBind;
     }
 
     /// Top-level trampoline matching `observers.ObserverFn`: unpack
@@ -2152,6 +2159,7 @@ pub const Interpreter = struct {
     }
 
     pub fn stepOnce(self: *Interpreter, world: *World, report: *RuntimeReport) !void {
+        try self.checkNotMoved();
         // Advance `current_tick` (and clear the dirty bitsets) at the start of
         // the tick when change detection is live, so a write this tick stamps
         // `changedTick = current_tick > last_run_tick` and a `changed` filter
@@ -17211,23 +17219,68 @@ test "a rule parameter typed by an alias of a scalar is bound as that scalar" {
     try std.testing.expect(locals.get(dt).? == .float_);
 }
 
-/// One tick of `source` over one entity carrying `Acc`, unchecked. The caller
-/// owns the returned interpreter.
-fn tickOnAcc(gpa: std.mem.Allocator, world: *World, pr: *const parser_mod.ParseResult) !struct { interp: Interpreter, report: RuntimeReport, bytes: []u8 } {
+/// One tick of `source` over one entity carrying `Acc`, unchecked, by an
+/// interpreter compiled into `interp`, which the caller then owns.
+fn tickOnAcc(gpa: std.mem.Allocator, world: *World, pr: *const parser_mod.ParseResult, interp: *Interpreter) !struct { report: RuntimeReport, bytes: []u8 } {
     try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
-    var interp = try Interpreter.compile(gpa, &pr.ast, world);
+    interp.* = try Interpreter.compile(gpa, &pr.ast, world);
     errdefer interp.deinit();
     const cid = world.registry.idOf("Acc").?;
     const e = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
     const report = try interp.runFor(world, 1);
     const off = world.registry.findField(cid, "out").?.offset;
-    return .{ .interp = interp, .report = report, .bytes = world.componentBytes(e, cid).?[off..] };
+    return .{ .report = report, .bytes = world.componentBytes(e, cid).?[off..] };
 }
 
 /// Asserts `report` holds exactly one runtime error, of `kind`.
 fn expectRuntimeError(report: RuntimeReport, kind: RuntimeErrorKind) !void {
     try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
     try std.testing.expectEqual(kind, (report.last_error orelse return error.TestExpectedTypedError).kind);
+}
+
+test "an interpreter moved after it bound its world refuses to tick" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component Acc { out: int = 0 }\n");
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var moved = interp;
+    var report: RuntimeReport = .{};
+    try std.testing.expectError(error.InterpreterMovedAfterBind, moved.stepOnce(&world, &report));
+}
+
+test "an interpreter moved after it bound its world refuses to bind again" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component Acc { out: int = 0 }\n");
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var moved = interp;
+    try std.testing.expectError(error.InterpreterMovedAfterBind, moved.bindToWorld(&world));
+}
+
+test "an interpreter tickOnAcc ran ticks again" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  entity.get_mut(Acc).out += 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 2), std.mem.readInt(i64, run.bytes[0..8], .little));
 }
 
 test "an overflowing addition panics or wraps by build mode" {
@@ -17242,8 +17295,9 @@ test "an overflowing addition panics or wraps by build mode" {
         \\}
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     if (value_mod.overflow_wraps) {
         try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
         try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
@@ -17263,8 +17317,9 @@ test "an overflowing compound assignment reports IntegerOverflow" {
         \\}
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     if (value_mod.overflow_wraps) {
         try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
     } else try expectRuntimeError(run.report, .IntegerOverflow);
@@ -17282,8 +17337,9 @@ test "negating the int minimum panics or wraps by build mode" {
         \\}
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     if (value_mod.overflow_wraps) {
         try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
     } else try expectRuntimeError(run.report, .IntegerOverflow);
@@ -17298,8 +17354,9 @@ test "the int minimum literal evaluates" {
         \\rule r(entity: Entity) when entity has Acc { entity.get_mut(Acc).out = -9223372036854775808 }
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
     try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
 }
@@ -17313,8 +17370,9 @@ test "a literal with a trailing separator evaluates" {
         \\rule r(entity: Entity) when entity has Acc { entity.get_mut(Acc).out = 1_000_ }
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
     try std.testing.expectEqual(@as(i64, 1000), std.mem.readInt(i64, run.bytes[0..8], .little));
 }
@@ -17331,8 +17389,9 @@ test "a narrowing cast panics or wraps by build mode" {
         \\}
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     if (value_mod.overflow_wraps) {
         try std.testing.expectEqual(@as(i32, -1294967296), std.mem.readInt(i32, run.bytes[0..4], .little));
     } else try expectRuntimeError(run.report, .IntegerOverflow);
@@ -17350,8 +17409,9 @@ test "a float beyond the integer range fails its cast in every mode" {
         \\}
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     try expectRuntimeError(run.report, .IntegerOverflow);
 }
 
@@ -17367,8 +17427,9 @@ test "a cast to f32 rounds to f32" {
         \\}
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
     const want: f64 = @as(f32, 0.1);
     try std.testing.expectEqual(want, @as(f64, @bitCast(std.mem.readInt(u64, run.bytes[0..8], .little))));
@@ -17386,8 +17447,9 @@ test "a store outside an i32 field panics or wraps by build mode" {
         \\}
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     if (value_mod.overflow_wraps) {
         try std.testing.expectEqual(@as(i32, -2), std.mem.readInt(i32, run.bytes[0..4], .little));
     } else try expectRuntimeError(run.report, .IntegerOverflow);
@@ -17406,8 +17468,9 @@ test "an inclusive range ending at the int maximum terminates" {
         \\}
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
     try std.testing.expectEqual(@as(i64, 2), std.mem.readInt(i64, run.bytes[0..8], .little));
 }
@@ -17428,8 +17491,9 @@ test "an omitted struct field takes the zero of its type" {
         \\}
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
     try std.testing.expectEqual(@as(f64, 1.5), @as(f64, @bitCast(std.mem.readInt(u64, run.bytes[0..8], .little))));
 }
@@ -17450,8 +17514,9 @@ test "an omitted struct field takes its string default" {
         \\}
     );
     defer pr.deinit(gpa);
-    var run = try tickOnAcc(gpa, &world, &pr);
-    defer run.interp.deinit();
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
     try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
     try std.testing.expectEqual(@as(i64, 2), std.mem.readInt(i64, run.bytes[0..8], .little));
 }
