@@ -1306,13 +1306,31 @@ const Builder = struct {
     }
 
     /// Resolve a base prefab's on-disk column to this registry's entity component
-    /// of the same size and alignment, the predicate the loader applies.
+    /// of the same size and alignment, the predicate the loader applies. A column
+    /// the source does not name, which `etch check` does not require, is
+    /// registered from its schema.
     fn baseColumnId(self: *Builder, sch: accessor.Accessor.Schema, diag_out: ?*[]const u8) CookError!ComponentId {
-        const id = self.registry.idOf(sch.name) orelse return fail(diag_out, error.BaseSchemaMismatch, "base prefab uses a component this source does not declare");
+        const id = self.registry.idOf(sch.name) orelse return self.registerBaseColumn(sch);
         if (self.registry.componentKind(id) == .resource) return fail(diag_out, error.BaseSchemaMismatch, "base prefab column is declared a resource here");
         if (self.registry.componentSize(id) != sch.size or self.registry.componentAlignment(id) != sch.alignment)
             return fail(diag_out, error.BaseSchemaMismatch, "base prefab column layout disagrees with this source's declaration");
         return id;
+    }
+
+    fn registerBaseColumn(self: *Builder, sch: accessor.Accessor.Schema) CookError!ComponentId {
+        const defaults = try self.a().alloc(u8, sch.size);
+        @memset(defaults, 0);
+        return self.registry.registerComponentRaw(self.gpa, .{
+            .name = sch.name,
+            .size = sch.size,
+            .alignment = sch.alignment,
+            .default_bytes = defaults,
+            .fields = &.{},
+        }) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            // The name is absent and the descriptor has no field.
+            error.DuplicateComponent, error.FieldOutOfBounds, error.CollectionDefaultNotEmpty => unreachable,
+        };
     }
 
     /// Build one component blob (`componentSize` bytes) from the type defaults

@@ -42,6 +42,7 @@ fn expectChecked(files: []const ProjectFile) !void {
         diags.deinit(gpa);
     }
     try weld_etch.validateProject(gpa, files, &diags);
+    for (diags.items) |d| std.debug.print("{s}: {s}\n", .{ d.code.code(), d.primary_message });
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 }
 
@@ -588,4 +589,76 @@ test "a hook names what the last import of a name binds, as in etch check" {
     var ext_res = OneResolver{ .name = "Mod", .bytes = mod_bytes };
     try scene.loader.runtimeActivate(&world, gpa, e, "Mod", ext_res.ext());
     try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, world.componentBytes(e, pos).?[0..4], .little));
+}
+
+const goblin_prefab =
+    \\import combat { Health, Weapon }
+    \\prefab "Goblin" {
+    \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Health { current: 5 } Weapon { damage: 3 } }
+    \\}
+;
+
+test "a scene instancing a prefab cooks without naming the prefab's components, as etch check allows" {
+    const gpa = std.testing.allocator;
+    const instance =
+        \\scene "Level" {
+        \\  instance of "Goblin" "G" { uuid: "00000000-0000-0000-0000-0000000000a1" }
+        \\}
+    ;
+    const files = [_]ProjectFile{
+        .{ .name = "src/combat.etch", .source = combat },
+        .{ .name = "src/goblin.prefab.etch", .source = goblin_prefab },
+        .{ .name = "src/level.scene.etch", .source = instance },
+    };
+    try expectChecked(&files);
+    const goblin = try prefabBytes(&files, 1, null);
+    defer gpa.free(goblin);
+    var resolver = OneResolver{ .name = "Goblin", .bytes = goblin };
+
+    var cooked = try scene_cook.cookSceneInProject(gpa, &files, 2, resolver.base(), null);
+    defer cooked.deinit(gpa);
+    const bytes = try written(&cooked);
+    defer gpa.free(bytes);
+    const importing = [_]ProjectFile{
+        files[0],
+        files[1],
+        .{ .name = "src/level.scene.etch", .source = "import combat { Health, Weapon }\n" ++ instance },
+    };
+    var reference = try scene_cook.cookSceneInProject(gpa, &importing, 2, resolver.base(), null);
+    defer reference.deinit(gpa);
+    const reference_bytes = try written(&reference);
+    defer gpa.free(reference_bytes);
+    try std.testing.expectEqualSlices(u8, reference_bytes, bytes);
+}
+
+test "a prefab variant cooks without naming its base's components, as etch check allows" {
+    const gpa = std.testing.allocator;
+    const variant =
+        \\import combat { Weapon }
+        \\prefab "Elite" of "Goblin" { entity "root" { Weapon { damage: 9 } } }
+    ;
+    const files = [_]ProjectFile{
+        .{ .name = "src/combat.etch", .source = combat },
+        .{ .name = "src/goblin.prefab.etch", .source = goblin_prefab },
+        .{ .name = "src/elite.prefab.etch", .source = variant },
+    };
+    try expectChecked(&files);
+    const goblin = try prefabBytes(&files, 1, null);
+    defer gpa.free(goblin);
+    var resolver = OneResolver{ .name = "Goblin", .bytes = goblin };
+
+    const bytes = try prefabBytes(&files, 2, resolver.base());
+    defer gpa.free(bytes);
+    const importing = [_]ProjectFile{
+        files[0],
+        files[1],
+        // A base column registers after the file's own imports.
+        .{ .name = "src/elite.prefab.etch", .source =
+        \\import combat { Weapon, Health }
+        \\prefab "Elite" of "Goblin" { entity "root" { Weapon { damage: 9 } } }
+        },
+    };
+    const reference_bytes = try prefabBytes(&importing, 2, resolver.base());
+    defer gpa.free(reference_bytes);
+    try std.testing.expectEqualSlices(u8, reference_bytes, bytes);
 }
