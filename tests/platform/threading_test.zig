@@ -9,29 +9,26 @@ test "setAffinity + setPriority on spawned thread" {
     }
 
     const Ctx = struct {
+        go: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
         done: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
         fn run(self: *@This()) void {
-            // Spin so the parent has time to issue both calls before exit.
-            var i: u32 = 0;
-            while (i < 10_000) : (i += 1) {
-                std.atomic.spinLoopHint();
-            }
+            while (!self.go.load(.acquire)) std.Thread.yield() catch {};
             self.done.store(1, .release);
         }
     };
 
     var ctx: Ctx = .{};
-    var t = try std.Thread.spawn(.{}, Ctx.run, .{&ctx});
+    {
+        var t = try std.Thread.spawn(.{}, Ctx.run, .{&ctx});
+        defer t.join();
+        // Both calls need a live thread, so it runs on only once they are done.
+        defer ctx.go.store(true, .release);
 
-    // Pin to core 0 — always exists. macOS no-ops.
-    try threading.setAffinity(t, 0);
-    // `.normal` and not `.high`: on POSIX without `CAP_SYS_NICE` the latter
-    // requires `SCHED_FIFO`/`RR`, and macOS no-ops either way. The contract
-    // under test is "returns without error", which holds on all three
-    // platforms.
-    try threading.setPriority(t, .normal);
-
-    t.join();
+        // Pin to core 0 — always exists. macOS no-ops.
+        try threading.setAffinity(t, 0);
+        // `.high` fails on POSIX without `CAP_SYS_NICE`.
+        try threading.setPriority(t, .normal);
+    }
     try std.testing.expectEqual(@as(u32, 1), ctx.done.load(.acquire));
 }

@@ -26,6 +26,26 @@ fn cookTextureBin(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []c
     try file.writeStreamingAll(io, bin);
 }
 
+const gated_path = "x.texture.bin";
+var open_released = std.atomic.Value(bool).init(false);
+var gated_opens = std.atomic.Value(u32).init(0);
+var base_vtable: *const std.Io.VTable = undefined;
+
+/// The base `Io`'s `dirOpenFile`, held for `gated_path` until the test sets
+/// `open_released`.
+fn gatedOpenFile(
+    userdata: ?*anyopaque,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    options: std.Io.Dir.OpenFileOptions,
+) std.Io.File.OpenError!std.Io.File {
+    if (std.mem.eql(u8, sub_path, gated_path)) {
+        _ = gated_opens.fetchAdd(1, .acq_rel);
+        while (!open_released.load(.acquire)) std.Thread.yield() catch {};
+    }
+    return base_vtable.dirOpenFile(userdata, dir, sub_path, options);
+}
+
 test "async load does not block main thread" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -37,20 +57,21 @@ test "async load does not block main thread" {
         0xff, 0x00, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff,
         0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0xff,
     };
-    try cookTextureBin(gpa, io, tmp.dir, "x.texture.bin", &rgba);
+    try cookTextureBin(gpa, io, tmp.dir, gated_path, &rgba);
 
     var loader = Loader.init(tmp.dir);
     defer loader.deinit(gpa);
 
-    var pending = try loader.beginLoad(gpa, io, "x.texture.bin");
-    var ticks: usize = 0;
-    while (!pending.ready()) {
-        ticks += 1;
-        std.mem.doNotOptimizeAway(ticks);
-    }
-    try std.testing.expect(ticks >= 1); // the main loop advanced; the read ran off-thread
+    var gated_vtable = io.vtable.*;
+    gated_vtable.dirOpenFile = gatedOpenFile;
+    base_vtable = io.vtable;
+    const gated_io: std.Io = .{ .userdata = io.userdata, .vtable = &gated_vtable };
 
-    const raw = try pending.wait(io);
+    var pending = try loader.beginLoad(gpa, gated_io, gated_path);
+    try std.testing.expect(!pending.ready());
+    open_released.store(true, .release);
+    const raw = try pending.wait(gated_io);
+    try std.testing.expectEqual(@as(u32, 1), gated_opens.load(.acquire));
     const handle = try loader.finish(gpa, raw);
 
     try std.testing.expectEqual(AssetType.texture, handle.assetType().?);
