@@ -1246,6 +1246,36 @@ pub fn build(b: *std.Build) void {
         psnr_step.dependOn(&psnr_run.step);
     }
 
+    // The pre-push ThreadSanitizer rerun of the Wayland stress test, invoked on
+    // Linux by `lefthook.yml`. `weld_core` is instrumented too: the backend
+    // under stress lives there.
+    {
+        const tsan_foundation = b.createModule(.{
+            .root_source_file = b.path("src/foundation/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = true,
+        });
+        const tsan_core = b.createModule(.{
+            .root_source_file = b.path("src/core/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = true,
+        });
+        tsan_core.addImport("foundation", tsan_foundation);
+        const tsan_mod = b.createModule(.{
+            .root_source_file = b.path("tests/platform/wayland_thread_safety_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = true,
+        });
+        tsan_mod.addImport("weld_core", tsan_core);
+        tsan_mod.addImport("test_env", test_env_modules[0]);
+        const tsan_step = b.step("test-tsan-wayland", "Run the Wayland stress test under ThreadSanitizer");
+        tsan_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tsan_mod })).step);
+    }
+
     // `zig build test-stress` builds and runs ONLY the
     // scheduler-livelock stress test. It is deliberately OUT of `test_step` and
     // must STAY out: the 100× stress-signal loop is a local validation tool, not
