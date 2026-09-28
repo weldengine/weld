@@ -300,3 +300,37 @@ test "a name an import binds is judged as its declaration is, position by positi
     }
     try std.testing.expectEqual(@as(usize, 0), differing);
 }
+
+test "a composite value for a field of an imported component is refused" {
+    const gpa = std.testing.allocator;
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "component C { n: int = 0 }" },
+        .{ .name = "level.scene.etch", .source =
+        \\import lib { C }
+        \\scene "L" { entity "e" { uuid: "00000000-0000-0000-0000-000000000001" C { n: [1, 2] } } }
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .scene_component_field_type_invalid));
+}
+
+test "one component under two local names is one type" {
+    const gpa = std.testing.allocator;
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "component Health { current: float = 100.0 }" },
+        .{ .name = "main.etch", .source =
+        \\import lib { Health }
+        \\import lib { Health as HP }
+        \\fn cur(h: Health) -> float { h.current }
+        \\rule r(entity: Entity) when entity has HP {
+        \\  let c = cur(entity.get(HP))
+        \\}
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}

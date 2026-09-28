@@ -2281,16 +2281,7 @@ pub const TypeChecker = struct {
             }
             break :blk try self.synthExprE(field.value, null);
         };
-        const mismatch = switch (d) {
-            .builtin => |db| actual == .builtin and !try self.literalTypeFits(db, field.value, actual.builtin),
-            .struct_t => |dn| actual == .struct_t and actual.struct_t != dn,
-            .enum_t => |dn| switch (actual) {
-                .enum_t => |an| an != dn,
-                .builtin => true,
-                else => false,
-            },
-            else => false,
-        };
+        const mismatch = !try self.valueFits(d, field.value, actual);
         if (mismatch) {
             try self.emit(tcode, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{self.arena.strings.slice(field.name)});
         }
@@ -2426,7 +2417,7 @@ pub const TypeChecker = struct {
         // valid component (forward-compat headroom).
         const declared_builtin = foreignBuiltinFieldType(decl_arena, tn) orelse return;
         const actual = try self.synthExprE(field.value, null);
-        if (actual == .builtin and !try self.literalTypeFits(declared_builtin, field.value, actual.builtin)) {
+        if (!try self.valueFits(.{ .builtin = declared_builtin }, field.value, actual)) {
             try self.emit(code_type, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{field_name_bytes});
         }
     }
@@ -2919,16 +2910,7 @@ pub const TypeChecker = struct {
             }
             break :blk try self.synthExprE(field.value, null);
         };
-        const mismatch = switch (d) {
-            .builtin => |db| actual == .builtin and !try self.literalTypeFits(db, field.value, actual.builtin),
-            .struct_t => |dn| actual == .struct_t and actual.struct_t != dn,
-            .enum_t => |dn| switch (actual) {
-                .enum_t => |an| an != dn,
-                .builtin => true,
-                else => false, // `.unknown` already reported upstream
-            },
-            else => false,
-        };
+        const mismatch = !try self.valueFits(d, field.value, actual);
         if (mismatch) {
             try self.emit(.entry_field_type_invalid, .error_, self.arena.exprSpan(field.value), "data entry field '{s}' value type does not match its declared type", .{self.arena.strings.slice(field.name)});
         }
@@ -4655,10 +4637,8 @@ pub const TypeChecker = struct {
         if (!try self.foldsAsConstant(value, "const value must be a constant expression (literal, arithmetic on literals, or parenthesized)")) return;
         const declared = self.namedTypeToResolved(type_node);
         const actual = self.synthExpr(value, null);
-        if (declared == .builtin and actual == .builtin) {
-            if (!try self.literalTypeFits(declared.builtin, value, actual.builtin)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "const value type does not match the declared type", .{});
-            }
+        if (!try self.valueFits(declared, value, actual)) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "const value type does not match the declared type", .{});
         }
     }
 
@@ -4672,13 +4652,9 @@ pub const TypeChecker = struct {
             return;
         }
         const actual = self.synthExpr(value, null);
-        if (declared == .builtin and actual == .builtin) {
-            if (!try self.literalTypeFits(declared.builtin, value, actual.builtin)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "default value type does not match declared field type", .{});
-            }
+        if (!try self.valueFits(declared, value, actual)) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "default value type does not match declared field type", .{});
         }
-        // If declared isn't builtin (e.g. unknown), we already emitted a
-        // diagnostic during field-type resolution — skip cascade.
     }
 
     /// A collection literal against the element types a `let` annotation
@@ -4839,6 +4815,78 @@ pub const TypeChecker = struct {
             if (self.constArrayLen(size) != null) continue;
             try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(size), "array size must be a non-negative integer literal", .{});
         }
+    }
+
+    /// Whether a value of type `actual` fits a slot of type `declared`. Two
+    /// composites of one kind are left to the checks of their own construct. A
+    /// generic fits anything: a struct's own type parameters resolve against the
+    /// caller's.
+    fn valueFits(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) !bool {
+        if (declared == .unknown or actual == .unknown or declared == .generic or actual == .generic) return true;
+        if (declared == .builtin and actual == .builtin) return self.literalTypeFits(declared.builtin, value, actual.builtin);
+        if (declared == .builtin and declared.builtin == .vec3 and actual == .array_fixed)
+            return actual.array_fixed.len == 3 and actual.array_fixed.elem.isNumeric();
+        if ((declared == .builtin) != (actual == .builtin)) return false;
+        if (std.meta.activeTag(declared) != std.meta.activeTag(actual)) return isArray(declared) and isArray(actual);
+        if (isNominal(declared)) return self.sameDeclaration(declared, actual);
+        return true;
+    }
+
+    fn isArray(t: ResolvedType) bool {
+        return t == .array_fixed or t == .array_dyn;
+    }
+
+    fn builtinWhere(t: ResolvedType, comptime pred: fn (BuiltinType) bool) bool {
+        return switch (t) {
+            .unknown, .generic => true,
+            .builtin => |bt| pred(bt),
+            else => false,
+        };
+    }
+
+    fn isBool(bt: BuiltinType) bool {
+        return bt == .bool_;
+    }
+
+    fn isDuration(bt: BuiltinType) bool {
+        return bt == .duration;
+    }
+
+    fn isString(bt: BuiltinType) bool {
+        return bt == .string_;
+    }
+
+    /// Whether two nominal types of one kind name one declaration, whatever
+    /// local name each carries.
+    fn sameDeclaration(self: *TypeChecker, a: ResolvedType, b: ResolvedType) bool {
+        const x = self.declarationOf(a) orelse return ResolvedType.eql(a, b);
+        const y = self.declarationOf(b) orelse return ResolvedType.eql(a, b);
+        return x.arena == y.arena and x.name == y.name;
+    }
+
+    const Declaration = struct { arena: *const AstArena, name: StringId };
+
+    fn declarationOf(self: *TypeChecker, t: ResolvedType) ?Declaration {
+        return switch (t) {
+            .component => |n| if (self.componentNamed(n)) |c| .{ .arena = c.arena, .name = c.decl.name } else null,
+            .resource => |n| if (self.resourceNamed(n)) |r| .{ .arena = r.arena, .name = r.decl.name } else null,
+            .event_t => |n| if (self.eventNamed(n) orelse self.declaredEvent(n)) |e| .{ .arena = e.arena, .name = e.decl.name } else null,
+            else => null,
+        };
+    }
+
+    /// Whether a match arm's type agrees with the earlier arms': two builtins
+    /// only when equal, an arm body being a bare literal as often as not.
+    fn armsAgree(self: *TypeChecker, earlier: ResolvedType, body: NodeId, body_t: ResolvedType) !bool {
+        if (earlier == .builtin and body_t == .builtin) return ResolvedType.eql(earlier, body_t);
+        return self.valueFits(earlier, body, body_t);
+    }
+
+    fn isNominal(t: ResolvedType) bool {
+        return switch (t) {
+            .struct_t, .enum_t, .component, .resource, .event_t => true,
+            else => false,
+        };
     }
 
     /// Polymorphic int / float literal rule (`etch-resolver-types.md` §4.3).
@@ -5168,7 +5216,7 @@ pub const TypeChecker = struct {
 
         if (!decl.value.isNone()) {
             const vt = self.synthExpr(decl.value, &ctx);
-            if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !try self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
+            if (!decl.return_type.isNone() and !try self.valueFits(ret_t, decl.value, vt)) {
                 try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(decl.value), "method '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
             }
         }
@@ -5728,7 +5776,7 @@ pub const TypeChecker = struct {
         // declared return type (E0200, consistent with the closure-call path).
         if (!decl.value.isNone()) {
             const vt = self.synthExpr(decl.value, &ctx);
-            if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !try self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
+            if (!decl.return_type.isNone() and !try self.valueFits(ret_t, decl.value, vt)) {
                 try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(decl.value), "function '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
             }
         }
@@ -5888,7 +5936,7 @@ pub const TypeChecker = struct {
         };
         if (!try self.foldsAsConstant(node.filter_value, "field filter value must be a constant expression")) return;
         const actual = self.synthExpr(node.filter_value, null);
-        if (declared == .builtin and actual == .builtin and !try self.literalTypeFits(declared.builtin, node.filter_value, actual.builtin)) {
+        if (!try self.valueFits(declared, node.filter_value, actual)) {
             try self.emit(.invalid_field_filter, .error_, node.span, "field filter type does not match field declared type", .{});
         }
     }
@@ -5907,7 +5955,7 @@ pub const TypeChecker = struct {
             const declared = self.fieldTypeIn(ev.arena, decl.fields_start, decl.fields_len, flit.name);
             const actual = self.synthExpr(flit.value, ctx_opt);
             if (declared) |d| {
-                if (d == .builtin and actual == .builtin and !try self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
+                if (!try self.valueFits(d, flit.value, actual)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "event field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
                 }
             } else {
@@ -5994,7 +6042,7 @@ pub const TypeChecker = struct {
                     break :blk self.synthHeadValue(let.value, ctx);
                 };
                 const final = if (declared) |d| blk: {
-                    if (d == .builtin and inferred == .builtin and !try self.literalTypeFits(d.builtin, let.value, inferred.builtin)) {
+                    if (!try self.valueFits(d, let.value, inferred)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(let.value), "let initializer type does not match declared type", .{});
                     }
                     try self.checkCollectionLitAgainst(let.value, d, inferred);
@@ -6031,7 +6079,7 @@ pub const TypeChecker = struct {
                             try self.emit(.type_mismatch, .error_, span, "cannot assign to immutable binding (use 'let mut')", .{});
                         }
                         const rhs_type = self.synthHeadValue(assign.value, ctx);
-                        if (local.type_ == .builtin and rhs_type == .builtin and !try self.literalTypeFits(local.type_.builtin, assign.value, rhs_type.builtin)) {
+                        if (!try self.valueFits(local.type_, assign.value, rhs_type)) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match binding type", .{});
                         }
                         // Compound assignment on strings (`s += t`) is not in
@@ -6058,7 +6106,7 @@ pub const TypeChecker = struct {
                     // Synthesize the field type and check the value matches it.
                     const lhs_type = self.synthExpr(assign.target, ctx);
                     const rhs_type = self.synthExpr(assign.value, ctx);
-                    if (lhs_type == .builtin and rhs_type == .builtin and !try self.literalTypeFits(lhs_type.builtin, assign.value, rhs_type.builtin)) {
+                    if (!try self.valueFits(lhs_type, assign.value, rhs_type)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match field type", .{});
                     }
                 } else {
@@ -6151,7 +6199,7 @@ pub const TypeChecker = struct {
                 if (wh.let_binding != 0) {
                     const payload = try self.optionalPayload(cond_t, self.arena.exprSpan(wh.cond), "while let");
                     try ctx.locals.put(self.gpa, wh.let_binding, .{ .type_ = payload, .is_mut = false });
-                } else if (cond_t == .builtin and cond_t.builtin != .bool_) {
+                } else if (!builtinWhere(cond_t, isBool)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(wh.cond), "while condition must be a bool expression", .{});
                 }
                 // in-branch loop, mirror of the `for` arm.
@@ -6253,7 +6301,7 @@ pub const TypeChecker = struct {
                         }
                     }
                     if (self.current_fn_return) |ret| {
-                        if (ret == .builtin and vt == .builtin and !try self.literalTypeFits(ret.builtin, value, vt.builtin)) {
+                        if (!try self.valueFits(ret, value, vt)) {
                             try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(value), "return value type does not match the declared return type", .{});
                         }
                     }
@@ -6326,7 +6374,7 @@ pub const TypeChecker = struct {
                     const br = self.arena.concurrency_branches.items[range.branches_start + i];
                     if (!br.cond.isNone()) {
                         const cond_t = self.synthExpr(br.cond, ctx);
-                        if (cond_t == .builtin and cond_t.builtin != .bool_) {
+                        if (!builtinWhere(cond_t, isBool)) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(br.cond), "conditional branch guard must be a bool expression", .{});
                         }
                     }
@@ -7012,7 +7060,7 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "cast target must be a numeric primitive type ('as' converts between numbers in the S3 subset)", .{});
                     return ResolvedType.unknown;
                 }
-                if (operand_t == .builtin and !operand_t.builtin.isNumeric()) {
+                if (!builtinWhere(operand_t, BuiltinType.isNumeric)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "cast operand must be a numeric primitive", .{});
                     return ResolvedType.unknown;
                 }
@@ -7191,6 +7239,8 @@ pub const TypeChecker = struct {
             const kt = try self.synthExprE(entry.key, ctx_opt);
             const vt = try self.synthExprE(entry.value, ctx_opt);
             if (kt != .builtin or vt != .builtin) {
+                if (kt != .builtin and kt != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.key), "map keys must be a builtin primitive in E1", .{});
+                if (vt != .builtin and vt != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.value), "map values must be a builtin primitive in E1", .{});
                 all_builtin = false;
                 continue;
             }
@@ -7300,18 +7350,18 @@ pub const TypeChecker = struct {
             if (ctx_opt) |ctx| _ = ctx.locals.remove(ife.let_binding);
             if (ife.else_branch.isNone()) return ResolvedType.unknown;
             const else_t = try self.synthExprE(ife.else_branch, ctx_opt);
-            if (then_t == .builtin and else_t == .builtin and !ResolvedType.eql(then_t, else_t)) {
+            if (!try self.valueFits(then_t, ife.else_branch, else_t)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "if branches must yield the same type", .{});
             }
             return then_t;
         }
-        if (cond_t == .builtin and cond_t.builtin != .bool_) {
+        if (!builtinWhere(cond_t, isBool)) {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ife.cond), "if condition must be a bool expression", .{});
         }
         const then_t = try self.synthExprE(ife.then_block, ctx_opt);
         if (ife.else_branch.isNone()) return ResolvedType.unknown;
         const else_t = try self.synthExprE(ife.else_branch, ctx_opt);
-        if (then_t == .builtin and else_t == .builtin and !ResolvedType.eql(then_t, else_t)) {
+        if (!try self.valueFits(then_t, ife.else_branch, else_t)) {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "if branches must yield the same type", .{});
         }
         return then_t;
@@ -7380,7 +7430,7 @@ pub const TypeChecker = struct {
                 } else {
                     _ = try self.synthArg(call, 0, ctx_opt);
                     const t1 = try self.synthArg(call, 1, ctx_opt);
-                    if (t1 == .builtin and t1.builtin != .duration) {
+                    if (!builtinWhere(t1, isDuration)) {
                         try self.emit(.type_mismatch, .error_, span, "tick_until timeout must be a Duration", .{});
                     }
                 }
@@ -7402,7 +7452,7 @@ pub const TypeChecker = struct {
                 // fail-loud rather than mis-compare.
                 if (!assertComparable(ta) or !assertComparable(tb)) {
                     try self.emit(.type_mismatch, .error_, span, "{s} compares scalar / string / enum values (structs, arrays, maps, sets, optionals are not comparable in v0.6)", .{name});
-                } else if (ta == .builtin and tb == .builtin and ta.builtin != tb.builtin) {
+                } else if (ta != .unknown and tb != .unknown and !ResolvedType.eql(ta, tb)) {
                     try self.emit(.type_mismatch, .error_, span, "{s} compares two values of the same type", .{name});
                 }
                 if (call.args_len == 3) _ = try self.synthArg(call, 2, ctx_opt);
@@ -7526,7 +7576,7 @@ pub const TypeChecker = struct {
             var ptype = arg_t;
             if (!p.type_node.isNone()) {
                 ptype = self.namedTypeToResolved(p.type_node);
-                if (ptype == .builtin and arg_t == .builtin and !try self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
+                if (!try self.valueFits(ptype, arg, arg_t)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "closure argument type does not match the parameter type", .{});
                 }
             }
@@ -7536,6 +7586,10 @@ pub const TypeChecker = struct {
         const saved_captures = self.closure_captures;
         self.closure_captures = &captures;
         defer self.closure_captures = saved_captures;
+        // A `return` in a closure leaves the closure, which declares no type.
+        const saved_ret = self.current_fn_return;
+        self.current_fn_return = null;
+        defer self.current_fn_return = saved_ret;
         const ret = try self.synthExprE(ce.body, ctx_opt);
         // Remove the parameter bindings (a closure's params do not collide
         // with outer locals in practice; a save/restore is a later refinement).
@@ -7643,7 +7697,7 @@ pub const TypeChecker = struct {
             const ptype = self.namedTypeToResolved(p.type_node);
             const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
-            if (ptype == .builtin and arg_t == .builtin and !try self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
+            if (!try self.valueFits(ptype, arg, arg_t)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{self.arena.strings.slice(decl.name)});
             }
         }
@@ -7671,6 +7725,9 @@ pub const TypeChecker = struct {
             const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
             try self.unifyGeneric(decl, p.type_node, arg_t, &subst, self.arena.exprSpan(arg));
+            if (!try self.valueFits(self.namedTypeToResolved(p.type_node), arg, arg_t)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{self.arena.strings.slice(decl.name)});
+            }
         }
 
         var gi: u32 = 0;
@@ -7860,10 +7917,7 @@ pub const TypeChecker = struct {
                 break :blk try self.synthExprE(flit.value, ctx_opt);
             };
             if (declared) |d| {
-                if (d == .builtin and actual == .builtin and !try self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "struct-literal field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
-                }
-                if (d == .struct_t and actual == .struct_t and d.struct_t != actual.struct_t) {
+                if (!try self.valueFits(d, flit.value, actual)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "struct-literal field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
                 }
             } else {
@@ -8075,7 +8129,7 @@ pub const TypeChecker = struct {
         }
         const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
         const arg_t = try self.synthExprE(arg, ctx_opt);
-        if (arg_t == .builtin and arg_t.builtin != .string_) {
+        if (!builtinWhere(arg_t, isString)) {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "Entity method '{s}' expects a string extension name", .{method_slice});
         }
     }
@@ -8252,7 +8306,7 @@ pub const TypeChecker = struct {
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (arg_t == .builtin and !try self.literalTypeFits(recv_t.array_dyn, arg, arg_t.builtin)) {
+                    if (!try self.valueFits(.{ .builtin = recv_t.array_dyn }, arg, arg_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "pushed value type does not match the array element type", .{});
                     }
                 }
@@ -8292,10 +8346,10 @@ pub const TypeChecker = struct {
                     const varg: NodeId = @bitCast(self.arena.extra.items[mc.args_start + 1]);
                     const k_t = try self.synthExprE(karg, ctx_opt);
                     const v_t = try self.synthExprE(varg, ctx_opt);
-                    if (k_t == .builtin and !try self.literalTypeFits(recv_t.map_t.key, karg, k_t.builtin)) {
+                    if (!try self.valueFits(.{ .builtin = recv_t.map_t.key }, karg, k_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(karg), "inserted key type does not match the map key type", .{});
                     }
-                    if (v_t == .builtin and !try self.literalTypeFits(recv_t.map_t.value, varg, v_t.builtin)) {
+                    if (!try self.valueFits(.{ .builtin = recv_t.map_t.value }, varg, v_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(varg), "inserted value type does not match the map value type", .{});
                     }
                 }
@@ -8325,7 +8379,7 @@ pub const TypeChecker = struct {
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (arg_t == .builtin and !try self.literalTypeFits(recv_t.set_t, arg, arg_t.builtin)) {
+                    if (!try self.valueFits(.{ .builtin = recv_t.set_t }, arg, arg_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "inserted item type does not match the set element type", .{});
                     }
                 }
@@ -8338,7 +8392,7 @@ pub const TypeChecker = struct {
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (arg_t == .builtin and !try self.literalTypeFits(recv_t.set_t, arg, arg_t.builtin)) {
+                    if (!try self.valueFits(.{ .builtin = recv_t.set_t }, arg, arg_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "item type does not match the set element type", .{});
                     }
                 }
@@ -8404,7 +8458,7 @@ pub const TypeChecker = struct {
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     const t = self.synthExpr(arg, ctx_opt);
-                    if (t == .builtin and !t.builtin.isInteger()) {
+                    if (!builtinWhere(t, BuiltinType.isInteger)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "tick(n) requires an integer tick count", .{});
                     }
                 }
@@ -8631,7 +8685,7 @@ pub const TypeChecker = struct {
             const ptype = self.namedTypeToResolved(p.type_node);
             const arg = self.arena.callArgForParam(mc.args_start, mc.args_len, mc.names_start, i, p.name) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
-            if (ptype == .builtin and arg_t == .builtin and !try self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
+            if (!try self.valueFits(ptype, arg, arg_t)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of method '{s}'", .{self.arena.strings.slice(mc.method_name)});
             }
         }
@@ -8655,11 +8709,11 @@ pub const TypeChecker = struct {
         const idx_t = try self.synthExprE(ix.index, ctx_opt);
         switch (recv_t) {
             .array_fixed => |info| {
-                if (idx_t == .builtin and !idx_t.builtin.isInteger()) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
+                if (!builtinWhere(idx_t, BuiltinType.isInteger)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
                 return .{ .builtin = info.elem };
             },
             .array_dyn => |elem| {
-                if (idx_t == .builtin and !idx_t.builtin.isInteger()) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
+                if (!builtinWhere(idx_t, BuiltinType.isInteger)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
                 return .{ .builtin = elem };
             },
             .map_t => |mi| {
@@ -8667,7 +8721,7 @@ pub const TypeChecker = struct {
                 // the optional-returning accessor unlocked by the Optional
                 // ops — lifts the earlier rejection. The key must fit the
                 // map's key type.
-                if (idx_t == .builtin and !try self.literalTypeFits(mi.key, ix.index, idx_t.builtin)) {
+                if (!try self.valueFits(.{ .builtin = mi.key }, ix.index, idx_t)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "map index key type does not match the map key type", .{});
                 }
                 return .{ .optional = mi.value };
@@ -8725,7 +8779,7 @@ pub const TypeChecker = struct {
                 .literal => {
                     const lit: NodeId = @bitCast(arm.pattern_payload);
                     const lit_t = try self.synthExprE(lit, ctx_opt);
-                    if (scrut_t == .builtin and lit_t == .builtin and !try self.literalTypeFits(scrut_t.builtin, lit, lit_t.builtin)) {
+                    if (!try self.valueFits(scrut_t, lit, lit_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(lit), "match pattern literal type does not match the scrutinee type", .{});
                     }
                     if (scrut_t == .builtin and scrut_t.builtin == .bool_ and self.arena.exprKind(lit) == .bool_lit) {
@@ -8775,7 +8829,7 @@ pub const TypeChecker = struct {
             const body_t = try self.synthExprE(arm.body, ctx_opt);
             if (result_t == null) {
                 result_t = body_t;
-            } else if (result_t.? == .builtin and body_t == .builtin and !ResolvedType.eql(result_t.?, body_t)) {
+            } else if (!try self.armsAgree(result_t.?, arm.body, body_t)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "match arms must all yield the same type", .{});
             }
         }
@@ -8860,7 +8914,7 @@ pub const TypeChecker = struct {
                 // the default must fit the payload type; the result is the
                 // unwrapped payload.
                 if (lhs_t == .optional) {
-                    if (rhs_t == .builtin and !try self.literalTypeFits(lhs_t.optional, bin.rhs, rhs_t.builtin)) {
+                    if (!try self.valueFits(.{ .builtin = lhs_t.optional }, bin.rhs, rhs_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(bin.rhs), "'??' default type does not match the optional payload type", .{});
                     }
                     return .{ .builtin = lhs_t.optional };
@@ -14383,4 +14437,166 @@ test "the reservation is DERIVED from the builtin table, not a second list" {
     try std.testing.expect(isReservedEngineTypeName(tagset_component_name));
     try std.testing.expect(!isReservedEngineTypeName("GameTimer"));
     try std.testing.expect(!isReservedEngineTypeName(""));
+}
+
+const mistyped_base =
+    \\struct P { x: int = 0 }
+    \\struct R { y: int = 0 }
+    \\struct S { p: int = 0 }
+    \\resource Out { n: int = 0 }
+    \\event E { n: int = 0 }
+    \\fn id(x: int) -> int { x }
+    \\impl P { fn add(self, k: int) -> int { self.x + k } }
+    \\
+;
+
+const MistypedCase = struct { name: []const u8, src: []const u8, code: DiagnosticCode };
+
+const mistyped_cases = [_]MistypedCase{
+    .{ .name = "let, array as int", .src = "rule r() { let v: int = [1, 2, 3] }", .code = .type_mismatch },
+    .{ .name = "let, int as struct", .src = "rule r() { let v: P = 1 }", .code = .type_mismatch },
+    .{ .name = "let, one struct as another", .src = "rule r() { let v: P = R { y: 1 } }", .code = .type_mismatch },
+    .{ .name = "if branches", .src = "rule r() {\n  let c = true\n  let v = if c { 0 } else { P { x: 1 } }\n}", .code = .type_mismatch },
+    .{ .name = "assignment to a local", .src = "rule r() {\n  let mut v = 0\n  v = P { x: 1 }\n}", .code = .type_mismatch },
+    .{ .name = "assignment to a field", .src = "rule r() when resource Out { get_mut(Out).n = P { x: 1 } }", .code = .type_mismatch },
+    .{ .name = "fn argument", .src = "rule r() { let v = id(P { x: 1 }) }", .code = .type_mismatch },
+    .{ .name = "fn body value", .src = "fn mk() -> int { P { x: 1 } }", .code = .return_type_mismatch },
+    .{ .name = "return statement", .src = "fn mk() -> int { return P { x: 1 } }", .code = .return_type_mismatch },
+    .{ .name = "method argument", .src = "rule r() {\n  let p = P { x: 1 }\n  let v = p.add(P { x: 2 })\n}", .code = .type_mismatch },
+    .{ .name = "method body value", .src = "impl R { fn value(self) -> int { P { x: 1 } } }", .code = .return_type_mismatch },
+    .{ .name = "closure argument", .src = "rule r() {\n  let f = |k: int| k + 1\n  let v = f(P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "struct-literal field", .src = "rule r() { let s = S { p: P { x: 1 } } }", .code = .type_mismatch },
+    .{ .name = "emit field", .src = "rule r() { emit E { n: P { x: 1 } } }", .code = .type_mismatch },
+    .{ .name = "array push", .src = "rule r() {\n  let mut a: int[] = [1]\n  a.push(P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "map insert key", .src = "rule r() {\n  let mut m: [int: int] = [1: 2]\n  m.insert(P { x: 1 }, 3)\n}", .code = .type_mismatch },
+    .{ .name = "map insert value", .src = "rule r() {\n  let mut m: [int: int] = [1: 2]\n  m.insert(1, P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "set insert", .src = "rule r() {\n  let mut s = Set.from([1, 2])\n  s.insert(P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "set contains", .src = "rule r() {\n  let s = Set.from([1, 2])\n  let b = s.contains(P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "map index", .src = "rule r() {\n  let m = [1: 2]\n  let v = m[P { x: 1 }]\n}", .code = .type_mismatch },
+    .{ .name = "match literal against a struct", .src = "rule r() {\n  let p = P { x: 1 }\n  match p { 1 => { }, _ => { } }\n}", .code = .type_mismatch },
+    .{ .name = "coalesce default", .src = "rule r() {\n  let o: int? = some(1)\n  let v = o ?? P { x: 1 }\n}", .code = .type_mismatch },
+    .{ .name = "match arms", .src = "rule r() {\n  let c = 1\n  let v = match c { 0 => 1, _ => P { x: 1 } }\n}", .code = .type_mismatch },
+    .{ .name = "cast operand", .src = "rule r() {\n  let p = P { x: 1 }\n  let v = p as int\n}", .code = .type_mismatch },
+    .{ .name = "if condition", .src = "rule r() {\n  let c = P { x: 1 }\n  if c { let z = 1 }\n}", .code = .type_mismatch },
+    .{ .name = "while condition", .src = "rule r() {\n  let c = P { x: 1 }\n  while c { let z = 2 }\n}", .code = .type_mismatch },
+    .{ .name = "array index", .src = "rule r() {\n  let a = [10, 20, 30]\n  let v = a[P { x: 1 }]\n}", .code = .type_mismatch },
+    .{ .name = "map literal value", .src = "rule r() { let m = [1: P { x: 1 }] }", .code = .type_mismatch },
+    .{ .name = "map literal key", .src = "rule r() { let m = [P { x: 1 }: 2] }", .code = .type_mismatch },
+    .{ .name = "concrete parameter of a generic fn", .src = "fn pick<T>(a: T, n: int) -> T { a }\nrule r() { let v = pick(1, P { x: 1 }) }", .code = .type_mismatch },
+    .{ .name = "assert_eq, int against an enum", .src = "enum Dir { up, down }\ntest \"t\" { assert_eq(1, Dir.up) }", .code = .type_mismatch },
+    .{ .name = "extension name", .src = "component C { n: int = 0 }\nrule r(entity: Entity) when entity has C { entity.activate_extension(P { x: 1 }) }", .code = .type_mismatch },
+    .{ .name = "tick count", .src = "test \"t\" {\n  let w = test_world()\n  w.tick(P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "let, array as optional", .src = "rule r() { let o: int? = [1, 2, 3] }", .code = .type_mismatch },
+    .{ .name = "let, map as array", .src = "rule r() { let a: int[] = [1: 2] }", .code = .type_mismatch },
+    .{ .name = "data entry field, struct as enum", .src = "enum Dir { up, down }\nstruct Item { d: Dir }\ndata Db: Item { a: { d: P { x: 1 } } }", .code = .entry_field_type_invalid },
+    .{ .name = "scene component field", .src = "component C { n: int = 0 }\nscene \"L\" { entity \"e\" { uuid: \"00000000-0000-0000-0000-000000000001\" C { n: P { x: 1 } } } }", .code = .scene_component_field_type_invalid },
+    .{ .name = "field default, int as struct", .src = "struct T { q: P = 1 }", .code = .type_mismatch },
+    .{ .name = "const, int as struct", .src = "const K: P = 1", .code = .type_mismatch },
+    .{ .name = "data entry field, int as struct", .src = "struct Item { q: P }\ndata Db: Item { a: { q: 1 } }", .code = .entry_field_type_invalid },
+};
+
+test "a composite where a builtin is declared, or the reverse, is refused at every gate" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (mistyped_cases) |c| {
+        const src = try std.mem.concat(gpa, u8, &.{ mistyped_base, c.src });
+        defer gpa.free(src);
+        var r = try parseAndCheck(gpa, src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (countMessage(r.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "well-typed values at the same gates are accepted" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa, mistyped_base ++
+        \\fn ident<T>(x: T) -> T { x }
+        \\fn mk() -> P { P { x: 1 } }
+        \\fn mk2() -> int { return 1 }
+        \\rule r() when resource Out {
+        \\  let a: int = 1
+        \\  let b: P = P { x: 1 }
+        \\  let q: P = .{ x: 2 }
+        \\  let c = true
+        \\  let d = if c { 0 } else { 1 }
+        \\  let mut e = 0
+        \\  e = 2
+        \\  get_mut(Out).n = 3
+        \\  let f = id(1)
+        \\  let g = b.add(1)
+        \\  let h = |k: int| k + 1
+        \\  let i = h(1)
+        \\  let s = S { p: 1 }
+        \\  emit E { n: 1 }
+        \\  let mut arr: int[] = [1, 2]
+        \\  arr.push(3)
+        \\  let mut m: [int: int] = [1: 2]
+        \\  m.insert(2, 3)
+        \\  let mv = m[1]
+        \\  let mut st = Set.from([1, 2])
+        \\  st.insert(3)
+        \\  let hit = st.contains(1)
+        \\  match b.x { 1 => { }, _ => { } }
+        \\  let o: int? = some(1)
+        \\  let o2: int? = none
+        \\  let co = o ?? 2
+        \\  let gp = ident(P { x: 1 })
+        \\  let gi: int = ident(1)
+        \\  let vc: Vec3 = [1, 2, 3]
+        \\  let vo: Vec3? = none
+        \\  let vd = vo ?? [0, 0, 0]
+        \\  let pick = |k: int| {
+        \\    if k > 3 {
+        \\      return 40
+        \\    }
+        \\    k
+        \\  }
+        \\}
+        \\struct Range<T> {
+        \\  min: T
+        \\  max: T
+        \\}
+        \\fn keep<T>(tag: T) -> T {
+        \\  let rg = Range { min: 0, max: 10 }
+        \\  let digits = [1, 2]
+        \\  let at = digits[rg.min]
+        \\  tag
+        \\}
+        \\fn pick_or_none(x: int) -> int? {
+        \\  let pick = |k: int| {
+        \\    if k > 3 {
+        \\      return 40
+        \\    }
+        \\    k
+        \\  }
+        \\  some(pick(x))
+        \\}
+        \\component T3 { pos: Vec3 }
+        \\scene "Village" { entity "npc" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" T3 { pos: [11, 0, 6] } } }
+        \\struct Spawn { at: Vec3 }
+        \\data Points: Spawn { origin: { at: [0, 0, 0] } }
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    for (r.diagnostics.items) |d| std.debug.print("{s} {s}\n", .{ d.code.code(), d.primary_message });
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+}
+
+test "a bare literal match arm must have the earlier arm's builtin type" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa,
+        \\rule r() {
+        \\  let a: i32 = 1
+        \\  let c = true
+        \\  let m = match c { true => a, false => 2 }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .type_mismatch, "match arms must all yield the same type"));
 }
