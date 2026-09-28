@@ -328,6 +328,10 @@ pub const ResolvedType = union(enum) {
     /// `test_world()` (test bodies only). Receiver of `spawn_with`/`emit`/`tick`
     /// in `dispatchMethodOnType`. No payload (mono-world). Not field-storable.
     test_world,
+    /// The type of an expression that yields no value: a block with no tail
+    /// value, an `if` with no `else`, a loop left by a `break` with no value, a
+    /// builtin call run for its effect. Unlike `unknown`, it fits only itself.
+    unit,
     /// Type unknown / unresolved. Used as the fallback after a diagnostic
     /// has been emitted; subsequent checks treat `unknown` as wildcard to
     /// avoid cascade errors.
@@ -351,6 +355,7 @@ pub const ResolvedType = union(enum) {
             .generic => |id| id == b.generic,
             .optional => |bt| bt == b.optional,
             .test_world => true,
+            .unit => true,
             .unknown => true,
         };
     }
@@ -528,7 +533,7 @@ pub const TypeChecker = struct {
     generic_scope: std.AutoHashMapUnmanaged(StringId, void) = .empty,
     /// Declared return type of the `fn` / method currently being checked, used
     /// to type a `return expr` body statement against. `null` outside
-    /// a body; `.unit` for a void fn (no `-> type`).
+    /// a body; `unknown` for a fn with no `-> type`.
     current_fn_return: ?ResolvedType = null,
     /// Literals already reported out of range, so a literal checked in two
     /// contexts is reported once.
@@ -1372,9 +1377,8 @@ pub const TypeChecker = struct {
 
     fn foreignReturnType(self: *TypeChecker, a: *const AstArena, method: ast_mod.FnDecl) ResolvedType {
         _ = self;
-        // A void signature (`fn stop(h: AudioHandle)`) types as `unknown` —
-        // "`unknown` ≈ unit, the house convention" (this file, `synthCall`).
-        // `ResolvedType` has no unit variant to return instead.
+        // A void signature (`fn stop(h: AudioHandle)`) types as `unknown`, as
+        // a call of any fn with no `-> type` does.
         if (method.return_type.isNone()) return ResolvedType.unknown;
         const name = a.namedTypeName(method.return_type) orelse return ResolvedType.unknown;
         const tname = a.strings.slice(a.resolveTypeAliasName(name));
@@ -3687,7 +3691,7 @@ pub const TypeChecker = struct {
                             }
                         }
                     }
-                } else if (t != .unknown) {
+                } else if (t != .unknown and t != .unit) {
                     try self.emit(.behavior_action_invalid_return, .error_, node.span, "a behavior action must be a void call, a 'let' binding, or an 'emit' (got a value expression)", .{});
                 }
             },
@@ -6255,14 +6259,13 @@ pub const TypeChecker = struct {
                 // `break [label] [value]`. Loop membership and label validity
                 // are permissive.
                 const b = self.arena.break_stmts.items[data];
-                if (!b.value.isNone()) {
-                    const t = self.synthExpr(b.value, ctx);
-                    if (self.breakTarget(b.label)) |frame| {
-                        if (frame.yields) {
-                            if (frame.value_t) |earlier| {
-                                if (!try self.armsAgree(earlier, b.value, t)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(b.value), "break values of a loop must all have the same type", .{});
-                            } else frame.value_t = t;
-                        }
+                const t: ResolvedType = if (b.value.isNone()) .unit else self.synthExpr(b.value, ctx);
+                if (self.breakTarget(b.label)) |frame| {
+                    if (frame.yields) {
+                        if (frame.value_t) |earlier| {
+                            const span = if (b.value.isNone()) self.arena.stmtSpan(stmt_id) else self.arena.exprSpan(b.value);
+                            if (!try self.armsAgree(earlier, b.value, t)) try self.emit(.type_mismatch, .error_, span, "break values of a loop must all have the same type", .{});
+                        } else frame.value_t = t;
                     }
                 }
                 // E0907: the break must not cross the enclosing
@@ -7201,9 +7204,8 @@ pub const TypeChecker = struct {
                         if (ak == .fn_call or ak == .method_call) return t;
                         // Non-call target: the handle-await form (§9.8) — the target
                         // must be a TaskHandle. The result is
-                        // unit (spawn bodies have no value channel);
-                        // `unknown` ≈ unit, the house convention.
-                        if (t == .builtin and t.builtin == .task_handle) return ResolvedType.unknown;
+                        // unit (spawn bodies have no value channel).
+                        if (t == .builtin and t.builtin == .task_handle) return ResolvedType.unit;
                         // A `TimerHandle` is NOT awaitable (§9.10):
                         // a timer is not a task — no join semantics. Precise
                         // message ahead of the generic rejection below.
@@ -7217,7 +7219,7 @@ pub const TypeChecker = struct {
                         return ResolvedType.unknown;
                     },
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             },
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
@@ -7346,7 +7348,7 @@ pub const TypeChecker = struct {
             const stmt: NodeId = @bitCast(self.arena.extra.items[lp.body_start + i]);
             if (self.arena.stmtKind(stmt) == .break_stmt) {
                 const b = self.arena.break_stmts.items[self.arena.stmtData(stmt)];
-                if (!b.value.isNone()) return self.synthExpr(b.value, ctx_opt);
+                return if (b.value.isNone()) ResolvedType.unit else self.synthExpr(b.value, ctx_opt);
             }
         }
         return ResolvedType.unknown;
@@ -7354,7 +7356,7 @@ pub const TypeChecker = struct {
 
     /// Type a block expression `{ stmts; value }`. The body
     /// statements are checked in order, then the block's type is the trailing
-    /// value's type (or `unknown` ≈ unit when value-less). Locals declared in
+    /// value's type, or unit when value-less. Locals declared in
     /// the block use the flat per-rule locals map — lexical scoping is a later
     /// refinement (the interpreter is the reference).
     fn synthBlock(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
@@ -7366,8 +7368,20 @@ pub const TypeChecker = struct {
                 try self.checkStmt(ctx, stmt);
             }
         }
-        if (blk.value.isNone()) return ResolvedType.unknown;
+        if (blk.value.isNone()) return if (self.runDiverges(blk.body_start, blk.body_len)) ResolvedType.unknown else ResolvedType.unit;
         return try self.synthExprE(blk.value, ctx_opt);
+    }
+
+    /// Whether a statement run ends in a statement that never completes. Such
+    /// a run has no type rather than unit, so a block that returns or throws
+    /// fits any destination.
+    fn runDiverges(self: *TypeChecker, start: u32, len: u32) bool {
+        if (len == 0) return false;
+        const last: NodeId = @bitCast(self.arena.extra.items[start + len - 1]);
+        return switch (self.arena.stmtKind(last)) {
+            .return_stmt, .throw_stmt, .break_stmt, .continue_stmt => true,
+            else => false,
+        };
     }
 
     /// Type a `measure { block }` expression (§17 erratum). Result type
@@ -7394,9 +7408,7 @@ pub const TypeChecker = struct {
     /// Type an `if` expression. The condition must be
     /// `bool`; the then / else branches (block expressions, `else if` chaining
     /// through a nested `if`) must unify to one result type. An `if` with no
-    /// `else` has no value (`unknown` ≈ unit) — valid only in statement
-    /// position (the type-checker does not separately reject a value-position
-    /// else-less `if`; the codegen surfaces it as `UnsupportedConstruct`).
+    /// `else` is unit.
     fn synthIf(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const ife = self.arena.if_exprs.items[data];
         const cond_t = try self.synthExprE(ife.cond, ctx_opt);
@@ -7407,7 +7419,7 @@ pub const TypeChecker = struct {
             if (ctx_opt) |ctx| try ctx.locals.put(self.gpa, ife.let_binding, .{ .type_ = payload, .is_mut = false });
             const then_t = try self.synthExprE(ife.then_block, ctx_opt);
             if (ctx_opt) |ctx| _ = ctx.locals.remove(ife.let_binding);
-            if (ife.else_branch.isNone()) return ResolvedType.unknown;
+            if (ife.else_branch.isNone()) return ResolvedType.unit;
             const else_t = try self.synthExprE(ife.else_branch, ctx_opt);
             if (!try self.valueFits(then_t, ife.else_branch, else_t)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "if branches must yield the same type", .{});
@@ -7418,7 +7430,7 @@ pub const TypeChecker = struct {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ife.cond), "if condition must be a bool expression", .{});
         }
         const then_t = try self.synthExprE(ife.then_block, ctx_opt);
-        if (ife.else_branch.isNone()) return ResolvedType.unknown;
+        if (ife.else_branch.isNone()) return ResolvedType.unit;
         const else_t = try self.synthExprE(ife.else_branch, ctx_opt);
         if (!try self.valueFits(then_t, ife.else_branch, else_t)) {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "if branches must yield the same type", .{});
@@ -7470,7 +7482,7 @@ pub const TypeChecker = struct {
     /// (`assert_eq`/`assert_neq`/`assert_approx`/`assert_some`/`assert_none`,
     /// `etch-stdlib.md §19.4`) + `panic`/`todo`/`unreachable` — resolve anywhere;
     /// test-scoped builtins (`test_world`, `tick_until`) only inside a test body.
-    /// Statement-effect builtins yield `unknown` (≈ unit); args are synth-checked
+    /// The assertions yield unit and the diverging builtins `unknown`; args are synth-checked
     /// so nested expressions are typed and light shape checks surface misuse.
     fn synthBuiltinCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, callee_name: StringId, ctx_opt: ?*RuleCtx) TypeError!?ResolvedType {
         const name = self.arena.strings.slice(callee_name);
@@ -7516,7 +7528,7 @@ pub const TypeChecker = struct {
                 }
                 if (call.args_len == 3) _ = try self.synthArg(call, 2, ctx_opt);
             }
-            return ResolvedType.unknown;
+            return ResolvedType.unit;
         }
         if (std.mem.eql(u8, name, "assert_approx")) {
             if (call.args_len < 2 or call.args_len > 4) {
@@ -7538,7 +7550,7 @@ pub const TypeChecker = struct {
                 }
                 if (call.args_len == 4) _ = try self.synthArg(call, 3, ctx_opt);
             }
-            return ResolvedType.unknown;
+            return ResolvedType.unit;
         }
         if (std.mem.eql(u8, name, "assert_some") or std.mem.eql(u8, name, "assert_none")) {
             if (call.args_len < 1 or call.args_len > 2) {
@@ -7550,7 +7562,7 @@ pub const TypeChecker = struct {
                 }
                 if (call.args_len == 2) _ = try self.synthArg(call, 1, ctx_opt);
             }
-            return ResolvedType.unknown;
+            return ResolvedType.unit;
         }
         if (std.mem.eql(u8, name, "panic")) {
             if (call.args_len != 1) {
@@ -8385,7 +8397,7 @@ pub const TypeChecker = struct {
                     }
                 }
                 try self.checkMutCollectionReceiver(mc, ctx_opt);
-                return ResolvedType.unknown; // void return
+                return ResolvedType.unit;
             }
             if (std.mem.eql(u8, method_slice, "len")) {
                 if (mc.args_len != 0) {
@@ -8482,8 +8494,8 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
-        // builtin TaskHandle method (§9.8): `cancel()` — no args,
-        // statement-effect (`unknown` ≈ unit; idempotent at runtime). The
+        // builtin TaskHandle method (§9.8): `cancel()` — no args, unit,
+        // idempotent at runtime. The
         // handle's only other operation is `await h` (handled in the await
         // arm); anything else is an error with a pointer to both.
         if (recv_t == .builtin and recv_t.builtin == .task_handle) {
@@ -8491,21 +8503,21 @@ pub const TypeChecker = struct {
                 if (mc.args_len != 0) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "TaskHandle method 'cancel' takes no arguments", .{});
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on a TaskHandle (only 'cancel()'; join with 'await h')", .{method_slice});
             return ResolvedType.unknown;
         }
 
-        // builtin TimerHandle method (§9.10): `cancel()` — no args, statement-effect
-        // (`unknown` ≈ unit), idempotent at runtime. Its ONLY operation: a timer is not
+        // builtin TimerHandle method (§9.10): `cancel()` — no args, unit,
+        // idempotent at runtime. Its ONLY operation: a timer is not
         // a task — no `await t`, no join, nothing else.
         if (recv_t == .builtin and recv_t.builtin == .timer_handle) {
             if (std.mem.eql(u8, method_slice, "cancel")) {
                 if (mc.args_len != 0) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "TimerHandle method 'cancel' takes no arguments", .{});
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on a TimerHandle (only 'cancel()'; a timer is not awaitable)", .{method_slice});
             return ResolvedType.unknown;
@@ -8524,7 +8536,7 @@ pub const TypeChecker = struct {
             }
             if (std.mem.eql(u8, method_slice, "emit")) {
                 try self.checkWorldEmitArg(id, mc, ctx_opt);
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             if (std.mem.eql(u8, method_slice, "tick")) {
                 if (mc.args_len != 1) {
@@ -8536,7 +8548,7 @@ pub const TypeChecker = struct {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "tick(n) requires an integer tick count", .{});
                     }
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on the test world (spawn_with / emit / tick)", .{method_slice});
             return ResolvedType.unknown;
@@ -8545,13 +8557,13 @@ pub const TypeChecker = struct {
         // Builtin extension methods on an `Entity` receiver, checked
         // BEFORE the trait-method resolution below (these are interpreter builtins,
         // not user traits; any other method on an Entity falls through to the
-        // trait lookup). `activate_extension`/`deactivate_extension` are
-        // statement-use (`unknown` return, like `array.push`); `has_extension`
+        // trait lookup). `activate_extension`/`deactivate_extension` are unit;
+        // `has_extension`
         // → bool; `active_extensions` → `[string]`.
         if (recv_t == .builtin and recv_t.builtin == .entity) {
             if (std.mem.eql(u8, method_slice, "activate_extension") or std.mem.eql(u8, method_slice, "deactivate_extension")) {
                 try self.checkExtensionNameArg(id, mc, method_slice, ctx_opt);
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             if (std.mem.eql(u8, method_slice, "has_extension")) {
                 try self.checkExtensionNameArg(id, mc, method_slice, ctx_opt);
@@ -8562,13 +8574,12 @@ pub const TypeChecker = struct {
                 return ResolvedType{ .array_dyn = .string_ };
             }
             // structural mutation methods on an `Entity` receiver
-            // (`etch-grammar.md` §4.5). All three are statement-effect (`unknown`
-            // return, like `array.push` / `activate_extension`); they enqueue a
+            // (`etch-grammar.md` §4.5). All three are unit; they enqueue a
             // deferred command at run. `add` on a present component is a
             // replace (`@on_replaced`), no separate construct.
             if (std.mem.eql(u8, method_slice, "despawn")) {
                 if (mc.args_len != 0) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "Entity method 'despawn' takes no arguments", .{});
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             if (std.mem.eql(u8, method_slice, "add")) {
                 if (mc.args_len != 1) {
@@ -8577,7 +8588,7 @@ pub const TypeChecker = struct {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     try self.checkStructuralComponentLiteral(arg);
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             if (std.mem.eql(u8, method_slice, "remove")) {
                 if (mc.args_len != 1) {
@@ -8598,7 +8609,7 @@ pub const TypeChecker = struct {
                         // note for what it was and why the number stays reserved.
                     }
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
         }
 
@@ -9077,7 +9088,7 @@ pub const TypeChecker = struct {
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on event '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
-            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .optional, .test_world, .unknown => return ResolvedType.unknown,
+            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .optional, .test_world, .unit, .unknown => return ResolvedType.unknown,
         }
     }
 
@@ -14709,7 +14720,7 @@ test "a value breaking out of a while, an inner loop or to a label does not type
         \\      if c { break outer 2.5 }
         \\      break 1
         \\    }
-        \\    break
+        \\    break 0.5
         \\  }
         \\}
     );
@@ -14970,6 +14981,284 @@ test "a jump or return that stays in its closure is accepted" {
     const gpa = std.testing.allocator;
     var wrong: usize = 0;
     for (jumps_inside_closures) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const UnitCase = struct { name: []const u8, code: DiagnosticCode, src: []const u8 };
+
+const unit_refused = [_]UnitCase{
+    .{ .name = "if let with no else", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let o: int? = some(1)
+    \\  let v: int = if let x = o { x }
+    \\}
+    },
+    .{ .name = "assert_approx", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let v: int = assert_approx(1.0, 1.0)
+    \\}
+    },
+    .{ .name = "assert_some", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let o: int? = some(1)
+    \\  let v: int = assert_some(o)
+    \\}
+    },
+    .{ .name = "loop left by a break with no value", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = loop { break }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "loop left by a valued and a valueless break", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = loop {
+    \\    if c { break }
+    \\    break 1
+    \\  }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "if with no else", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = if c { 1 }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "if with no else, condition false", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let c = false
+    \\  let v: int = if c { 1 }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "array push", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = arr.push(2)
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "empty block", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = { }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "block ending in a statement", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = { let q = 1 }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "await wait", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let v: int = await wait(1.0s)
+    \\}
+    },
+    .{ .name = "TaskHandle cancel", .code = .type_mismatch, .src =
+    \\async rule r() {
+    \\  let h = spawn { }
+    \\  let v: int = h.cancel()
+    \\}
+    },
+    .{ .name = "TimerHandle cancel", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let t = after(1.0s) { }
+    \\  let v: int = t.cancel()
+    \\}
+    },
+    .{ .name = "test world tick", .code = .type_mismatch, .src =
+    \\test "t" {
+    \\  let w = test_world()
+    \\  let v: int = w.tick(1)
+    \\}
+    },
+    .{ .name = "test world emit", .code = .type_mismatch, .src =
+    \\event E { n: int = 0 }
+    \\test "t" {
+    \\  let w = test_world()
+    \\  let v: int = w.emit(E { n: 1 })
+    \\}
+    },
+    .{ .name = "activate_extension", .code = .type_mismatch, .src =
+    \\component C { v: int = 0 }
+    \\rule r(e: Entity) when e has C {
+    \\  let v: int = e.activate_extension("X")
+    \\}
+    },
+    .{ .name = "despawn", .code = .type_mismatch, .src =
+    \\component C { v: int = 0 }
+    \\rule r(e: Entity) when e has C {
+    \\  let v: int = e.despawn()
+    \\}
+    },
+    .{ .name = "add", .code = .type_mismatch, .src =
+    \\component C { v: int = 0 }
+    \\component D { v: int = 0 }
+    \\rule r(e: Entity) when e has C {
+    \\  let v: int = e.add(D { v: 1 })
+    \\}
+    },
+    .{ .name = "remove", .code = .type_mismatch, .src =
+    \\component C { v: int = 0 }
+    \\rule r(e: Entity) when e has C {
+    \\  let v: int = e.remove(C)
+    \\}
+    },
+    .{ .name = "assert_eq", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let v: int = assert_eq(1, 1)
+    \\}
+    },
+    .{ .name = "await a TaskHandle", .code = .type_mismatch, .src =
+    \\async rule r() {
+    \\  let h = spawn { }
+    \\  let v: int = await h
+    \\}
+    },
+    .{ .name = "fn body ending in an if with no else", .code = .return_type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(x: int) -> int { if x > 0 { return 1 } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+};
+
+const unit_accepted = [_]ClosureJumpCase{
+    .{ .name = "behavior action on a unit method", .src =
+    \\component C { v: int = 0 }
+    \\behavior B {
+    \\  selector {
+    \\    action: self.despawn()
+    \\  }
+    \\}
+    },
+    .{ .name = "if and else both return", .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(x: int) -> int { if x > 0 { return 1 } else { return 2 } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "else returns", .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(x: int) -> int { if x > 0 { 1 } else { return 2 } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "loop left by return only", .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(x: int) -> int { loop { if x > 0 { return 1 } } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "if and else as statements", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut a = 0
+    \\  let mut b = 0
+    \\  if c { a = 1 } else { b = 2 }
+    \\  get_mut(Out).n = a + b
+    \\}
+    },
+    .{ .name = "match arm that returns", .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(x: int) -> int { match x { 1 => 5, _ => { return 0 } } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "else that panics", .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(c: bool) -> int { if c { 1 } else { panic("x") } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "call of a fn with no return type", .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = nothing()
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "fn with no return type and a tail value", .src =
+    \\resource Out { n: int = 0 }
+    \\fn tail() { 5 }
+    \\rule r() when resource Out {
+    \\  let v: int = tail()
+    \\  get_mut(Out).n = v
+    \\}
+    },
+};
+
+test "a unit value where a type is declared is refused" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (unit_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (countMessage(r.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "a block that never completes, and a fn call, are not unit" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (unit_accepted) |c| {
         var r = try parseAndCheck(gpa, c.src);
         defer r.deinit(gpa);
         try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
