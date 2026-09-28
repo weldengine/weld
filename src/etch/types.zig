@@ -596,6 +596,12 @@ pub const TypeChecker = struct {
     /// Start of the innermost branch's label window in `conc_labels`. Saved/restored at
     /// branch entry.
     conc_labels_base: usize = 0,
+    /// The loops a `break` can target, innermost last. Only the window past
+    /// `break_base` belongs to the innermost task or timer body; a closure body
+    /// is checked at its call, inside the caller's loops, which a `break` in it
+    /// leaves.
+    break_frames: std.ArrayListUnmanaged(BreakFrame) = .empty,
+    break_base: usize = 0,
     /// Names visible at the entry of the innermost scope-snapshot body, in
     /// `escape_names[escape_base..]`: a name referenced there and not declared
     /// there is a capture (`etch-resolver-types.md` §8.2, E0223).
@@ -759,6 +765,7 @@ pub const TypeChecker = struct {
         self.methods.deinit(self.gpa);
         self.trait_impls.deinit(self.gpa);
         self.conc_labels.deinit(self.gpa);
+        self.break_frames.deinit(self.gpa);
         self.escape_names.deinit(self.gpa);
         self.generic_scope.deinit(self.gpa);
         self.imported_symbols.deinit(self.gpa);
@@ -4864,6 +4871,14 @@ pub const TypeChecker = struct {
         return x.arena == y.arena and x.name == y.name;
     }
 
+    /// A loop a `break` can target; `yields` for a `loop`, whose value is its
+    /// breaks'.
+    const BreakFrame = struct {
+        label: StringId,
+        yields: bool,
+        value_t: ?ResolvedType = null,
+    };
+
     const Declaration = struct { arena: *const AstArena, name: StringId };
 
     fn declarationOf(self: *TypeChecker, t: ResolvedType) ?Declaration {
@@ -4875,8 +4890,21 @@ pub const TypeChecker = struct {
         };
     }
 
-    /// Whether a match arm's type agrees with the earlier arms': two builtins
-    /// only when equal, an arm body being a bare literal as often as not.
+    /// The loop an unlabeled `break` leaves is the innermost one of any kind,
+    /// a labeled one the `loop` carrying its label.
+    fn breakTarget(self: *TypeChecker, label: StringId) ?*BreakFrame {
+        const frames = self.break_frames.items[self.break_base..];
+        var i = frames.len;
+        while (i > 0) {
+            i -= 1;
+            if (label == 0 or frames[i].label == label) return &frames[i];
+        }
+        return null;
+    }
+
+    /// Whether a match arm's or a break value's type agrees with the earlier
+    /// ones': two builtins only when equal, such a value being a bare literal
+    /// as often as not.
     fn armsAgree(self: *TypeChecker, earlier: ResolvedType, body: NodeId, body_t: ResolvedType) !bool {
         if (earlier == .builtin and body_t == .builtin) return ResolvedType.eql(earlier, body_t);
         return self.valueFits(earlier, body, body_t);
@@ -6177,6 +6205,8 @@ pub const TypeChecker = struct {
                 // fires only on the boundary-crossing ones).
                 self.conc_loop_depth += 1;
                 defer self.conc_loop_depth -= 1;
+                try self.break_frames.append(self.gpa, .{ .label = 0, .yields = false });
+                defer _ = self.break_frames.pop();
                 // The ITERATOR is what survives a suspension here, and it is
                 // nobody's local — `x` is the element, typically an `int`.
                 const iter_retained = iteratorRetainedAcrossSuspension(iter_t);
@@ -6205,6 +6235,8 @@ pub const TypeChecker = struct {
                 // in-branch loop, mirror of the `for` arm.
                 self.conc_loop_depth += 1;
                 defer self.conc_loop_depth -= 1;
+                try self.break_frames.append(self.gpa, .{ .label = 0, .yields = false });
+                defer _ = self.break_frames.pop();
                 var i: u32 = 0;
                 while (i < wh.body_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[wh.body_start + i]));
@@ -6212,10 +6244,19 @@ pub const TypeChecker = struct {
                 if (wh.let_binding != 0) _ = ctx.locals.remove(wh.let_binding);
             },
             .break_stmt => {
-                // `break [label] [value]`. Type the value if
-                // present; loop-membership / label validity is permissive.
+                // `break [label] [value]`. Loop membership and label validity
+                // are permissive.
                 const b = self.arena.break_stmts.items[data];
-                if (!b.value.isNone()) _ = self.synthExpr(b.value, ctx);
+                if (!b.value.isNone()) {
+                    const t = self.synthExpr(b.value, ctx);
+                    if (self.breakTarget(b.label)) |frame| {
+                        if (frame.yields) {
+                            if (frame.value_t) |earlier| {
+                                if (!try self.armsAgree(earlier, b.value, t)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(b.value), "break values of a loop must all have the same type", .{});
+                            } else frame.value_t = t;
+                        }
+                    }
+                }
                 // E0907: the break must not cross the enclosing
                 // concurrency-branch task boundary (§9.2).
                 try self.checkConcControlFlow(stmt_id, b.label, "break");
@@ -6461,6 +6502,8 @@ pub const TypeChecker = struct {
         self.conc_branch = null;
         self.conc_loop_depth = 0;
         self.conc_labels_base = self.conc_labels.items.len;
+        const saved_break_base = self.break_base;
+        self.break_base = self.break_frames.items.len;
         const esc = try self.openEscapeWindow(ctx, .timer);
         defer {
             self.closeEscapeWindow(esc);
@@ -6469,6 +6512,7 @@ pub const TypeChecker = struct {
             self.conc_loop_depth = saved_depth;
             self.arena_iter_depth = saved_iter;
             self.conc_labels_base = saved_base;
+            self.break_base = saved_break_base;
         }
         var i: u32 = 0;
         while (i < len) : (i += 1) {
@@ -6705,6 +6749,8 @@ pub const TypeChecker = struct {
         self.conc_branch = kind;
         self.conc_loop_depth = 0;
         self.conc_labels_base = self.conc_labels.items.len;
+        const saved_break_base = self.break_base;
+        self.break_base = self.break_frames.items.len;
         const esc = try self.openEscapeWindow(ctx, switch (kind) {
             .race => .race_branch,
             .sync => .sync_branch,
@@ -6717,6 +6763,7 @@ pub const TypeChecker = struct {
             self.conc_loop_depth = saved_depth;
             self.arena_iter_depth = saved_iter;
             self.conc_labels_base = saved_base;
+            self.break_base = saved_break_base;
         }
         try self.checkStmt(ctx, stmt);
     }
@@ -6737,6 +6784,8 @@ pub const TypeChecker = struct {
         self.conc_branch = kind;
         self.conc_loop_depth = 0;
         self.conc_labels_base = self.conc_labels.items.len;
+        const saved_break_base = self.break_base;
+        self.break_base = self.break_frames.items.len;
         const esc = try self.openEscapeWindow(ctx, switch (kind) {
             .race => .race_branch,
             .sync => .sync_branch,
@@ -6749,6 +6798,7 @@ pub const TypeChecker = struct {
             self.conc_loop_depth = saved_depth;
             self.arena_iter_depth = saved_iter;
             self.conc_labels_base = saved_base;
+            self.break_base = saved_break_base;
         }
         var i: u32 = 0;
         while (i < len) : (i += 1) {
@@ -7258,11 +7308,9 @@ pub const TypeChecker = struct {
         return .{ .map_t = .{ .key = key_bt.?, .value = val_bt.? } };
     }
 
-    /// Type a `loop { body }` expression. The body statements
-    /// are checked, and the loop's value is the type of a top-level `break`
-    /// value (permissive: `unknown` when none — a labeled break out of a nested
-    /// loop is typed only through execution, the interpreter being the
-    /// reference; the assignment site treats `unknown` as a wildcard).
+    /// The loop's value is the type of the first value breaking out of it,
+    /// `unknown` when none; without a rule context only top-level breaks are
+    /// read.
     fn synthLoop(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const lp = self.arena.loop_exprs.items[data];
         if (ctx_opt) |ctx| {
@@ -7276,11 +7324,14 @@ pub const TypeChecker = struct {
             defer if (lp.label != 0) {
                 _ = self.conc_labels.pop();
             };
+            try self.break_frames.append(self.gpa, .{ .label = lp.label, .yields = true });
+            defer _ = self.break_frames.pop();
             var i: u32 = 0;
             while (i < lp.body_len) : (i += 1) {
                 const stmt: NodeId = @bitCast(self.arena.extra.items[lp.body_start + i]);
                 try self.checkStmt(ctx, stmt);
             }
+            return self.break_frames.getLast().value_t orelse ResolvedType.unknown;
         }
         var i: u32 = 0;
         while (i < lp.body_len) : (i += 1) {
@@ -14457,6 +14508,8 @@ const mistyped_cases = [_]MistypedCase{
     .{ .name = "let, int as struct", .src = "rule r() { let v: P = 1 }", .code = .type_mismatch },
     .{ .name = "let, one struct as another", .src = "rule r() { let v: P = R { y: 1 } }", .code = .type_mismatch },
     .{ .name = "if branches", .src = "rule r() {\n  let c = true\n  let v = if c { 0 } else { P { x: 1 } }\n}", .code = .type_mismatch },
+    .{ .name = "loop broken inside an if", .src = "rule r() {\n  let c = true\n  let v: int = loop {\n    if c { break P { x: 1 } }\n  }\n}", .code = .type_mismatch },
+    .{ .name = "loop broken from a closure", .src = "rule r() {\n  let v: int = loop {\n    let f = |k: int| {\n      if k > 0 {\n        break P { x: 1 }\n      }\n      k\n    }\n    let z = f(1)\n    break 1\n  }\n}", .code = .type_mismatch },
     .{ .name = "assignment to a local", .src = "rule r() {\n  let mut v = 0\n  v = P { x: 1 }\n}", .code = .type_mismatch },
     .{ .name = "assignment to a field", .src = "rule r() when resource Out { get_mut(Out).n = P { x: 1 } }", .code = .type_mismatch },
     .{ .name = "fn argument", .src = "rule r() { let v = id(P { x: 1 }) }", .code = .type_mismatch },
@@ -14599,4 +14652,65 @@ test "a bare literal match arm must have the earlier arm's builtin type" {
     defer r.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
     try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .type_mismatch, "match arms must all yield the same type"));
+}
+
+test "two values breaking out of one loop must have one builtin type" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa,
+        \\rule r() {
+        \\  let a: i32 = 1
+        \\  let c = true
+        \\  loop {
+        \\    if c { break a }
+        \\    break 2
+        \\  }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .type_mismatch, "break values of a loop must all have the same type"));
+}
+
+test "a value breaking out of a while, an inner loop or to a label does not type the enclosing loop" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa,
+        \\struct P { x: int = 0 }
+        \\rule r() {
+        \\  let c = true
+        \\  let v: int = loop {
+        \\    while c { break P { x: 1 } }
+        \\    let w = loop { break P { x: 1 } }
+        \\    break 1
+        \\  }
+        \\  outer: loop {
+        \\    let lv: int = loop {
+        \\      if c { break outer 2.5 }
+        \\      break 1
+        \\    }
+        \\    break
+        \\  }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+}
+
+test "a break refused at a task boundary types no loop beyond it" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa,
+        \\struct P { x: int = 0 }
+        \\async rule r() {
+        \\  let v: int = loop {
+        \\    branch {
+        \\      break P { x: 1 }
+        \\    }
+        \\    break 1
+        \\  }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.items.len);
+    try std.testing.expectEqual(DiagnosticCode.control_flow_escapes_task_branch, r.diagnostics.items[0].code);
 }
