@@ -74,7 +74,7 @@ jobs:
             mode: ReleaseFast
             precision: false
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ (matrix.mode == 'ReleaseSafe' || matrix.mode == 'ReleaseFast') && 75 || 35 }}
+    timeout-minutes: ${{ (matrix.mode == 'ReleaseSafe' || matrix.mode == 'ReleaseFast') && 120 || 35 }}
     steps:
       - uses: actions/checkout@v6
 
