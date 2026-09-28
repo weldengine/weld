@@ -213,3 +213,28 @@ test "no E0858 on a scene file holding one scene and its imports" {
         },
     }));
 }
+
+/// Check `files`, requiring exactly one diagnostic: E0840.
+fn expectOnlyE0840(files: []const etch.ProjectFile) !void {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try validate(gpa, files, &diags);
+    try expectOnly(diags.items, .construct_not_implemented, 1);
+}
+
+test "E0840 on a layer file holding its layer" {
+    try expectOnlyE0840(&.{.{ .name = "src/gameplay.layer.etch", .source = "layer \"Gameplay\" { }" }});
+}
+
+test "E0840 on a manifest file holding its world" {
+    try expectOnlyE0840(&.{.{ .name = "src/village.manifest.etch", .source = "world \"Village\" { }" }});
+}
+
+test "E0840 on a layer file holding a component" {
+    try expectOnlyE0840(&.{.{ .name = "src/gameplay.layer.etch", .source = "component Marker { id: int = 0 }" }});
+}
+
+test "E0840 on an empty manifest file" {
+    try expectOnlyE0840(&.{.{ .name = "src/village.manifest.etch", .source = "" }});
+}

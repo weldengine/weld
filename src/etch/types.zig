@@ -1166,7 +1166,7 @@ pub const TypeChecker = struct {
     /// typed file.
     fn checkTypedExtension(self: *TypeChecker) !void {
         const ext = self.arena.typed_extension;
-        if (ext == .unknown) return;
+        if (ext == .unknown or ext.unimplementedConstruct() != null) return;
         const main: ?ast_mod.ItemKind = switch (ext) {
             .scene => .scene_decl,
             .prefab => .prefab_decl,

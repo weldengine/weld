@@ -410,6 +410,7 @@ pub const DiagnosticCode = enum {
     declaration_file_body_not_allowed, // E1900 DeclarationFileBodyNotAllowed (a `fn` carries a body inside a `.d.etch`)
     construct_not_allowed_in_declaration_file, // E1901 ConstructNotAllowedInDeclarationFile (a behavioural top-level construct appears in a `.d.etch`)
     typed_extension_mismatch, // E0858 TypedExtensionMismatch (a construct in the wrong typed extension, `etch-grammar.md` §21.2)
+    construct_not_implemented, // E0840 ConstructNotImplemented (a `.layer.etch` or `.manifest.etch` file, whose `layer` / `world` construct the parser does not implement)
     declaration_file_implementation_mismatch, // E1902 DeclarationFileImplementationMismatch (a committed `.d.etch` diverges from what the emitter produces on the current Zig `ServiceSpec`)
 
     /// Canonical short code, e.g. `"E0001"`.
@@ -620,6 +621,7 @@ pub const DiagnosticCode = enum {
             .declaration_file_body_not_allowed => "E1900",
             .construct_not_allowed_in_declaration_file => "E1901",
             .typed_extension_mismatch => "E0858",
+            .construct_not_implemented => "E0840",
             .declaration_file_implementation_mismatch => "E1902",
         };
     }
@@ -832,6 +834,7 @@ pub const DiagnosticCode = enum {
             .declaration_file_body_not_allowed => "DeclarationFileBodyNotAllowed",
             .construct_not_allowed_in_declaration_file => "ConstructNotAllowedInDeclarationFile",
             .typed_extension_mismatch => "TypedExtensionMismatch",
+            .construct_not_implemented => "ConstructNotImplemented",
             .declaration_file_implementation_mismatch => "DeclarationFileImplementationMismatch",
         };
     }
@@ -943,4 +946,6 @@ test "DiagnosticCode code and name are stable cross-version" {
     try std.testing.expectEqualStrings("IllegalStatementInExtensionHook", DiagnosticCode.illegal_statement_in_extension_hook.name());
     try std.testing.expectEqualStrings("E1799", DiagnosticCode.prefab_hook_not_allowed.code());
     try std.testing.expectEqualStrings("PrefabHookNotAllowed", DiagnosticCode.prefab_hook_not_allowed.name());
+    try std.testing.expectEqualStrings("E0840", DiagnosticCode.construct_not_implemented.code());
+    try std.testing.expectEqualStrings("ConstructNotImplemented", DiagnosticCode.construct_not_implemented.name());
 }

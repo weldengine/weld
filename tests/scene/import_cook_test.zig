@@ -643,3 +643,25 @@ test "a prefab variant cooks without naming its base's components, as etch check
     defer gpa.free(reference_bytes);
     try std.testing.expectEqualSlices(u8, reference_bytes, bytes);
 }
+
+test "a layer file refuses the cook, as E0840 refuses it" {
+    const files = [_]ProjectFile{.{ .name = "src/gameplay.layer.etch", .source = "layer \"Gameplay\" { }" }};
+    try expectCheckReports(&files, .construct_not_implemented);
+    try std.testing.expectError(error.ConstructNotImplemented, scene_cook.cookSceneInProject(std.testing.allocator, &files, 0, null, null));
+}
+
+test "a layer file beside a scene does not refuse the scene's cook" {
+    const gpa = std.testing.allocator;
+    const files = [_]ProjectFile{
+        .{ .name = "src/combat.etch", .source = combat },
+        .{ .name = "src/gameplay.layer.etch", .source = "layer \"Gameplay\" { }" },
+        .{ .name = "src/level.scene.etch", .source =
+        \\import combat { Health }
+        \\scene "Level" {
+        \\  entity "npc" { uuid: "00000000-0000-0000-0000-000000000002" Health { max: 40 } }
+        \\}
+        },
+    };
+    var cooked = try scene_cook.cookSceneInProject(gpa, &files, 2, null, null);
+    cooked.deinit(gpa);
+}

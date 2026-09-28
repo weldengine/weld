@@ -57,8 +57,21 @@ pub const Project = struct {
         @memset(self.parse_failed, false);
         try self.arenas.ensureTotalCapacity(gpa, n);
         for (files, 0..) |f, idx| {
+            const ext = parser.typedExtensionForPath(f.name);
+            // The parser does not implement this file's construct, so its
+            // source is not parsed and E0840 is the one diagnostic it gets.
+            if (ext.unimplementedConstruct()) |construct| {
+                var empty = try parser.parseWithMode(gpa, "", parser.modeForPath(f.name));
+                gpa.free(empty.diagnostics);
+                empty.ast.typed_extension = ext;
+                self.arenas.appendAssumeCapacity(empty.ast);
+                const msg = try std.fmt.allocPrint(gpa, "a .{s}.etch file holds a '{s}', which is not implemented", .{ @tagName(ext), construct });
+                errdefer gpa.free(msg);
+                try diags_out.append(gpa, .{ .code = .construct_not_implemented, .severity = .error_, .primary_span = .{ .byte_start = 0, .byte_end = 0 }, .primary_message = msg });
+                continue;
+            }
             var pr = try parser.parseWithMode(gpa, f.source, parser.modeForPath(f.name));
-            pr.ast.typed_extension = parser.typedExtensionForPath(f.name);
+            pr.ast.typed_extension = ext;
             // Each parse diagnostic moves into `diags_out` (its message
             // transfers), then only the vacated slice is freed — never
             // `pr.deinit`, which would free the arena kept below.
