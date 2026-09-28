@@ -315,6 +315,12 @@ pub const Parser = struct {
     /// resolves the `break [IDENT] [expression]` ambiguity without a statement
     /// separator (an IDENT that is not an active label starts the break value).
     active_labels: std.ArrayListUnmanaged(StringId) = .empty,
+    /// Loops open since the innermost closure body began, of any kind.
+    loop_depth: u32 = 0,
+    closure_depth: u32 = 0,
+    /// Start, in `active_labels`, of the labels the innermost closure body
+    /// opened itself.
+    closure_label_base: usize = 0,
     /// When true, a bare `TYPE_IDENT {` is NOT parsed as a struct literal. Set
     /// while parsing the head expression of `if` / `while` /
     /// `for` / `match` (where the `{` opens the body / arms, not a struct
@@ -338,6 +344,19 @@ pub const Parser = struct {
     fn isActiveLabel(self: *const Parser, name: StringId) bool {
         for (self.active_labels.items) |l| {
             if (l == name) return true;
+        }
+        return false;
+    }
+
+    /// Whether a jump to `label`, `0` for the innermost loop, leaves the closure
+    /// body it is written in.
+    fn jumpLeavesClosure(self: *const Parser, label: StringId) bool {
+        if (self.closure_depth == 0) return false;
+        if (label == 0) return self.loop_depth == 0;
+        var i = self.active_labels.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.active_labels.items[i] == label) return i < self.closure_label_base;
         }
         return false;
     }
@@ -5603,6 +5622,8 @@ pub const Parser = struct {
         _ = try self.expect(.kw_in, "expected 'in' in for loop");
         const iterable = try self.parseExprNoStruct(0);
         _ = try self.expect(.lbrace, "expected '{' to open for body");
+        self.loop_depth += 1;
+        defer self.loop_depth -= 1;
         const body = try self.parseStmtRun();
         const closing = try self.expect(.rbrace, "expected '}' to close for body");
         return try self.arena.addForStmt(self.gpa, .{
@@ -5633,6 +5654,8 @@ pub const Parser = struct {
         }
         const cond = try self.parseExprNoStruct(0);
         _ = try self.expect(.lbrace, "expected '{' to start the while body");
+        self.loop_depth += 1;
+        defer self.loop_depth -= 1;
         const body = try self.parseStmtRun();
         const closing = try self.expect(.rbrace, "expected '}' to close the while body");
         return try self.arena.addWhileStmt(self.gpa, .{
@@ -5650,6 +5673,8 @@ pub const Parser = struct {
         const kw_span = (try self.advance()).span; // 'loop'
         _ = try self.expect(.lbrace, "expected '{' to start loop body");
         if (label != 0) try self.active_labels.append(self.gpa, label);
+        self.loop_depth += 1;
+        defer self.loop_depth -= 1;
         const body = try self.parseStmtRun();
         if (label != 0) _ = self.active_labels.pop();
         const closing = try self.expect(.rbrace, "expected '}' to close loop body");
@@ -5695,7 +5720,9 @@ pub const Parser = struct {
             value = try self.parseExpr(0);
             end_byte = self.arena.exprSpan(value).byte_end;
         }
-        return try self.arena.addBreakStmt(self.gpa, label, value, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
+        const stmt = try self.arena.addBreakStmt(self.gpa, label, value, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
+        if (self.jumpLeavesClosure(label)) try self.arena.closure_escapes.append(self.gpa, stmt);
+        return stmt;
     }
 
     /// Parse `continue [label]` (loop/break, `etch-grammar.md` §633).
@@ -5711,7 +5738,9 @@ pub const Parser = struct {
                 end_byte = lt.span.byte_end;
             }
         }
-        return try self.arena.addContinueStmt(self.gpa, label, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
+        const stmt = try self.arena.addContinueStmt(self.gpa, label, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
+        if (self.jumpLeavesClosure(label)) try self.arena.closure_escapes.append(self.gpa, stmt);
+        return stmt;
     }
 
     /// Parse `throw expression` (error handling, `etch-grammar.md` §641).
@@ -6693,6 +6722,16 @@ pub const Parser = struct {
             }
         }
         _ = try self.expect(.pipe, "expected '|' to close closure parameters");
+        const saved_depth = self.loop_depth;
+        const saved_base = self.closure_label_base;
+        self.loop_depth = 0;
+        self.closure_label_base = self.active_labels.items.len;
+        self.closure_depth += 1;
+        defer {
+            self.loop_depth = saved_depth;
+            self.closure_label_base = saved_base;
+            self.closure_depth -= 1;
+        }
         const body = try self.parseExpr(0);
         const body_span = self.arena.exprSpan(body);
         return try self.arena.addClosure(self.gpa, params.items, body, .{

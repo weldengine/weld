@@ -597,9 +597,7 @@ pub const TypeChecker = struct {
     /// branch entry.
     conc_labels_base: usize = 0,
     /// The loops a `break` can target, innermost last. Only the window past
-    /// `break_base` belongs to the innermost task or timer body; a closure body
-    /// is checked at its call, inside the caller's loops, which a `break` in it
-    /// leaves.
+    /// `break_base` belongs to the innermost task, timer or closure body.
     break_frames: std.ArrayListUnmanaged(BreakFrame) = .empty,
     break_base: usize = 0,
     /// Names visible at the entry of the innermost scope-snapshot body, in
@@ -901,6 +899,7 @@ pub const TypeChecker = struct {
         try self.checkDeclarationFileConstructs();
         try self.checkTypedExtension();
         try self.checkLiteralRanges();
+        try self.checkClosureEscapes();
         try self.collectServices();
         try self.collectDeclaredEvents();
         try self.pass1Collect();
@@ -4754,6 +4753,15 @@ pub const TypeChecker = struct {
         return true;
     }
 
+    /// A closure body is checked where it is called, and some never are, so its
+    /// jumps are judged where the parser found them.
+    fn checkClosureEscapes(self: *TypeChecker) !void {
+        for (self.arena.closure_escapes.items) |stmt| {
+            const what: []const u8 = if (self.arena.stmtKind(stmt) == .break_stmt) "break" else "continue";
+            try self.emit(.control_flow_escapes_closure, .error_, self.arena.stmtSpan(stmt), "'{s}' targets a loop outside its closure — control flow cannot cross a closure boundary", .{what});
+        }
+    }
+
     /// Every integer literal fits `int` and every float or duration literal is
     /// finite, whatever context it sits in (`etch-resolver-types.md` §4.3). The
     /// lexer never includes the sign, so a literal under a unary minus is judged
@@ -7637,10 +7645,25 @@ pub const TypeChecker = struct {
         const saved_captures = self.closure_captures;
         self.closure_captures = &captures;
         defer self.closure_captures = saved_captures;
-        // A `return` in a closure leaves the closure, which declares no type.
+        // A `return` in a closure leaves the closure, which declares no type,
+        // and no jump leaves it for the caller's loops or task branch.
         const saved_ret = self.current_fn_return;
+        const saved_branch = self.conc_branch;
+        const saved_depth = self.conc_loop_depth;
+        const saved_labels = self.conc_labels_base;
+        const saved_break_base = self.break_base;
         self.current_fn_return = null;
-        defer self.current_fn_return = saved_ret;
+        self.conc_branch = null;
+        self.conc_loop_depth = 0;
+        self.conc_labels_base = self.conc_labels.items.len;
+        self.break_base = self.break_frames.items.len;
+        defer {
+            self.current_fn_return = saved_ret;
+            self.conc_branch = saved_branch;
+            self.conc_loop_depth = saved_depth;
+            self.conc_labels_base = saved_labels;
+            self.break_base = saved_break_base;
+        }
         const ret = try self.synthExprE(ce.body, ctx_opt);
         // Remove the parameter bindings (a closure's params do not collide
         // with outer locals in practice; a save/restore is a later refinement).
@@ -14509,7 +14532,6 @@ const mistyped_cases = [_]MistypedCase{
     .{ .name = "let, one struct as another", .src = "rule r() { let v: P = R { y: 1 } }", .code = .type_mismatch },
     .{ .name = "if branches", .src = "rule r() {\n  let c = true\n  let v = if c { 0 } else { P { x: 1 } }\n}", .code = .type_mismatch },
     .{ .name = "loop broken inside an if", .src = "rule r() {\n  let c = true\n  let v: int = loop {\n    if c { break P { x: 1 } }\n  }\n}", .code = .type_mismatch },
-    .{ .name = "loop broken from a closure", .src = "rule r() {\n  let v: int = loop {\n    let f = |k: int| {\n      if k > 0 {\n        break P { x: 1 }\n      }\n      k\n    }\n    let z = f(1)\n    break 1\n  }\n}", .code = .type_mismatch },
     .{ .name = "assignment to a local", .src = "rule r() {\n  let mut v = 0\n  v = P { x: 1 }\n}", .code = .type_mismatch },
     .{ .name = "assignment to a field", .src = "rule r() when resource Out { get_mut(Out).n = P { x: 1 } }", .code = .type_mismatch },
     .{ .name = "fn argument", .src = "rule r() { let v = id(P { x: 1 }) }", .code = .type_mismatch },
@@ -14713,4 +14735,248 @@ test "a break refused at a task boundary types no loop beyond it" {
     try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
     try std.testing.expectEqual(@as(usize, 1), r.diagnostics.items.len);
     try std.testing.expectEqual(DiagnosticCode.control_flow_escapes_task_branch, r.diagnostics.items[0].code);
+}
+
+const ClosureJumpCase = struct { name: []const u8, src: []const u8 };
+
+const escaping_jumps = [_]ClosureJumpCase{
+    .{ .name = "break of a struct in a closure called in an int loop", .src =
+    \\struct P { x: int = 0 }
+    \\rule r() {
+    \\  let v: int = loop {
+    \\    let f = |k: int| {
+    \\      if k > 0 {
+    \\        break P { x: 1 }
+    \\      }
+    \\      k
+    \\    }
+    \\    let z = f(1)
+    \\    break 1
+    \\  }
+    \\}
+    },
+    .{ .name = "break in a closure called in a loop", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let v = loop {
+    \\    let f = |k: int| {
+    \\      if k > 0 {
+    \\        break 7
+    \\      }
+    \\      k
+    \\    }
+    \\    let z = f(1)
+    \\    break 1
+    \\  }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "continue in a closure called in a for", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let mut total = 0
+    \\  for i in 0..3 {
+    \\    let f = |k: int| {
+    \\      if k > 0 {
+    \\        continue
+    \\      }
+    \\      k
+    \\    }
+    \\    let z = f(i)
+    \\    total = total + 1
+    \\  }
+    \\  get_mut(Out).n = total
+    \\}
+    },
+    .{ .name = "labeled break to an enclosing loop", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let mut hits = 0
+    \\  outer: loop {
+    \\    let f = |k: int| {
+    \\      if k > 0 {
+    \\        break outer
+    \\      }
+    \\      k
+    \\    }
+    \\    let z = f(1)
+    \\    hits = hits + 1
+    \\    break
+    \\  }
+    \\  get_mut(Out).n = hits
+    \\}
+    },
+    .{ .name = "break in a closure never called", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let v = loop {
+    \\    let f = |k: int| {
+    \\      if k > 0 {
+    \\        break 7
+    \\      }
+    \\      k
+    \\    }
+    \\    break 1
+    \\  }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "break in a closure with no loop anywhere", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let f = |k: int| {
+    \\    if k > 0 {
+    \\      break
+    \\    }
+    \\    k
+    \\  }
+    \\  get_mut(Out).n = f(1)
+    \\}
+    },
+    .{ .name = "break in a closure called twice", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let f = |k: int| {
+    \\    if k > 0 {
+    \\      break
+    \\    }
+    \\    k
+    \\  }
+    \\  for i in 0..3 {
+    \\    let a = f(0)
+    \\    let b = f(0)
+    \\  }
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "break in a tick_until predicate", .src =
+    \\component A { v: int = 0 }
+    \\test "pred" {
+    \\  let w = test_world()
+    \\  let e = w.spawn_with([A { v: 1 }])
+    \\  let ok = tick_until(|| {
+    \\    if true {
+    \\      break
+    \\    }
+    \\    true
+    \\  }, 1.0s)
+    \\}
+    },
+    .{ .name = "break in a closure nested in a loop of another closure", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let outer_f = |k: int| {
+    \\    let w = loop {
+    \\      let inner = |j: int| {
+    \\        if j > 0 {
+    \\          break 9
+    \\        }
+    \\        j
+    \\      }
+    \\      let q = inner(1)
+    \\      break 2
+    \\    }
+    \\    w
+    \\  }
+    \\  get_mut(Out).n = outer_f(1)
+    \\}
+    },
+};
+
+const jumps_inside_closures = [_]ClosureJumpCase{
+    .{ .name = "loop inside the closure", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let f = |k: int| {
+    \\    let w = loop {
+    \\      if k > 0 {
+    \\        break 5
+    \\      }
+    \\      break 6
+    \\    }
+    \\    w
+    \\  }
+    \\  get_mut(Out).n = f(1)
+    \\}
+    },
+    .{ .name = "continue in a for inside the closure", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let f = |k: int| {
+    \\    for i in 0..3 {
+    \\      if i > k {
+    \\        continue
+    \\      }
+    \\    }
+    \\    k
+    \\  }
+    \\  get_mut(Out).n = f(1)
+    \\}
+    },
+    .{ .name = "label shadowed inside the closure", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let mut hits = 0
+    \\  outer: loop {
+    \\    let f = |k: int| {
+    \\      outer: loop {
+    \\        if k > 0 {
+    \\          break outer
+    \\        }
+    \\        break
+    \\      }
+    \\      k
+    \\    }
+    \\    hits = f(4)
+    \\    break
+    \\  }
+    \\  get_mut(Out).n = hits
+    \\}
+    },
+    .{ .name = "return from a closure in a sync branch", .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  sync {
+    \\    { let f = |k: int| {
+    \\        if k > 0 {
+    \\          return 3
+    \\        }
+    \\        k
+    \\      }
+    \\      let z = f(1)
+    \\      get_mut(Out).n = z }
+    \\  }
+    \\}
+    },
+};
+
+test "a break or continue that leaves its closure is refused once, called or not" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (escaping_jumps) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        const n = countMessage(r.diagnostics.items, .control_flow_escapes_closure, "");
+        if (n != 1 or r.diagnostics.items.len != 1) {
+            wrong += 1;
+            std.debug.print("{s}: {d} E0911 among {d} diagnostics\n", .{ c.name, n, r.diagnostics.items.len });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a jump or return that stays in its closure is accepted" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (jumps_inside_closures) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
 }

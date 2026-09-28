@@ -295,6 +295,9 @@ pub const RuntimeErrorKind = enum {
     /// boundary refused, or whose hook failed. The span covers the extension name
     /// at the call, and is empty when a cooked hook made the call.
     ExtensionOpFailed,
+    /// A `break` or `continue` reached the end of a closure body, with no loop
+    /// of that body to target. The span covers the closure.
+    ControlFlowEscapesClosure,
 };
 
 /// Whether integer overflow wraps rather than panics: `ReleaseFast` and

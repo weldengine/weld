@@ -2756,6 +2756,9 @@ pub const AstArena = struct {
     measure_exprs: std.ArrayListUnmanaged(MeasureExpr) = .empty,
     if_exprs: std.ArrayListUnmanaged(IfExpr) = .empty,
     break_stmts: std.ArrayListUnmanaged(BreakStmt) = .empty,
+    /// The `break` and `continue` statements that target a loop outside their
+    /// closure body (`etch-reference-part1.md` §7.7).
+    closure_escapes: std.ArrayListUnmanaged(NodeId) = .empty,
     throw_stmts: std.ArrayListUnmanaged(ThrowStmt) = .empty,
     try_catch_stmts: std.ArrayListUnmanaged(TryCatchStmt) = .empty,
     emit_stmts: std.ArrayListUnmanaged(EmitStmt) = .empty,
@@ -2977,6 +2980,7 @@ pub const AstArena = struct {
         self.measure_exprs.deinit(gpa);
         self.if_exprs.deinit(gpa);
         self.break_stmts.deinit(gpa);
+        self.closure_escapes.deinit(gpa);
         self.throw_stmts.deinit(gpa);
         self.try_catch_stmts.deinit(gpa);
         self.emit_stmts.deinit(gpa);

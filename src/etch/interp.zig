@@ -5472,13 +5472,26 @@ pub const Interpreter = struct {
         var cap_it = self.closures.list.items[handle].captured.iterator();
         while (cap_it.next()) |e| try frame.put(self.gpa, e.key_ptr.*, e.value_ptr.*, false);
         const result = try self.evalExpr(world, &frame, ce.body);
+        return self.leaveClosure(result, node);
+    }
+
+    /// A closure body ends at its call, never in the enclosing fn: a `return`
+    /// becomes the call's value, a throw keeps propagating as unit, and a
+    /// `break` or `continue` still set has no loop to reach
+    /// (`etch-reference-part1.md` §7.7).
+    fn leaveClosure(self: *Interpreter, result: Value, node: NodeId) StmtError!Value {
         if (self.returning) {
             self.returning = false;
             const rv = self.return_value;
             self.return_value = .{ .unit = {} };
             return rv;
         }
-        if (self.thrown or self.control != .none) return Value{ .unit = {} };
+        if (self.thrown) return Value{ .unit = {} };
+        if (self.control != .none) {
+            self.control = .none;
+            self.control_label = 0;
+            return self.fail(.ControlFlowEscapesClosure, self.ast.exprSpan(node));
+        }
         return result;
     }
 
@@ -5503,17 +5516,14 @@ pub const Interpreter = struct {
             };
             world.tickBoundary();
             const r = try self.callZeroArgClosure(world, pred);
-            // A predicate `throw` / control signal stops the loop and surfaces as
-            // the test failure — do NOT keep ticking on a
-            // latched throw. `callZeroArgClosure` consumes `return`; only a throw
-            // or a stray control signal can remain set here.
+            // A predicate `throw` stops the loop and surfaces as the test
+            // failure — do NOT keep ticking on a latched throw.
             if (self.thrown) {
                 self.thrown = false;
                 self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
                 self.pending_message = null;
                 return error.RuntimeFailure;
             }
-            if (self.control != .none) return error.RuntimeFailure;
             if (r == .bool_ and r.bool_) return Value{ .bool_ = true };
         }
         return Value{ .bool_ = false };
@@ -6774,22 +6784,8 @@ pub const Interpreter = struct {
                     const av = try self.evalExpr(world, locals, arg);
                     try frame.put(self.gpa, p.name, av, false);
                 }
-                // The closure call boundary consumes `returning`: a `return`
-                // inside the
-                // body exits the CLOSURE — it becomes the call's value — never
-                // the enclosing fn. Same boundary-consume as `callFn` /
-                // `callMethod`; `thrown` and `break`/`continue` keep
-                // propagating (the enclosing try / loop interprets them) and
-                // the call yields unit.
                 const result = try self.evalExpr(world, &frame, ce.body);
-                if (self.returning) {
-                    self.returning = false;
-                    const rv = self.return_value;
-                    self.return_value = .{ .unit = {} };
-                    return rv;
-                }
-                if (self.thrown or self.control != .none) return Value{ .unit = {} };
-                return result;
+                return self.leaveClosure(result, node);
             },
             .struct_lit => {
                 const sl = self.ast.struct_lits.items[data];
@@ -7114,6 +7110,7 @@ fn defaultFailureMessage(kind: RuntimeErrorKind) []const u8 {
         .AssertFailed => "assertion failed",
         .StaleComponentRef => "component ref outlived its entity",
         .ExtensionOpFailed => "extension activation or deactivation failed",
+        .ControlFlowEscapesClosure => "a break or continue left its closure",
     };
 }
 
@@ -18124,4 +18121,70 @@ test "newRunString frees the bytes it takes on an allocation failure" {
     const bytes = try gpa.dupe(u8, "abc");
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(error.OutOfMemory, interp.newRunString(bytes));
+}
+
+test "a break that leaves its closure fails the rule and does not break the caller's loop" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const source =
+        \\resource Out { n: int = 0 }
+        \\rule r() when resource Out {
+        \\  let v = loop {
+        \\    let f = |k: int| {
+        \\      if k > 0 {
+        \\        break 7
+        \\      }
+        \\      k
+        \\    }
+        \\    let z = f(1)
+        \\    break 1
+        \\  }
+        \\  get_mut(Out).n = v
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    const le = report.last_error orelse return error.TestExpectedTypedError;
+    try std.testing.expectEqual(RuntimeErrorKind.ControlFlowEscapesClosure, le.kind);
+    try std.testing.expect(std.mem.startsWith(u8, source[le.span.byte_start..le.span.byte_end], "|k: int|"));
+    try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "Out", "n"));
+}
+
+test "a continue that leaves its closure fails the rule and does not continue the caller's loop" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const source =
+        \\resource Out { n: int = 0 }
+        \\rule r() when resource Out {
+        \\  let mut total = 0
+        \\  for i in 0..3 {
+        \\    let f = |k: int| {
+        \\      if k > 0 {
+        \\        continue
+        \\      }
+        \\      k
+        \\    }
+        \\    let z = f(i)
+        \\    total = total + 1
+        \\  }
+        \\  get_mut(Out).n = total + 10
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    const le = report.last_error orelse return error.TestExpectedTypedError;
+    try std.testing.expectEqual(RuntimeErrorKind.ControlFlowEscapesClosure, le.kind);
+    try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "Out", "n"));
 }

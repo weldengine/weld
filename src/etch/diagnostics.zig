@@ -390,6 +390,7 @@ pub const DiagnosticCode = enum {
     event_not_entity_scoped, // E0908 EventNotEntityScoped (`await entity_event(e, T)` where T has no `Entity` field)
     ambiguous_event_entity_target, // E0909 AmbiguousEventEntityTarget (T has multiple `Entity` fields with no `@entity_target`)
     measure_outside_test, // E0910 MeasureOutsideTest (`measure { … }` outside a test body; wall-clock stays out of deterministic gameplay)
+    control_flow_escapes_closure, // E0911 ControlFlowEscapesClosure (`break`/`continue` in a closure body targeting a loop outside it)
 
     // ── Declaration files `.d.etch` (900-E1919, `etch-validation-ecs.md` §28,
     // `etch-grammar.md` §20). The E19xx block was empty before this milestone. The two
@@ -618,6 +619,7 @@ pub const DiagnosticCode = enum {
             .event_not_entity_scoped => "E0908",
             .ambiguous_event_entity_target => "E0909",
             .measure_outside_test => "E0910",
+            .control_flow_escapes_closure => "E0911",
             .declaration_file_body_not_allowed => "E1900",
             .construct_not_allowed_in_declaration_file => "E1901",
             .typed_extension_mismatch => "E0858",
@@ -831,6 +833,7 @@ pub const DiagnosticCode = enum {
             .event_not_entity_scoped => "EventNotEntityScoped",
             .ambiguous_event_entity_target => "AmbiguousEventEntityTarget",
             .measure_outside_test => "MeasureOutsideTest",
+            .control_flow_escapes_closure => "ControlFlowEscapesClosure",
             .declaration_file_body_not_allowed => "DeclarationFileBodyNotAllowed",
             .construct_not_allowed_in_declaration_file => "ConstructNotAllowedInDeclarationFile",
             .typed_extension_mismatch => "TypedExtensionMismatch",
