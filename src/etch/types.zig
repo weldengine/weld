@@ -566,8 +566,9 @@ pub const TypeChecker = struct {
     /// around the body in `checkTest`.
     in_test_body: bool = false,
     /// Whether the statements being checked are an `on_attach` / `on_detach`
-    /// body: a `return` there is E1798, and the E1210 / E1213 messages name the
-    /// hook's scope. Set/restored in `checkPrefabHook`.
+    /// body: a `return`, a `throw` outside a `try` or a timer there is E1798,
+    /// and the E1210 / E1213 messages name the hook's scope. Set/restored in
+    /// `checkHookBody`.
     in_hook_body: bool = false,
     /// The kind of the INNERMOST `race`/`sync` branch or `branch`/`spawn` body
     /// enclosing the statements being checked, `null` outside any.
@@ -6184,6 +6185,9 @@ pub const TypeChecker = struct {
                 // statically an `Error`, so a non-Error operand is rejected
                 // here (no runtime coercion). The interpreter's carrier stays
                 // an arbitrary `Value` — unreachable for checked programs.
+                if (self.in_hook_body and !self.current_can_throw) {
+                    try self.emit(.illegal_statement_in_extension_hook, .error_, self.arena.stmtSpan(stmt_id), "'throw' outside a 'try' is illegal in an extension hook (on_attach / on_detach): a hook has no error channel", .{});
+                }
                 const t = self.arena.throw_stmts.items[data];
                 const vt = self.synthExpr(t.value, ctx);
                 const is_error = vt == .struct_t and vt.struct_t == self.arena.error_type_name;
@@ -6229,7 +6233,7 @@ pub const TypeChecker = struct {
                 // site (`etch-resolver-types.md` §9.2). Asymmetric by design
                 // — do NOT generalize.
                 if (self.in_hook_body) {
-                    try self.emit(.illegal_return_in_extension_hook, .error_, self.arena.stmtSpan(stmt_id), "'return' is illegal in an extension hook (on_attach / on_detach): a hook has no caller to return to", .{});
+                    try self.emit(.illegal_statement_in_extension_hook, .error_, self.arena.stmtSpan(stmt_id), "'return' is illegal in an extension hook (on_attach / on_detach): a hook has no caller to return to", .{});
                 }
                 if (self.conc_branch) |ck| {
                     if (ck != .race) {
@@ -6363,6 +6367,9 @@ pub const TypeChecker = struct {
                 // carries no `{async}` effect (absent from the §9.4
                 // builtin-effect table), so there is no E0901 gate on the
                 // statement itself.
+                if (self.in_hook_body) {
+                    try self.emit(.illegal_statement_in_extension_hook, .error_, self.arena.stmtSpan(stmt_id), "a timer is illegal in an extension hook (on_attach / on_detach): a hook runs to completion and has no task to schedule it on", .{});
+                }
                 const ts = self.arena.timer_stmts.items[data];
                 // The duration argument is a full expression typed `Duration`
                 // (§9.10), evaluated once at scheduling time.
@@ -9378,7 +9385,71 @@ test "a return in a hook is E1798" {
         \\}
     );
     defer r.deinit(gpa);
-    try expectAnyCode(r.diagnostics.items, .illegal_return_in_extension_hook);
+    try expectAnyCode(r.diagnostics.items, .illegal_statement_in_extension_hook);
+}
+
+test "a throw outside a try in a hook is E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { throw Error { message: "boom", code: .io_fail } }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .illegal_statement_in_extension_hook, "throw"));
+}
+
+test "a throw in a catch body of a hook is E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach {
+        \\    try { entity.get_mut(Health).max += 1.0 } catch err { throw err }
+        \\  }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .illegal_statement_in_extension_hook, "throw"));
+}
+
+test "a throw inside a try in a hook is not E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach {
+        \\    try { throw Error { message: "boom", code: .io_fail } } catch err { entity.get_mut(Health).max += 1.0 }
+        \\  }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectNoCode(r.diagnostics.items, .illegal_statement_in_extension_hook);
+}
+
+test "a timer in a hook is E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { after(1.0s) { } }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .illegal_statement_in_extension_hook, "timer"));
+}
+
+test "a bound timer in a hook is E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let t = every(1.0s) { } }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .illegal_statement_in_extension_hook, "timer"));
 }
 
 test "a hook on an of prefab is E1799" {

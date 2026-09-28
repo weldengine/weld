@@ -1796,3 +1796,54 @@ test "a deactivation whose on_detach no interpreter would run is refused" {
     try std.testing.expect(world.componentBytes(e, world.componentId("Weapon").?) != null);
     try std.testing.expect(world.hasEntityExtension(e, "Forged"));
 }
+
+test "a timer in a hook is refused at activation" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "after(1.0s) { }", null);
+    defer gpa.free(bytes);
+    try std.testing.expectError(error.ExtensionHookRefused, scene.loader.activateExtension(&h.world, gpa, h.entity, "Forged", bytes));
+    try std.testing.expect(h.weapon(h.entity) == null);
+}
+
+test "a throw in a hook is refused at activation" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "throw Error { message: \"boom\", code: .io_fail }", null);
+    defer gpa.free(bytes);
+    try std.testing.expectError(error.ExtensionHookRefused, scene.loader.activateExtension(&h.world, gpa, h.entity, "Forged", bytes));
+    try std.testing.expect(h.weapon(h.entity) == null);
+}
+
+/// The cook's answer for an `extends` prefab whose `on_attach` is `hook`.
+fn cookWithHook(gpa: std.mem.Allocator, comptime hook: []const u8) !void {
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const source =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "Bad" extends "BaseCharacter" requires Health {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Weapon { damage: 25 } }
+        \\  on_attach {
+    ++ hook ++
+        \\ }
+        \\}
+    ;
+    var cooked = try scene_cook.cookPrefab(gpa, source, base_res.base(), null);
+    cooked.deinit(gpa);
+}
+
+test "an extension whose hook starts a timer does not cook" {
+    try std.testing.expectError(error.HookRefused, cookWithHook(std.testing.allocator, "after(1.0s) { }"));
+}
+
+test "an extension whose hook throws outside a try does not cook" {
+    try std.testing.expectError(error.HookRefused, cookWithHook(std.testing.allocator, "throw Error { message: \"boom\", code: .io_fail }"));
+}
