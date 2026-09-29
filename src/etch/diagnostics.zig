@@ -48,6 +48,7 @@ pub const DiagnosticCode = enum {
     incomplete_trait_impl, // E0214 IncompleteTraitImpl
     conditional_impl_condition_not_proven, // E0215 ConditionalImplConditionNotProven
     orphan_impl, // E0217 OrphanImpl
+    ambiguous_inherent_method, // E0218 AmbiguousInherentMethod (two inherent impls of one type define a method of one name)
     immutable_receiver_for_mut_self, // E0220 ImmutableReceiverForMutSelfMethod
     closure_cannot_mutate_capture, // E0221 ClosureCannotMutateCapture
     collection_field_element_invalid, // E0222 CollectionFieldElementInvalid (resource collection field: unsupported element or nested collection)
@@ -434,6 +435,7 @@ pub const DiagnosticCode = enum {
             .incomplete_trait_impl => "E0214",
             .conditional_impl_condition_not_proven => "E0215",
             .orphan_impl => "E0217",
+            .ambiguous_inherent_method => "E0218",
             .immutable_receiver_for_mut_self => "E0220",
             .closure_cannot_mutate_capture => "E0221",
             .collection_field_element_invalid => "E0222",
@@ -648,6 +650,7 @@ pub const DiagnosticCode = enum {
             .incomplete_trait_impl => "IncompleteTraitImpl",
             .conditional_impl_condition_not_proven => "ConditionalImplConditionNotProven",
             .orphan_impl => "OrphanImpl",
+            .ambiguous_inherent_method => "AmbiguousInherentMethod",
             .immutable_receiver_for_mut_self => "ImmutableReceiverForMutSelfMethod",
             .closure_cannot_mutate_capture => "ClosureCannotMutateCapture",
             .collection_field_element_invalid => "CollectionFieldElementInvalid",

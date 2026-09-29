@@ -464,7 +464,7 @@ test "an inherent method two imported modules define is ambiguous at its call" {
     var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
     defer deinitDiags(gpa, &diags);
     try diagnosticsWith(gpa, "import lib { Pt }\nimport ext1\nimport ext2\nfn f(p: Pt) -> int { p.len() }", &diags);
-    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .duplicate_symbol));
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .ambiguous_inherent_method));
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
 }
 
@@ -483,6 +483,32 @@ test "an inherent method of a module not imported is no method of the type" {
     try diagnosticsWith(gpa, "import lib { Pt }\nfn f(p: Pt) -> int { p.len() }", &diags);
     try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .type_mismatch));
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+}
+
+const InherentCase = struct { name: []const u8, files: []const etch.ProjectFile, ambiguous: usize };
+const inherent_cases = [_]InherentCase{
+    .{ .name = "two impls of one file", .ambiguous = 1, .files = &.{.{ .name = "main.etch", .source = "struct Pt { x: int = 0 }\nimpl Pt {\n  fn len(self) -> int { 1 }\n}\nimpl Pt {\n  fn len(self) -> int { 2 }\n}" }} },
+    .{ .name = "one impl naming a method twice", .ambiguous = 1, .files = &.{.{ .name = "main.etch", .source = "struct Pt { x: int = 0 }\nimpl Pt {\n  fn len(self) -> int { 1 }\n  fn len(self) -> int { 2 }\n}" }} },
+    .{ .name = "an impl beside an imported one", .ambiguous = 1, .files = &.{ extended_pt[0], extended_pt[1], .{ .name = "main.etch", .source = "import lib { Pt }\nimport ext1\nimpl Pt {\n  fn len(self) -> int { 3 }\n}" } } },
+    .{ .name = "two impls of one file naming two methods", .ambiguous = 0, .files = &.{.{ .name = "main.etch", .source = "struct Pt { x: int = 0 }\nimpl Pt {\n  fn len(self) -> int { 1 }\n}\nimpl Pt {\n  fn wid(self) -> int { 2 }\n}" }} },
+    .{ .name = "an impl beside an imported one naming another method", .ambiguous = 0, .files = &.{ extended_pt[0], extended_pt[1], .{ .name = "main.etch", .source = "import lib { Pt }\nimport ext1\nimpl Pt {\n  fn wid(self) -> int { 3 }\n}" } } },
+};
+
+test "two inherent methods of one name on one type are E0218" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (inherent_cases) |c| {
+        var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+        defer deinitDiags(gpa, &diags);
+        try etch.validateProject(gpa, c.files, &diags);
+        const ambiguous = countCode(diags.items, .ambiguous_inherent_method);
+        if (ambiguous != c.ambiguous or diags.items.len != c.ambiguous) {
+            wrong += 1;
+            std.debug.print("{s}: {d} E0218 among {d} diagnostics, expected {d}\n", .{ c.name, ambiguous, diags.items.len, c.ambiguous });
+            for (diags.items) |d| std.debug.print("  {t} {s}\n", .{ d.code, d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
 }
 
 test "self in an impl on an enum is the enum" {

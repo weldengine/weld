@@ -4425,8 +4425,7 @@ pub const TypeChecker = struct {
     /// 3, §5.1). Order-independent — the target type need not be declared yet
     /// (top-level decls come in any order); the target is validated separately
     /// in `validateImpls` once all symbols are known. A method name colliding
-    /// with another inherent method on the same type is E0101 (the inherent
-    /// `AmbiguousInherentMethod` of §7.5, reusing the duplicate-symbol code).
+    /// with another inherent method on the same type is E0218 (§7.5).
     fn collectImplMethods(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
         var i: u32 = 0;
         while (i < impl.methods_len) : (i += 1) {
@@ -4434,7 +4433,7 @@ pub const TypeChecker = struct {
             const method = self.arena.impl_methods.items[m_idx];
             const gop = try self.methods.getOrPut(self.gpa, methodKey(impl.type_name, method.name));
             if (gop.found_existing) {
-                try self.emit(.duplicate_symbol, .error_, span, "duplicate method '{s}' on type '{s}'", .{ self.arena.strings.slice(method.name), self.arena.strings.slice(impl.type_name) });
+                try self.emit(.ambiguous_inherent_method, .error_, span, "duplicate method '{s}' on type '{s}'", .{ self.arena.strings.slice(method.name), self.arena.strings.slice(impl.type_name) });
             } else {
                 gop.value_ptr.* = m_idx;
             }
@@ -4470,7 +4469,7 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// `E0101` for each method of the inherent `impl` that an inherent impl of
+    /// E0218 for each method of the inherent `impl` that an inherent impl of
     /// an imported file already gives the same type, as a second impl of this
     /// file would be.
     fn checkImportedMethodDuplicates(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
@@ -4480,7 +4479,7 @@ pub const TypeChecker = struct {
             const name = self.arena.strings.slice(self.arena.impl_methods.items[impl.methods_start + i].name);
             for (self.import_arenas.items) |a| {
                 if (self.inherentMethodIn(a, target, name) == null) continue;
-                try self.emit(.duplicate_symbol, .error_, span, "duplicate method '{s}' on type '{s}'", .{ name, self.arena.strings.slice(impl.type_name) });
+                try self.emit(.ambiguous_inherent_method, .error_, span, "duplicate method '{s}' on type '{s}'", .{ name, self.arena.strings.slice(impl.type_name) });
                 break;
             }
         }
@@ -4569,8 +4568,7 @@ pub const TypeChecker = struct {
 
     /// The inherent method `method_name` of the type `type_name` names
     /// (§5.1): this file's own, else the one a file it imports defines. Two
-    /// imported files defining it is the `AmbiguousInherentMethod` of §7.5,
-    /// on the duplicate-symbol code as `collectImplMethods` reports it.
+    /// imported files defining it is E0218 (§7.5).
     fn lookupMethod(self: *TypeChecker, type_name: StringId, method_name: StringId, span: SourceSpan) TypeError!?FnRef {
         if (self.methods.get(methodKey(type_name, method_name))) |idx| return .{ .arena = self.arena, .decl = self.arena.impl_methods.items[idx] };
         const target = self.implTargetIn(self.arena, type_name) orelse return null;
@@ -4579,7 +4577,7 @@ pub const TypeChecker = struct {
         for (self.import_arenas.items) |a| {
             const m = self.inherentMethodIn(a, target, bytes) orelse continue;
             if (found != null) {
-                try self.emit(.duplicate_symbol, .error_, span, "ambiguous method '{s}' on type '{s}' — two imported modules define it", .{ bytes, self.arena.strings.slice(type_name) });
+                try self.emit(.ambiguous_inherent_method, .error_, span, "ambiguous method '{s}' on type '{s}' — two imported modules define it", .{ bytes, self.arena.strings.slice(type_name) });
                 break;
             }
             found = .{ .arena = a, .decl = m };
