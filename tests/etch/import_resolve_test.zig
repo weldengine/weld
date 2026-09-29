@@ -225,6 +225,43 @@ const positions_lib =
     \\event P { v: int = 0 }
     \\event Hit { who: Entity }
     \\const CAP: int = 8
+    \\struct Pt { x: int = 0, y: int = 0 }
+    \\struct Seg { a: Pt }
+    \\struct Box<T> { v: T }
+    \\enum Dir { north, south }
+    \\struct Cfg { d: Dir = .north }
+    \\resource Mode { d: Dir = .north }
+    \\event Moved { d: Dir }
+    \\fn twice(n: int) -> int { n * 2 }
+    \\fn go() { }
+    \\fn mk() -> Pt { Pt { x: 1 } }
+    \\fn same<T>(t: T) -> T { t }
+    \\trait Shape {
+    \\  fn area(self) -> int
+    \\}
+    \\trait Doubler {
+    \\  fn base(self) -> int
+    \\  fn doubled(self) -> int { self.base() * 2 }
+    \\}
+    \\impl Pt {
+    \\  fn len(self) -> int { self.x }
+    \\  fn scaled(self, k: int) -> int { self.x * k }
+    \\  fn origin() -> Pt { Pt { x: 0 } }
+    \\}
+    \\impl Shape for Pt {
+    \\  fn area(self) -> int { self.x * self.y }
+    \\}
+    \\impl Doubler for Pt {
+    \\  fn base(self) -> int { self.x }
+    \\}
+    \\fn shaped<T: Shape>(t: T) -> int { 0 }
+    \\trait Hurt {
+    \\  fn hp(self) -> int
+    \\}
+    \\impl Hurt for Entity when self has C {
+    \\  fn hp(self) -> int { self.get(C).v }
+    \\}
+    \\type Meters = float
     \\
 ;
 
@@ -272,16 +309,86 @@ const position_cases = [_]Case{
     .{ .name = "malformed emit component", .body = "rule r() { emit C { v: 1 } }" },
     .{ .name = "const read", .body = "rule r() { let x: int = CAP }" },
     .{ .name = "malformed const read type", .body = "rule r() { let x: bool = CAP }" },
+    .{ .name = "struct literal", .body = "rule r() { let p = Pt { x: 1 } }" },
+    .{ .name = "struct literal bad field", .body = "rule r() { let p = Pt { w: 1 } }" },
+    .{ .name = "struct literal bad type", .body = "rule r() { let p = Pt { x: true } }" },
+    .{ .name = "anon literal by annotation", .body = "rule r() { let p: Pt = .{ x: 1 } }" },
+    .{ .name = "anon literal bad field", .body = "rule r() { let p: Pt = .{ w: 1 } }" },
+    .{ .name = "nested anon field", .body = "rule r() { let s = Seg { a: .{ x: 1 } } }" },
+    .{ .name = "struct field missing", .body = "rule r() { let s = Seg { } }" },
+    .{ .name = "struct param and return", .body = "fn f(p: Pt) -> Pt { p }" },
+    .{ .name = "struct field read", .body = "fn f(p: Pt) -> int { p.x }" },
+    .{ .name = "struct field read unknown", .body = "fn f(p: Pt) -> int { p.w }" },
+    .{ .name = "struct field read type", .body = "fn f(p: Pt) -> bool { p.x }" },
+    .{ .name = "struct field of local struct", .body = "struct Wrap { p: Pt }" },
+    .{ .name = "data entry type", .body = "data T: Pt {\n  a: { x: 1 },\n}" },
+    .{ .name = "data entry bad field", .body = "data T: Pt {\n  a: { w: 1 },\n}" },
+    .{ .name = "method call", .body = "fn f(p: Pt) -> int { p.len() }" },
+    .{ .name = "associated fn", .body = "rule r() { let p = Pt.origin() }" },
+    .{ .name = "trait method via lib impl", .body = "fn f(p: Pt) -> int { p.area() }" },
+    .{ .name = "trait default method", .body = "fn f(p: Pt) -> int { p.doubled() }" },
+    .{ .name = "unknown method", .body = "fn f(p: Pt) -> int { p.nope() }" },
+    .{ .name = "bound via lib impl", .body = "fn g<T: Shape>(t: T) -> int { 0 }\nfn f(p: Pt) -> int { g(p) }" },
+    .{ .name = "generic struct param", .body = "fn f(b: Box<int>) -> int { 0 }" },
+    .{ .name = "generic struct literal", .body = "rule r() { let b = Box { v: 1 } }" },
+    .{ .name = "enum value", .body = "rule r() { let d = Dir.north }" },
+    .{ .name = "enum wrong variant", .body = "rule r() { let d = Dir.west }" },
+    .{ .name = "match enum value", .body = "fn f() -> int {\n  let d = Dir.north\n  match d { Dir.north => 1, .south => 2 }\n}" },
+    .{ .name = "match enum param", .body = "fn f(d: Dir) -> int { match d { Dir.north => 1, .south => 2 } }" },
+    .{ .name = "match wrong variant", .body = "fn f(d: Dir) -> int { match d { .west => 1, _ => 0 } }" },
+    .{ .name = "match non-exhaustive", .body = "fn f(d: Dir) -> int { match d { .north => 1 } }" },
+    .{ .name = "enum shorthand in lib struct", .body = "rule r() { let c = Cfg { d: .south } }" },
+    .{ .name = "enum shorthand wrong variant", .body = "rule r() { let c = Cfg { d: .west } }" },
+    .{ .name = "enum field of local struct", .body = "struct L { d: Dir = .north }" },
+    .{ .name = "enum field local struct lit", .body = "struct L { d: Dir = .north }\nrule r() { let l = L { d: .south } }" },
+    .{ .name = "enum field of local resource", .body = "resource L { d: Dir = .north }" },
+    .{ .name = "enum collection in resource", .body = "resource L { ds: Dir[] }" },
+    .{ .name = "enum field of local event", .body = "event L { d: Dir }" },
+    .{ .name = "enum field of lib resource", .body = "rule r() when resource Mode { let x = match get(Mode).d { .north => 1, .south => 2 } }" },
+    .{ .name = "enum field of lib event", .body = "@on_event(Moved)\nrule r() { let x = match event.d { .north => 1, .south => 2 } }" },
+    .{ .name = "enum param and return", .body = "fn f(d: Dir) -> Dir { d }" },
+    .{ .name = "fn call", .body = "rule r() { let x = twice(2) }" },
+    .{ .name = "fn call arity", .body = "rule r() { let x = twice(1, 2) }" },
+    .{ .name = "fn call arg type", .body = "rule r() { let x = twice(true) }" },
+    .{ .name = "fn call named arg", .body = "rule r() { let x = twice(m: 1) }" },
+    .{ .name = "fn call result type", .body = "rule r() { let x: bool = twice(1) }" },
+    .{ .name = "fn call struct result", .body = "rule r() { let y = mk().x }" },
+    .{ .name = "fn call unit", .body = "rule r() { go() }" },
+    .{ .name = "generic fn call", .body = "rule r() { let x: int = same(1) }" },
+    .{ .name = "generic fn call result type", .body = "rule r() { let x: bool = same(1) }" },
+    .{ .name = "lib bound via lib impl", .body = "fn f(p: Pt) -> int { shaped(p) }" },
+    .{ .name = "lib bound unsatisfied", .body = "fn f() -> int { shaped(1) }" },
+    .{ .name = "lib bound, local impl", .body = "struct Sq { s: int = 1 }\nimpl Shape for Sq {\n  fn area(self) -> int { 1 }\n}\nfn f(q: Sq) -> int { shaped(q) }" },
+    .{ .name = "local inherent impl on lib struct", .body = "impl Pt {\n  fn sum(self) -> int { self.x + self.y }\n}\nfn f(p: Pt) -> int { p.sum() }" },
+    .{ .name = "local trait for lib struct", .body = "trait Named {\n  fn nm(self) -> int\n}\nimpl Named for Pt {\n  fn nm(self) -> int { 1 }\n}\nfn f(p: Pt) -> int { p.nm() }" },
+    .{ .name = "method arg type", .body = "fn f(p: Pt) -> int { p.scaled(true) }" },
+    .{ .name = "method named arg", .body = "fn f(p: Pt) -> int { p.scaled(k: 2) }" },
+    .{ .name = "method result type", .body = "fn f(p: Pt) -> bool { p.len() }" },
+    .{ .name = "associated fn result field", .body = "rule r() { let x = Pt.origin().x }" },
+    .{ .name = "method via fn result", .body = "rule r() { let x = mk().len() }" },
+    .{ .name = "conditional lib impl proven", .body = "rule r(e: Entity) when e has C { let x = e.hp() }" },
+    .{ .name = "conditional lib impl unproven", .body = "rule r(e: Entity) when e has D { let x = e.hp() }" },
+    .{ .name = "self in a trait impl on a lib enum", .body = "trait Named {\n  fn nm(self) -> int\n}\nimpl Named for Dir {\n  fn nm(self) -> int { match self { .west => 1, _ => 0 } }\n}" },
+    .{ .name = "local impl redefining a lib method", .body = "impl Pt {\n  fn len(self) -> int { 1 }\n}" },
+    .{ .name = "impl lib trait for local", .body = "struct Sq { s: int = 1 }\nimpl Shape for Sq {\n  fn area(self) -> int { self.s }\n}" },
+    .{ .name = "incomplete impl of lib trait", .body = "struct Sq { s: int = 1 }\nimpl Shape for Sq { }" },
+    .{ .name = "lib trait default on local", .body = "struct Sq { s: int = 1 }\nimpl Doubler for Sq {\n  fn base(self) -> int { self.s }\n}\nfn f(q: Sq) -> int { q.doubled() }" },
+    .{ .name = "bound on lib trait, local impl", .body = "struct Sq { s: int = 1 }\nimpl Shape for Sq {\n  fn area(self) -> int { 1 }\n}\nfn g<T: Shape>(t: T) -> int { 0 }\nfn f(q: Sq) -> int { g(q) }" },
+    .{ .name = "alias as param type", .body = "fn f(m: Meters) -> float { m }" },
+    .{ .name = "alias as alias target", .body = "type Km = Meters" },
+    .{ .name = "alias let mismatch", .body = "rule r() { let m: Meters = true }" },
     .{ .name = "scene resource", .body = "scene \"S\" {\n  resources { R { v: 1 } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
     .{ .name = "malformed scene resource field type", .body = "scene \"S\" {\n  resources { R { v: true } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
 };
 
-fn codesOf(files: []const etch.ProjectFile, out: *std.ArrayListUnmanaged(DiagnosticCode)) !void {
+/// Each diagnostic of `files` as its code and message, one per line: two
+/// diagnostics of one code for different reasons read as different.
+fn judgementOf(files: []const etch.ProjectFile, out: *std.ArrayListUnmanaged(u8)) !void {
     const gpa = std.testing.allocator;
     var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
     defer deinitDiags(gpa, &diags);
     try etch.validateProject(gpa, files, &diags);
-    for (diags.items) |d| try out.append(gpa, d.code);
+    for (diags.items) |d| try out.print(gpa, "{t} {s}\n", .{ d.code, d.primary_message });
 }
 
 test "a name an import binds is judged as its declaration is, position by position" {
@@ -290,20 +397,146 @@ test "a name an import binds is judged as its declaration is, position by positi
     for (position_cases) |c| {
         const declared_src = try std.mem.concat(gpa, u8, &.{ positions_lib, c.body });
         defer gpa.free(declared_src);
-        const imported_src = try std.mem.concat(gpa, u8, &.{ "import lib { C, D, R, P, Hit, CAP }\n", c.body });
+        const imported_src = try std.mem.concat(gpa, u8, &.{ "import lib { C, D, R, P, Hit, CAP, Pt, Seg, Box, Dir, Cfg, Mode, Moved, twice, go, mk, same, Shape, Doubler, shaped, Hurt, Meters }\n", c.body });
         defer gpa.free(imported_src);
-        var declared: std.ArrayListUnmanaged(DiagnosticCode) = .empty;
+        var declared: std.ArrayListUnmanaged(u8) = .empty;
         defer declared.deinit(gpa);
-        var imported: std.ArrayListUnmanaged(DiagnosticCode) = .empty;
+        var imported: std.ArrayListUnmanaged(u8) = .empty;
         defer imported.deinit(gpa);
-        try codesOf(&.{.{ .name = "main.etch", .source = declared_src }}, &declared);
-        try codesOf(&.{ .{ .name = "lib.etch", .source = positions_lib }, .{ .name = "main.etch", .source = imported_src } }, &imported);
-        if (!std.mem.eql(DiagnosticCode, declared.items, imported.items)) {
+        try judgementOf(&.{.{ .name = "main.etch", .source = declared_src }}, &declared);
+        try judgementOf(&.{ .{ .name = "lib.etch", .source = positions_lib }, .{ .name = "main.etch", .source = imported_src } }, &imported);
+        if (!std.mem.eql(u8, declared.items, imported.items)) {
             differing += 1;
-            std.debug.print("{s}: declared {any}, imported {any}\n", .{ c.name, declared.items, imported.items });
+            std.debug.print("{s}:\n declared {{\n{s}}}\n imported {{\n{s}}}\n", .{ c.name, declared.items, imported.items });
         }
     }
     try std.testing.expectEqual(@as(usize, 0), differing);
+}
+
+const orphan_lib =
+    \\trait Shape {
+    \\  fn area(self) -> int
+    \\}
+    \\struct Pt { x: int = 0 }
+;
+
+const OrphanCase = struct { name: []const u8, main: []const u8, orphans: usize };
+const orphan_cases = [_]OrphanCase{
+    .{ .name = "imported trait for imported type", .main = "import lib { Shape, Pt }\nimpl Shape for Pt {\n  fn area(self) -> int { 0 }\n}", .orphans = 1 },
+    .{ .name = "imported trait for Entity", .main = "import lib { Shape }\nimpl Shape for Entity {\n  fn area(self) -> int { 0 }\n}", .orphans = 1 },
+    .{ .name = "imported trait for local type", .main = "import lib { Shape }\nstruct Sq { s: int = 1 }\nimpl Shape for Sq {\n  fn area(self) -> int { 0 }\n}", .orphans = 0 },
+    .{ .name = "local trait for imported type", .main = "import lib { Pt }\ntrait Named {\n  fn nm(self) -> int\n}\nimpl Named for Pt {\n  fn nm(self) -> int { 0 }\n}", .orphans = 0 },
+};
+
+test "an impl whose trait and type are both of other modules is an orphan" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (orphan_cases) |c| {
+        const files = [_]etch.ProjectFile{
+            .{ .name = "lib.etch", .source = orphan_lib },
+            .{ .name = "main.etch", .source = c.main },
+        };
+        var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+        defer deinitDiags(gpa, &diags);
+        try etch.validateProject(gpa, &files, &diags);
+        const orphans = countCode(diags.items, .orphan_impl);
+        if (orphans != c.orphans or diags.items.len != c.orphans) {
+            wrong += 1;
+            std.debug.print("{s}: {d} orphan_impl among {d} diagnostics, expected {d}\n", .{ c.name, orphans, diags.items.len, c.orphans });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const extended_pt = [_]etch.ProjectFile{
+    .{ .name = "lib.etch", .source = "struct Pt { x: int = 0 }" },
+    .{ .name = "ext1.etch", .source = "import lib { Pt }\nimpl Pt {\n  fn len(self) -> int { 1 }\n}" },
+    .{ .name = "ext2.etch", .source = "import lib { Pt }\nimpl Pt {\n  fn len(self) -> int { 2 }\n}" },
+};
+
+fn diagnosticsWith(gpa: std.mem.Allocator, main: []const u8, diags: *std.ArrayListUnmanaged(etch.Diagnostic)) !void {
+    const files = extended_pt ++ [_]etch.ProjectFile{.{ .name = "main.etch", .source = main }};
+    try etch.validateProject(gpa, &files, diags);
+}
+
+test "an inherent method two imported modules define is ambiguous at its call" {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try diagnosticsWith(gpa, "import lib { Pt }\nimport ext1\nimport ext2\nfn f(p: Pt) -> int { p.len() }", &diags);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .duplicate_symbol));
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+}
+
+test "an inherent method one imported module defines is a method of the type" {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try diagnosticsWith(gpa, "import lib { Pt }\nimport ext1\nfn f(p: Pt) -> int { p.len() }", &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+test "an inherent method of a module not imported is no method of the type" {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try diagnosticsWith(gpa, "import lib { Pt }\nfn f(p: Pt) -> int { p.len() }", &diags);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .type_mismatch));
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+}
+
+test "self in an impl on an enum is the enum" {
+    const gpa = std.testing.allocator;
+    const files = [_]etch.ProjectFile{.{ .name = "main.etch", .source =
+        \\enum Dir { north, south }
+        \\trait Named {
+        \\  fn nm(self) -> int
+        \\}
+        \\impl Named for Dir {
+        \\  fn nm(self) -> int { match self { .west => 1, _ => 0 } }
+        \\}
+    }};
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .enum_variant_not_found));
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+}
+
+test "a type a module imports is judged in its signatures as the declaration" {
+    const gpa = std.testing.allocator;
+    const ext = etch.ProjectFile{ .name = "use.etch", .source = "import lib { Pt }\nfn use_pt(p: Pt) -> int { p.x }" };
+    var ok: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &ok);
+    try etch.validateProject(gpa, &(extended_pt ++ [_]etch.ProjectFile{ ext, .{ .name = "main.etch", .source = "import lib { Pt }\nimport use { use_pt }\nfn f(p: Pt) -> int { use_pt(p) }" } }), &ok);
+    try std.testing.expectEqual(@as(usize, 0), ok.items.len);
+    var bad: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &bad);
+    try etch.validateProject(gpa, &(extended_pt ++ [_]etch.ProjectFile{ ext, .{ .name = "main.etch", .source = "import lib { Pt }\nimport use { use_pt }\nfn f() -> int { use_pt(1) }" } }), &bad);
+    try std.testing.expectEqual(@as(usize, 1), countCode(bad.items, .type_mismatch));
+    try std.testing.expectEqual(@as(usize, 1), bad.items.len);
+}
+
+test "an item imported under another name is judged as its declaration" {
+    const gpa = std.testing.allocator;
+    const main_ok =
+        \\import lib { Pt as Point, twice as tw, Shape as Sh }
+        \\fn g<T: Sh>(t: T) -> int { 0 }
+        \\fn f(p: Point) -> int { p.len() + p.area() + tw(n: 1) + g(p) }
+    ;
+    const main_bad =
+        \\import lib { twice as tw }
+        \\fn f() -> int { tw(true) }
+    ;
+    var ok: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &ok);
+    try etch.validateProject(gpa, &.{ .{ .name = "lib.etch", .source = positions_lib }, .{ .name = "main.etch", .source = main_ok } }, &ok);
+    try std.testing.expectEqual(@as(usize, 0), ok.items.len);
+    var bad: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &bad);
+    try etch.validateProject(gpa, &.{ .{ .name = "lib.etch", .source = positions_lib }, .{ .name = "main.etch", .source = main_bad } }, &bad);
+    try std.testing.expectEqual(@as(usize, 1), countCode(bad.items, .type_mismatch));
+    try std.testing.expectEqual(@as(usize, 1), bad.items.len);
 }
 
 test "a composite value for a field of an imported component is refused" {

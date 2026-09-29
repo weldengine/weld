@@ -47,8 +47,7 @@ pub const DiagnosticCode = enum {
     ambiguous_trait_method, // E0211 AmbiguousTraitMethod
     incomplete_trait_impl, // E0214 IncompleteTraitImpl
     conditional_impl_condition_not_proven, // E0215 ConditionalImplConditionNotProven
-    /// E0217 OrphanImpl. No producer while traits do not resolve across modules (`etch-resolver-types.md` §7.4).
-    orphan_impl,
+    orphan_impl, // E0217 OrphanImpl
     immutable_receiver_for_mut_self, // E0220 ImmutableReceiverForMutSelfMethod
     closure_cannot_mutate_capture, // E0221 ClosureCannotMutateCapture
     collection_field_element_invalid, // E0222 CollectionFieldElementInvalid (resource collection field: unsupported element or nested collection)

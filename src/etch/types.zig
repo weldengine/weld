@@ -388,24 +388,6 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
     return (@as(u64, type_name) << 32) | @as(u64, method_name);
 }
 
-/// Resolve a foreign-arena component field's declared type to a `BuiltinType`, or
-/// `null` for a non-builtin (named / array / complex) type. Mirrors
-/// the builtin path of `namedTypeToResolved` but reads the FOREIGN arena's strings +
-/// alias chain; it consults no symbol table. `null` is unreachable for a valid
-/// component (component fields are builtin-POD only,
-/// `validateFieldsInDecl.component_like`) — so the cross-arena field-TYPE check is
-/// complete for every valid imported component.
-fn foreignBuiltinFieldType(decl_arena: *const AstArena, type_node: NodeId) ?BuiltinType {
-    const name = decl_arena.namedTypeName(type_node) orelse return null;
-    const resolved = decl_arena.resolveTypeAliasName(name);
-    const tname = decl_arena.strings.slice(resolved);
-    if (std.mem.eql(u8, tname, "string")) return .string_;
-    return BuiltinType.fromName(tname);
-}
-
-/// `true` if `s` contains an ASCII uppercase letter — an `E1768
-/// IdInvalidFormat` data-entry id check (ids are snake_case IDENTs,
-/// `etch-validation-ecs.md` §22.2).
 /// A type the engine provides, which a value position may name as a receiver.
 fn isBuiltinTypeName(name: []const u8) bool {
     if (BuiltinType.fromName(name) != null) return true;
@@ -415,6 +397,9 @@ fn isBuiltinTypeName(name: []const u8) bool {
     return std.mem.eql(u8, name, "Set");
 }
 
+/// `true` if `s` contains an ASCII uppercase letter — an `E1768
+/// IdInvalidFormat` data-entry id check (ids are snake_case IDENTs,
+/// `etch-validation-ecs.md` §22.2).
 fn containsUppercase(s: []const u8) bool {
     for (s) |c| {
         if (c >= 'A' and c <= 'Z') return true;
@@ -535,6 +520,9 @@ pub const TypeChecker = struct {
     /// in declaration order. The kind-2 trait dispatch (`etch-resolver-types.md
     /// §5.2`) scans this for the receiver type, AFTER inherent (§5.5 order).
     trait_impls: std.ArrayListUnmanaged(TraitImplEntry) = .empty,
+    /// The other files this file imports from, in import order, once each:
+    /// their impls are visible here (`etch-resolver-types.md` §7.5).
+    import_arenas: std.ArrayListUnmanaged(*const AstArena) = .empty,
     /// Generic type-parameter names currently in scope. Set
     /// while checking a generic `fn` / `impl` / `struct` / `enum` body so a
     /// type annotation naming a param resolves to `.generic` rather than an
@@ -650,8 +638,8 @@ pub const TypeChecker = struct {
     project: ?*const ProjectContext = null,
     /// Symbols brought into this file's scope by a selective `import a.b { X }`,
     /// byte-keyed under their LOCAL name's `StringId` in THIS arena (the `as Y` alias
-    /// if present, else the imported name). Built by `bindImports` after pass 1;
-    /// consulted by `TYPE_IDENT` resolution. Empty in single-file mode.
+    /// if present, else the imported name). Built by `bindImports` after pass 1.
+    /// Empty in single-file mode.
     imported_symbols: std.AutoHashMapUnmanaged(StringId, ExportEntry) = .empty,
     /// Module aliases from `import a.b as m` / bare `import a.b`:
     /// local alias `StringId` → target file index. Qualified `m.Type` resolution
@@ -758,17 +746,17 @@ pub const TypeChecker = struct {
         decl: ast_mod.EventDecl,
     };
 
-    /// One `impl Trait for Type [when …]`.
-    /// `methods_start`/`methods_len` index `arena.impl_methods` (the
-    /// impl-provided methods); `when_root` is `RuleDecl.none_when` for an
-    /// unconditional impl.
+    /// One `impl Trait for Type [when …]` of `arena`. Its names are
+    /// `arena`'s, `methods_start`/`methods_len` index `arena.impl_methods`
+    /// (the impl-provided methods), and `when_root` indexes `arena.when_nodes`
+    /// or is `RuleDecl.none_when` for an unconditional impl.
     pub const TraitImplEntry = struct {
+        arena: *const AstArena,
         trait_name: StringId,
         type_name: StringId,
         when_root: u32,
         methods_start: u32,
         methods_len: u32,
-        span: SourceSpan,
     };
 
     pub fn deinit(self: *TypeChecker) void {
@@ -776,6 +764,7 @@ pub const TypeChecker = struct {
         self.test_symbols.deinit(self.gpa);
         self.methods.deinit(self.gpa);
         self.trait_impls.deinit(self.gpa);
+        self.import_arenas.deinit(self.gpa);
         self.conc_labels.deinit(self.gpa);
         self.break_frames.deinit(self.gpa);
         self.escape_names.deinit(self.gpa);
@@ -910,6 +899,44 @@ pub const TypeChecker = struct {
         return out;
     }
 
+    /// The fields of the file's components, resources, events and structs, and
+    /// its const values, judged once the imports bind the types they name.
+    fn validateDeclaredValues(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            const data = datas[i];
+            switch (kinds[i]) {
+                .component_decl => {
+                    const decl = self.arena.component_decls.items[data];
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .component_like);
+                },
+                .resource_decl => {
+                    const decl = self.arena.resource_decls.items[data];
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .resource);
+                },
+                .event_decl => {
+                    const decl = self.arena.event_decls.items[data];
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .event_);
+                },
+                .struct_decl => {
+                    const decl = self.arena.struct_decls.items[data];
+                    // Generic params in scope so a field typed
+                    // by a param (`min: T`) is accepted as a generic field.
+                    try self.addGenerics(decl.generics_start, decl.generics_len);
+                    defer self.removeGenerics(decl.generics_start, decl.generics_len);
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .struct_);
+                },
+                .const_decl => {
+                    const decl = self.arena.const_decls.items[data];
+                    try self.checkConstValue(decl.value, decl.type_node);
+                },
+                else => {},
+            }
+        }
+    }
+
     /// The passes before the imports bind: the file's own symbols.
     fn collectDeclarations(self: *TypeChecker) !void {
         // E1901 runs FIRST: it decides whether the file is even allowed to
@@ -927,6 +954,7 @@ pub const TypeChecker = struct {
     }
 
     fn validateDeclarations(self: *TypeChecker) !void {
+        try self.validateDeclaredValues();
         try self.validateTypeAliases();
         try self.validateImpls();
         try self.validateDataDecls();
@@ -1365,7 +1393,7 @@ pub const TypeChecker = struct {
             while (pi < method.params_len) : (pi += 1) {
                 const idx = self.arena.callArgIndexForParam(mc.args_start, mc.args_len, mc.names_start, pi, pnames.items[pi]) orelse continue;
                 const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start + idx]);
-                const ptype = self.foreignFieldType(svc.arena, svc.arena.fn_params.items[method.params_start + pi].type_node);
+                const ptype = self.foreignType(svc.arena, svc.arena.fn_params.items[method.params_start + pi].type_node);
                 if (!try self.valueFits(ptype, arg, arg_types.items[idx])) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of service method '{s}.{s}'", .{ svc_slice, method_slice });
                 }
@@ -1391,37 +1419,69 @@ pub const TypeChecker = struct {
         );
     }
 
-    /// The return type of a foreign-arena signature, resolved BY BYTES.
-    ///
-    /// Bounded to builtins on purpose, and the bound is inherited rather than
-    /// invented: the same question is settled for cross-arena field types
-    /// and recorded "builtin-typed-only; named foreign field types are a
-    /// documented residual". Resolving a named foreign type here would mean
-    /// re-keying `symbols` and `generic_scope`, which are `StringId` maps over
-    /// THIS arena's pool. A named return type therefore types as `unknown`,
-    /// which is permissive and never wrong — it is the same value every
-    /// unresolved expression carries.
-    /// A foreign arena's declared field type, resolved BY BYTES. Same bound and
-    /// same reason as `foreignReturnType`.
-    fn foreignFieldType(self: *TypeChecker, a: *const AstArena, type_node: NodeId) ResolvedType {
-        _ = self;
-        const name = a.namedTypeName(type_node) orelse return ResolvedType.unknown;
-        const tname = a.strings.slice(a.resolveTypeAliasName(name));
-        if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
-        if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
-        return ResolvedType.unknown;
+    /// A type written in arena `a`, as this file names it. A declaration `a`
+    /// names, its own or one it imports, resolves when this file binds the
+    /// same name, through an import, to that same declaration, and is unknown
+    /// otherwise; a builtin, a `string` and a collection or optional of a
+    /// builtin resolve anywhere.
+    fn foreignType(self: *TypeChecker, a: *const AstArena, type_node: NodeId) ResolvedType {
+        if (a == self.arena) return self.namedTypeToResolved(type_node);
+        switch (a.typeNodeKind(type_node)) {
+            .named, .generic => {
+                const raw = if (a.typeNodeKind(type_node) == .named) a.namedTypeName(type_node).? else a.generic_type_nodes.items[a.typeNodeData(type_node)].name;
+                const resolved = a.resolveTypeAliasName(raw);
+                const bytes = a.strings.slice(resolved);
+                if (std.mem.eql(u8, bytes, "string")) return .{ .builtin = .string_ };
+                if (BuiltinType.fromName(bytes)) |bt| return .{ .builtin = bt };
+                const local = self.arena.strings.find(bytes) orelse return .unknown;
+                const have = self.declNamed(local) orelse return .unknown;
+                const want = self.declNamedIn(a, resolved) orelse return .unknown;
+                if (!have.eql(want)) return .unknown;
+                return switch (self.kindNamed(local).?) {
+                    .component => .{ .component = local },
+                    .resource => .{ .resource = local },
+                    .struct_ => .{ .struct_t = local },
+                    .enum_ => .{ .enum_t = local },
+                    .event_ => .{ .event_t = local },
+                    else => .unknown,
+                };
+            },
+            .slice => {
+                const elem = self.foreignType(a, a.array_types.items[a.typeNodeData(type_node)].elem);
+                return if (elem == .builtin) .{ .array_dyn = elem.builtin } else .unknown;
+            },
+            .set_type => {
+                const elem = self.foreignType(a, a.set_types.items[a.typeNodeData(type_node)].elem);
+                return if (elem == .builtin) .{ .set_t = elem.builtin } else .unknown;
+            },
+            .map_type => {
+                const mt = a.map_types.items[a.typeNodeData(type_node)];
+                const k = self.foreignType(a, mt.key);
+                const v = self.foreignType(a, mt.value);
+                return if (k == .builtin and v == .builtin) .{ .map_t = .{ .key = k.builtin, .value = v.builtin } } else .unknown;
+            },
+            .optional => {
+                const payload = self.foreignType(a, @bitCast(a.typeNodeData(type_node)));
+                return if (payload == .builtin) .{ .optional = payload.builtin } else .unknown;
+            },
+            else => return .unknown,
+        }
+    }
+
+    /// The export of arena `a` named `bytes`.
+    fn exportIn(self: *TypeChecker, a: *const AstArena, bytes: []const u8) ?ExportEntry {
+        const project = self.project orelse return null;
+        for (project.arenas, 0..) |*arena, i| {
+            if (arena == a) return project.exports[i].get(bytes);
+        }
+        return null;
     }
 
     fn foreignReturnType(self: *TypeChecker, a: *const AstArena, method: ast_mod.FnDecl) ResolvedType {
-        _ = self;
         // A void signature (`fn stop(h: AudioHandle)`) types as `unknown`, as
         // a call of any fn with no `-> type` does.
         if (method.return_type.isNone()) return ResolvedType.unknown;
-        const name = a.namedTypeName(method.return_type) orelse return ResolvedType.unknown;
-        const tname = a.strings.slice(a.resolveTypeAliasName(name));
-        if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
-        if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
-        return ResolvedType.unknown;
+        return self.foreignType(a, method.return_type);
     }
 
     /// Validate every `type Name = Type` alias once all symbols are known: the alias
@@ -1464,6 +1524,10 @@ pub const TypeChecker = struct {
             // the alias target may be a selectively-imported type.
             if (self.imported_symbols.get(ultimate)) |entry| {
                 if (entry.kind == .component or entry.kind == .resource) continue;
+                if (entry.kind == .type_alias) switch (self.importedAliasTarget(entry)) {
+                    .builtin, .component, .resource => continue,
+                    else => {},
+                };
             }
             try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.target), "type alias '{s}' does not resolve to a known type", .{self.arena.strings.slice(decl.name)});
         }
@@ -2352,6 +2416,114 @@ pub const TypeChecker = struct {
         return self.imported_symbols.get(name);
     }
 
+    /// A declaration, identified across the files of a project.
+    const DeclRef = struct {
+        arena: *const AstArena,
+        item: NodeId,
+
+        fn eql(a: DeclRef, b: DeclRef) bool {
+            return a.arena == b.arena and std.meta.eql(a.item, b.item);
+        }
+    };
+
+    /// The declaration `name` names in this file.
+    fn declNamed(self: *TypeChecker, name: StringId) ?DeclRef {
+        if (self.importedBinding(name)) |entry| return .{ .arena = &self.project.?.arenas[entry.arena_index], .item = entry.item_id };
+        const sym = self.symbols.get(name) orelse return null;
+        return .{ .arena = self.arena, .item = sym.item_id };
+    }
+
+    /// The declaration `name`, written in arena `a`, names there: one of its
+    /// own, else one it imports by name.
+    fn declNamedIn(self: *TypeChecker, a: *const AstArena, name: StringId) ?DeclRef {
+        if (a == self.arena) return self.declNamed(name);
+        const project = self.project orelse return null;
+        const bytes = a.strings.slice(name);
+        const entry = self.exportIn(a, bytes) orelse importedIn(project, a, bytes) orelse return null;
+        return .{ .arena = &project.arenas[entry.arena_index], .item = entry.item_id };
+    }
+
+    /// The public export a selective import of arena `a` binds `bytes` to.
+    fn importedIn(project: *const ProjectContext, a: *const AstArena, bytes: []const u8) ?ExportEntry {
+        for (a.items.items(.kind), a.items.items(.data)) |kind, data| {
+            if (kind != .import_decl) continue;
+            const decl = a.import_decls.items[data];
+            var j: u32 = 0;
+            while (j < decl.items_len) : (j += 1) {
+                const item = a.import_items.items[decl.items_start + j];
+                if (!std.mem.eql(u8, a.strings.slice(importLocalName(item)), bytes)) continue;
+                const entry = importedExport(project, a, moduleOf(project, a, decl) orelse return null, item) orelse return null;
+                return if (entry.visibility == .private) null else entry;
+            }
+        }
+        return null;
+    }
+
+    /// The file index of the module `decl`, an import of arena `a`, names.
+    fn moduleOf(project: *const ProjectContext, a: *const AstArena, decl: ast_mod.ImportDecl) ?usize {
+        var it = project.module_index.iterator();
+        next: while (it.next()) |e| {
+            var rest: []const u8 = e.key_ptr.*;
+            var s: u32 = 0;
+            while (s < decl.path_len) : (s += 1) {
+                if (s != 0) {
+                    if (rest.len == 0 or rest[0] != '.') continue :next;
+                    rest = rest[1..];
+                }
+                const seg = a.strings.slice(a.import_path_segs.items[decl.path_start + s]);
+                if (!std.mem.startsWith(u8, rest, seg)) continue :next;
+                rest = rest[seg.len..];
+            }
+            if (rest.len == 0) return e.value_ptr.*;
+        }
+        return null;
+    }
+
+    /// What an impl is for: a declaration, or the builtin `Entity`.
+    const ImplTarget = union(enum) {
+        decl: DeclRef,
+        entity,
+
+        fn eql(a: ImplTarget, b: ImplTarget) bool {
+            return switch (a) {
+                .decl => |d| b == .decl and d.eql(b.decl),
+                .entity => b == .entity,
+            };
+        }
+    };
+
+    /// The impl target `name`, written in arena `a`, denotes.
+    fn implTargetIn(self: *TypeChecker, a: *const AstArena, name: StringId) ?ImplTarget {
+        if (self.declNamedIn(a, name)) |d| return .{ .decl = d };
+        if (std.mem.eql(u8, a.strings.slice(name), "Entity")) return .entity;
+        return null;
+    }
+
+    /// A function declaration and the arena it lives in.
+    const FnRef = struct { arena: *const AstArena, decl: ast_mod.FnDecl };
+
+    /// The top-level `fn` `name` names, the file's own or an imported one.
+    fn fnNamed(self: *TypeChecker, name: StringId) ?FnRef {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .fn_) return null;
+            const a = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = a, .decl = a.fn_decls.items[a.itemData(entry.item_id)] };
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .fn_) return null;
+        return .{ .arena = self.arena, .decl = self.arena.fn_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    /// The method named `bytes` among `a.impl_methods[start .. start + len]`.
+    fn methodIn(a: *const AstArena, start: u32, len: u32, bytes: []const u8) ?ast_mod.FnDecl {
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const m = a.impl_methods.items[start + i];
+            if (std.mem.eql(u8, a.strings.slice(m.name), bytes)) return m;
+        }
+        return null;
+    }
+
     /// The component `name` names; a symbol that is no component names none.
     fn componentNamed(self: *TypeChecker, name: StringId) ?ComponentRef {
         if (self.importedBinding(name)) |entry| {
@@ -2367,13 +2539,52 @@ pub const TypeChecker = struct {
     /// A resource declaration and the arena it lives in.
     const ResourceRef = struct { arena: *const AstArena, decl: ast_mod.ResourceDecl };
 
+    const StructRef = struct { arena: *const AstArena, decl: ast_mod.StructDecl };
+
+    /// The struct `name` names, the file's own or an imported one.
+    fn structNamed(self: *TypeChecker, name: StringId) ?StructRef {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .struct_) return null;
+            const a = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = a, .decl = a.struct_decls.items[a.itemData(entry.item_id)] };
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .struct_) return null;
+        return .{ .arena = self.arena, .decl = self.arena.struct_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    const EnumRef = struct { arena: *const AstArena, decl: ast_mod.EnumDecl };
+
+    /// The enum `name` names, the file's own or an imported one.
+    fn enumNamed(self: *TypeChecker, name: StringId) ?EnumRef {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .enum_) return null;
+            const a = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = a, .decl = a.enum_decls.items[a.itemData(entry.item_id)] };
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .enum_) return null;
+        return .{ .arena = self.arena, .decl = self.arena.enum_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    /// A declared type of arena `a`, as this file names it.
+    fn typeIn(self: *TypeChecker, a: *const AstArena, type_node: NodeId) ResolvedType {
+        return if (a == self.arena) self.namedTypeToResolved(type_node) else self.foreignType(a, type_node);
+    }
+
+    /// Whether `declared`, a name of arena `a`, is the name this file writes
+    /// `written`.
+    fn sameName(self: *TypeChecker, a: *const AstArena, declared: StringId, written: StringId) bool {
+        return if (a == self.arena) declared == written else std.mem.eql(u8, a.strings.slice(declared), self.arena.strings.slice(written));
+    }
+
     /// The declared type of the `const` `name` names, the file's own or an
     /// imported one.
     fn constType(self: *TypeChecker, name: StringId) ?ResolvedType {
         if (self.importedBinding(name)) |entry| {
             if (entry.kind != .const_) return null;
             const a = &self.project.?.arenas[entry.arena_index];
-            return self.foreignFieldType(a, a.const_decls.items[a.itemData(entry.item_id)].type_node);
+            return self.foreignType(a, a.const_decls.items[a.itemData(entry.item_id)].type_node);
         }
         const sym = self.symbols.get(name) orelse return null;
         if (sym.kind != .const_) return null;
@@ -2421,7 +2632,7 @@ pub const TypeChecker = struct {
             if (a == self.arena) {
                 if (f.name == name) return self.namedTypeToResolved(f.type_node);
             } else if (std.mem.eql(u8, a.strings.slice(f.name), want)) {
-                return self.foreignFieldType(a, f.type_node);
+                return self.foreignType(a, f.type_node);
             }
         }
         return null;
@@ -2439,9 +2650,7 @@ pub const TypeChecker = struct {
 
     /// Cross-arena field check for an imported component or resource instance:
     /// the instance field lives in `self.arena` and the declared fields in
-    /// `decl_arena`, so names are matched by bytes. A declared type is read
-    /// across arenas only as a builtin or `string`, so an enum or collection
-    /// field of an imported resource is checked by name alone.
+    /// `decl_arena`, so names are matched by bytes.
     fn checkInstanceFieldForeign(self: *TypeChecker, decl_arena: *const AstArena, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: DiagnosticCode) !void {
         if (field.name == 0) return; // spread — not produced in instance bodies
         const field_name_bytes = self.arena.strings.slice(field.name);
@@ -2458,9 +2667,12 @@ pub const TypeChecker = struct {
             try self.emit(code_unknown, .error_, self.arena.exprSpan(field.value), "'{s}' has no field '{s}'", .{ owner, field_name_bytes });
             return;
         };
-        const declared_builtin = foreignBuiltinFieldType(decl_arena, tn) orelse return;
-        const actual = try self.synthExprE(field.value, null);
-        if (!try self.valueFits(.{ .builtin = declared_builtin }, field.value, actual)) {
+        const declared = self.foreignType(decl_arena, tn);
+        const actual = if (declared == .enum_t and self.arena.exprKind(field.value) == .tag_path)
+            try self.checkEnumShorthand(field.value, declared.enum_t)
+        else
+            try self.synthExprE(field.value, null);
+        if (!try self.valueFits(declared, field.value, actual)) {
             try self.emit(code_type, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{field_name_bytes});
         }
     }
@@ -2864,10 +3076,10 @@ pub const TypeChecker = struct {
         }
         // Entry type: must resolve to a declared struct. Unknown → E0102;
         // known-but-not-a-struct → E1762 (the table itself cannot conform).
-        var entry_struct: ?ast_mod.StructDecl = null;
-        if (self.symbols.get(decl.entry_type)) |sym| {
-            if (sym.kind == .struct_) {
-                entry_struct = self.arena.struct_decls.items[self.arena.itemData(sym.item_id)];
+        var entry_struct: ?StructRef = null;
+        if (self.kindNamed(decl.entry_type)) |kind| {
+            if (kind == .struct_) {
+                entry_struct = self.structNamed(decl.entry_type);
             } else {
                 try self.emit(.entry_type_mismatch, .error_, decl.entry_type_span, "data entry type '{s}' is not a struct", .{self.arena.strings.slice(decl.entry_type)});
             }
@@ -2907,19 +3119,19 @@ pub const TypeChecker = struct {
             if (!has_spread) {
                 if (entry_struct) |sd| {
                     var sf: u32 = 0;
-                    while (sf < sd.fields_len) : (sf += 1) {
-                        const sfield = self.arena.fields.items[sd.fields_start + sf];
+                    while (sf < sd.decl.fields_len) : (sf += 1) {
+                        const sfield = sd.arena.fields.items[sd.decl.fields_start + sf];
                         if (!sfield.default_value.isNone()) continue;
                         var provided = false;
                         f = 0;
                         while (f < entry.fields_len) : (f += 1) {
-                            if (self.arena.struct_lit_fields.items[entry.fields_start + f].name == sfield.name) {
+                            if (self.sameName(sd.arena, sfield.name, self.arena.struct_lit_fields.items[entry.fields_start + f].name)) {
                                 provided = true;
                                 break;
                             }
                         }
                         if (!provided) {
-                            try self.emit(.entry_field_required_missing, .error_, entry.span, "data entry '{s}' is missing required field '{s}' (no declared default)", .{ id_slice, self.arena.strings.slice(sfield.name) });
+                            try self.emit(.entry_field_required_missing, .error_, entry.span, "data entry '{s}' is missing required field '{s}' (no declared default)", .{ id_slice, sd.arena.strings.slice(sfield.name) });
                         }
                     }
                 }
@@ -2931,14 +3143,14 @@ pub const TypeChecker = struct {
     /// struct: E1763 unknown field, E1764 value type. Value typing mirrors
     /// `checkStructLitAgainst` (check mode for `.variant` shorthands and
     /// anonymous `.{ … }` values, synth otherwise).
-    fn validateDataEntryField(self: *TypeChecker, decl: ast_mod.DataDecl, entry_struct: ?ast_mod.StructDecl, field: ast_mod.StructLitField) !void {
+    fn validateDataEntryField(self: *TypeChecker, decl: ast_mod.DataDecl, entry_struct: ?StructRef, field: ast_mod.StructLitField) !void {
         const sd = entry_struct orelse return; // type already reported
         var declared: ?ResolvedType = null;
         var sf: u32 = 0;
-        while (sf < sd.fields_len) : (sf += 1) {
-            const sfield = self.arena.fields.items[sd.fields_start + sf];
-            if (sfield.name == field.name) {
-                declared = self.namedTypeToResolved(sfield.type_node);
+        while (sf < sd.decl.fields_len) : (sf += 1) {
+            const sfield = sd.arena.fields.items[sd.decl.fields_start + sf];
+            if (self.sameName(sd.arena, sfield.name, field.name)) {
+                declared = self.typeIn(sd.arena, sfield.type_node);
                 break;
             }
         }
@@ -3833,14 +4045,12 @@ pub const TypeChecker = struct {
                     // `@requires` is NOT resolved here — see `pass2Resolve`.
                     // Pass 1 is the loop that BUILDS the symbol table, so a name
                     // declared further down the file is not in it yet.
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .component_like);
                 },
                 .resource_decl => {
                     const decl = self.arena.resource_decls.items[data];
                     try self.refuseReservedEngineName(decl.name, span, "resource");
                     try self.registerSymbol(.resource, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .resource);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .resource);
                 },
                 .event_decl => {
                     // An `event` is a frame-arena struct-message, not a POD component:
@@ -3854,7 +4064,6 @@ pub const TypeChecker = struct {
                     const decl = self.arena.event_decls.items[data];
                     try self.registerSymbol(.event_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .event);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .event_);
                 },
                 .rule_decl => {
                     const decl = self.arena.rule_decls.items[data];
@@ -3873,11 +4082,6 @@ pub const TypeChecker = struct {
                     // and enum-typed fields; nested-struct fields stay deferred.
                     const decl = self.arena.struct_decls.items[data];
                     try self.registerSymbol(.struct_, decl.name, item_id, span);
-                    // Generic params in scope so a field typed
-                    // by a param (`min: T`) is accepted as a generic field.
-                    try self.addGenerics(decl.generics_start, decl.generics_len);
-                    defer self.removeGenerics(decl.generics_start, decl.generics_len);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .struct_);
                 },
                 .enum_decl => {
                     // A C-like `enum` is a value type. Register the name; validate
@@ -3904,12 +4108,12 @@ pub const TypeChecker = struct {
                         try self.collectImplMethods(impl, span);
                     } else {
                         try self.trait_impls.append(self.gpa, .{
+                            .arena = self.arena,
                             .trait_name = impl.trait_name,
                             .type_name = impl.type_name,
                             .when_root = impl.when_root,
                             .methods_start = impl.methods_start,
                             .methods_len = impl.methods_len,
-                            .span = span,
                         });
                     }
                 },
@@ -3930,7 +4134,6 @@ pub const TypeChecker = struct {
                     const decl = self.arena.const_decls.items[data];
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .const_);
                     try self.registerSymbol(.const_, decl.name, item_id, span);
-                    try self.checkConstValue(decl.value, decl.type_node);
                 },
                 .test_decl => {
                     // Top-level `test` block. The test name lives in a
@@ -4106,6 +4309,7 @@ pub const TypeChecker = struct {
                 try self.emit(.not_a_module, .error_, span, "import path '{s}' does not name a module in the project", .{path});
                 continue;
             };
+            try self.importArena(&project.arenas[target_idx]);
 
             if (decl.items_len == 0) {
                 // Whole-module form (1 or 3): record the alias → target binding.
@@ -4133,6 +4337,26 @@ pub const TypeChecker = struct {
                 }
                 try self.imported_symbols.put(self.gpa, importLocalName(item), entry);
             }
+        }
+    }
+
+    /// Record `a` as a file this one imports from, and its trait impls.
+    fn importArena(self: *TypeChecker, a: *const AstArena) !void {
+        if (a == self.arena) return;
+        for (self.import_arenas.items) |seen| {
+            if (seen == a) return;
+        }
+        try self.import_arenas.append(self.gpa, a);
+        for (a.impl_decls.items) |impl| {
+            if (impl.trait_name == 0) continue;
+            try self.trait_impls.append(self.gpa, .{
+                .arena = a,
+                .trait_name = impl.trait_name,
+                .type_name = impl.type_name,
+                .when_root = impl.when_root,
+                .methods_start = impl.methods_start,
+                .methods_len = impl.methods_len,
+            });
         }
     }
 
@@ -4204,9 +4428,11 @@ pub const TypeChecker = struct {
             if (impl.trait_name == 0) {
                 // Inherent impl (§5.1): target is a declared struct / component /
                 // resource. No coherence (§7.5).
-                if (self.symbols.get(impl.type_name)) |sym| {
-                    if (sym.kind != .struct_ and sym.kind != .component and sym.kind != .resource) {
+                if (self.kindNamed(impl.type_name)) |kind| {
+                    if (kind != .struct_ and kind != .component and kind != .resource) {
                         try self.emit(.undefined_symbol, .error_, spans[i], "impl target '{s}' is not a struct, component, or resource", .{tname});
+                    } else {
+                        try self.checkImportedMethodDuplicates(impl, spans[i]);
                     }
                 } else {
                     try self.emit(.undefined_symbol, .error_, spans[i], "impl target type '{s}' is not declared", .{tname});
@@ -4217,72 +4443,72 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// `E0101` for each method of the inherent `impl` that an inherent impl of
+    /// an imported file already gives the same type, as a second impl of this
+    /// file would be.
+    fn checkImportedMethodDuplicates(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
+        const target = self.implTargetIn(self.arena, impl.type_name) orelse return;
+        var i: u32 = 0;
+        while (i < impl.methods_len) : (i += 1) {
+            const name = self.arena.strings.slice(self.arena.impl_methods.items[impl.methods_start + i].name);
+            for (self.import_arenas.items) |a| {
+                if (self.inherentMethodIn(a, target, name) == null) continue;
+                try self.emit(.duplicate_symbol, .error_, span, "duplicate method '{s}' on type '{s}'", .{ name, self.arena.strings.slice(impl.type_name) });
+                break;
+            }
+        }
+    }
+
     /// Validate one `impl Trait for Type [when …]` (
-    /// `etch-resolver-types.md §7.2/§7.4`). Checks: the trait is declared; every
-    /// abstract trait method is provided (E0214, else the trait must supply a
-    /// default); the target type is a struct / component / resource / `Entity`.
+    /// `etch-resolver-types.md §7.2/§7.4`). Checks: the trait is declared or
+    /// imported; the target type is a struct / component / resource / enum,
+    /// declared or imported, or `Entity`; one of the two is this file's
+    /// (E0217); every abstract trait method is provided (E0214, else the trait
+    /// must supply a default).
     fn validateTraitImpl(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
         const trait_slice = self.arena.strings.slice(impl.trait_name);
         const type_slice = self.arena.strings.slice(impl.type_name);
 
-        // The trait must be a declared `trait`.
-        const trait_sym = self.symbols.get(impl.trait_name);
-        const trait_local = trait_sym != null and trait_sym.?.kind == .trait_;
-        if (!trait_local) {
+        const trait_kind = self.kindNamed(impl.trait_name);
+        if (trait_kind == null or trait_kind.? != .trait_) {
             try self.emit(.undefined_symbol, .error_, span, "trait '{s}' is not declared", .{trait_slice});
             return; // nothing further provable without the trait
         }
+        const trait = self.declNamed(impl.trait_name).?;
 
-        // The target type must be a local struct / component / resource, or the
-        // builtin `Entity` (the conditional-impl receiver, §7.3).
-        const type_sym = self.symbols.get(impl.type_name);
+        const type_kind = self.kindNamed(impl.type_name);
         const type_is_entity = std.mem.eql(u8, type_slice, "Entity");
-        const type_local = type_sym != null and (type_sym.?.kind == .struct_ or type_sym.?.kind == .component or type_sym.?.kind == .resource or type_sym.?.kind == .enum_);
-        if (!type_local and !type_is_entity) {
+        const type_declared = if (type_kind) |k| k == .struct_ or k == .component or k == .resource or k == .enum_ else false;
+        if (!type_declared and !type_is_entity) {
             try self.emit(.undefined_symbol, .error_, span, "trait-impl target '{s}' is not a struct, component, resource, or Entity", .{type_slice});
+        } else if (trait.arena != self.arena and !(type_declared and self.declNamed(impl.type_name).?.arena == self.arena)) {
+            try self.emit(.orphan_impl, .error_, span, "impl of trait '{s}' for '{s}' declares neither in this module", .{ trait_slice, type_slice });
         }
 
-        // Orphan rule (§7.4): not checked. A check above the `!trait_local`
-        // return would fire on undeclared names, which `undefined_symbol`
-        // already reports.
-
         // E0214: every abstract trait method (no default body) must be provided.
-        const tdecl = self.arena.trait_decls.items[self.arena.itemData(trait_sym.?.item_id)];
+        const tdecl = trait.arena.trait_decls.items[trait.arena.itemData(trait.item)];
         var m: u32 = 0;
         while (m < tdecl.methods_len) : (m += 1) {
-            const tmethod = self.arena.impl_methods.items[tdecl.methods_start + m];
+            const tmethod = trait.arena.impl_methods.items[tdecl.methods_start + m];
             if (tmethod.has_body) continue; // default-bodied → optional
-            if (!self.implProvidesMethod(impl, tmethod.name)) {
-                try self.emit(.incomplete_trait_impl, .error_, span, "impl of trait '{s}' for '{s}' is missing method '{s}'", .{ trait_slice, type_slice, self.arena.strings.slice(tmethod.name) });
+            const name = trait.arena.strings.slice(tmethod.name);
+            if (methodIn(self.arena, impl.methods_start, impl.methods_len, name) == null) {
+                try self.emit(.incomplete_trait_impl, .error_, span, "impl of trait '{s}' for '{s}' is missing method '{s}'", .{ trait_slice, type_slice, name });
             }
         }
 
         // §10.2 — W0902 PrivateTypeInPublicImpl: a PUBLIC trait implemented for a
         // PRIVATE target type surfaces the private type through a public
-        // interface. Warning, not error — legitimate for internal use. Fires
-        // only when the target is a local private type AND the trait is a local
-        // PUBLIC trait (both symbols resolved above). An imported target is
-        // public by construction (only public items import), so it never trips
-        // this; an imported PUBLIC trait implemented for a private local type is
-        // the spec's "trait imported" case, but an imported-trait impl does not
-        // resolve here today (returns early at the `!trait_local` gate) — a
-        // pre-existing, orthogonal gap, not this milestone's surface.
-        if (type_sym) |ts| {
+        // interface. Warning, not error — legitimate for internal use. An
+        // imported target is public by construction (only public items import),
+        // and so is an imported trait.
+        if (self.symbols.get(impl.type_name)) |ts| {
             const target_private = self.arena.itemVisibility(ts.item_id) == .private;
-            const trait_public = self.arena.itemVisibility(trait_sym.?.item_id) == .public;
+            const trait_public = trait.arena != self.arena or self.arena.itemVisibility(trait.item) == .public;
             if (target_private and trait_public) {
                 try self.emit(.private_type_in_public_impl, .warning, span, "public trait '{s}' implemented for private type '{s}'", .{ trait_slice, type_slice });
             }
         }
-    }
-
-    /// `true` if `impl` provides a method named `name`.
-    fn implProvidesMethod(self: *TypeChecker, impl: ast_mod.ImplDecl, name: StringId) bool {
-        var m: u32 = 0;
-        while (m < impl.methods_len) : (m += 1) {
-            if (self.arena.impl_methods.items[impl.methods_start + m].name == name) return true;
-        }
-        return false;
     }
 
     /// Validate an `enum`'s variant set: non-empty,
@@ -4306,26 +4532,43 @@ pub const TypeChecker = struct {
     /// `enum_name`, or `null` if `enum_name` is not
     /// a declared enum or has no such variant.
     fn enumVariantIndex(self: *TypeChecker, enum_name: StringId, variant: StringId) ?u32 {
-        const decl = self.enumDecl(enum_name) orelse return null;
+        const e = self.enumNamed(enum_name) orelse return null;
         var i: u32 = 0;
-        while (i < decl.variants_len) : (i += 1) {
-            if (self.arena.enum_variants.items[decl.variants_start + i].name == variant) return i;
+        while (i < e.decl.variants_len) : (i += 1) {
+            if (self.sameName(e.arena, e.arena.enum_variants.items[e.decl.variants_start + i].name, variant)) return i;
         }
         return null;
     }
 
-    /// The `EnumDecl` for `enum_name`, or `null` if it is not a declared enum.
-    fn enumDecl(self: *TypeChecker, enum_name: StringId) ?ast_mod.EnumDecl {
-        const sym = self.symbols.get(enum_name) orelse return null;
-        if (sym.kind != .enum_) return null;
-        return self.arena.enum_decls.items[self.arena.itemData(sym.item_id)];
+    /// The inherent method `method_name` of the type `type_name` names
+    /// (§5.1): this file's own, else the one a file it imports defines. Two
+    /// imported files defining it is the `AmbiguousInherentMethod` of §7.5,
+    /// on the duplicate-symbol code as `collectImplMethods` reports it.
+    fn lookupMethod(self: *TypeChecker, type_name: StringId, method_name: StringId, span: SourceSpan) TypeError!?FnRef {
+        if (self.methods.get(methodKey(type_name, method_name))) |idx| return .{ .arena = self.arena, .decl = self.arena.impl_methods.items[idx] };
+        const target = self.implTargetIn(self.arena, type_name) orelse return null;
+        const bytes = self.arena.strings.slice(method_name);
+        var found: ?FnRef = null;
+        for (self.import_arenas.items) |a| {
+            const m = self.inherentMethodIn(a, target, bytes) orelse continue;
+            if (found != null) {
+                try self.emit(.duplicate_symbol, .error_, span, "ambiguous method '{s}' on type '{s}' — two imported modules define it", .{ bytes, self.arena.strings.slice(type_name) });
+                break;
+            }
+            found = .{ .arena = a, .decl = m };
+        }
+        return found;
     }
 
-    /// Resolve an inherent method `(type_name, method_name)` to its `FnDecl`
-    /// (§5.1), or `null` if no such method exists.
-    fn lookupMethod(self: *TypeChecker, type_name: StringId, method_name: StringId) ?ast_mod.FnDecl {
-        const idx = self.methods.get(methodKey(type_name, method_name)) orelse return null;
-        return self.arena.impl_methods.items[idx];
+    /// The method named `bytes` an inherent impl of arena `a` gives `target`.
+    fn inherentMethodIn(self: *TypeChecker, a: *const AstArena, target: ImplTarget, bytes: []const u8) ?ast_mod.FnDecl {
+        for (a.impl_decls.items) |impl| {
+            if (impl.trait_name != 0) continue;
+            const t = self.implTargetIn(a, impl.type_name) orelse continue;
+            if (!t.eql(target)) continue;
+            if (methodIn(a, impl.methods_start, impl.methods_len, bytes)) |m| return m;
+        }
+        return null;
     }
 
     /// Which declaration kind a validated field range belongs to. `component_like`
@@ -4637,25 +4880,14 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// `true` if `name` is a declared `enum`, checked against the AST slab
-    /// (declaration-order independent, unlike the incrementally-built pass-1
-    /// symbol table). Includes the synthetic builtin `ErrorCode`.
+    /// Whether `name` is a declared `enum`, the file's own or an imported one.
     fn declaredEnumName(self: *TypeChecker, name: StringId) bool {
-        for (self.arena.enum_decls.items) |decl| {
-            if (decl.name == name) return true;
-        }
-        return false;
+        return self.enumNamed(name) != null;
     }
 
-    /// `true` if `name` is a declared `struct`. Checked
-    /// against the AST struct slab (not the symbol table) so a later-declared
-    /// struct is seen — pass 1 registers symbols incrementally, mirroring
-    /// `declaredEnumName`.
+    /// Whether `name` is a declared `struct`, the file's own or an imported one.
     fn declaredStructName(self: *TypeChecker, name: StringId) bool {
-        for (self.arena.struct_decls.items) |decl| {
-            if (decl.name == name) return true;
-        }
-        return false;
+        return self.structNamed(name) != null;
     }
 
     /// Validate annotation applicability for a `(start, len)` range in
@@ -5126,6 +5358,7 @@ pub const TypeChecker = struct {
                         .resource => .{ .resource = resolved_name },
                         .struct_ => .{ .struct_t = resolved_name },
                         .enum_ => .{ .enum_t = resolved_name },
+                        .type_alias => self.importedAliasTarget(entry),
                         else => .unknown,
                     };
                 }
@@ -5151,14 +5384,11 @@ pub const TypeChecker = struct {
                 // (e.g. `T<…>`, unusual) resolves to the variable.
                 const gt = self.arena.generic_type_nodes.items[self.arena.typeNodeData(type_node)];
                 if (self.generic_scope.contains(gt.name)) return .{ .generic = gt.name };
-                if (self.symbols.get(gt.name)) |sym| {
-                    return switch (sym.kind) {
-                        .struct_ => .{ .struct_t = gt.name },
-                        .enum_ => .{ .enum_t = gt.name },
-                        else => .unknown,
-                    };
-                }
-                return .unknown;
+                return switch (self.kindNamed(gt.name) orelse return .unknown) {
+                    .struct_ => .{ .struct_t = gt.name },
+                    .enum_ => .{ .enum_t = gt.name },
+                    else => .unknown,
+                };
             },
             .array => {
                 const at = self.arena.array_types.items[self.arena.typeNodeData(type_node)];
@@ -5197,6 +5427,12 @@ pub const TypeChecker = struct {
             },
             else => return .unknown,
         }
+    }
+
+    /// The type an imported `type` alias names, read in the arena declaring it.
+    fn importedAliasTarget(self: *TypeChecker, entry: ExportEntry) ResolvedType {
+        const a = &self.project.?.arenas[entry.arena_index];
+        return self.foreignType(a, a.type_alias_decls.items[a.itemData(entry.item_id)].target);
     }
 
     /// Outcome of resolving a `.path` qualified type node (`alias.Member`,
@@ -5279,14 +5515,16 @@ pub const TypeChecker = struct {
     /// receivers) to the impl's target type so `self.field` / `self.method()`
     /// resolve. Associated fns (`self_kind == .none`) bind no receiver.
     fn checkImpl(self: *TypeChecker, impl: ast_mod.ImplDecl) !void {
-        // The receiver type for `self`: the impl's target. A declared struct →
-        // `.struct_t`; a component / resource → their resolved type; the builtin
-        // `Entity` (a trait impl `impl Trait for Entity`) → `.entity`; anything
-        // else (validateImpls already flagged it) → `unknown`.
-        const self_type: ResolvedType = if (self.symbols.get(impl.type_name)) |sym| switch (sym.kind) {
+        // The receiver type for `self`: the impl's target, declared or
+        // imported — a struct, component, resource or enum as its resolved
+        // type, the builtin `Entity` (a trait impl `impl Trait for Entity`) as
+        // `.entity`, anything else (validateImpls already flagged it) as
+        // `unknown`.
+        const self_type: ResolvedType = if (self.kindNamed(impl.type_name)) |kind| switch (kind) {
             .struct_ => .{ .struct_t = impl.type_name },
             .component => .{ .component = impl.type_name },
             .resource => .{ .resource = impl.type_name },
+            .enum_ => .{ .enum_t = impl.type_name },
             else => ResolvedType.unknown,
         } else if (std.mem.eql(u8, self.arena.strings.slice(impl.type_name), "Entity"))
             .{ .builtin = .entity }
@@ -6042,7 +6280,7 @@ pub const TypeChecker = struct {
                 try scratch.locals.put(self.gpa, field.name, .{ .type_ = self.namedTypeToResolved(field.type_node), .is_mut = false });
             } else {
                 const name = try self.arena.strings.intern(self.gpa, a.strings.slice(field.name));
-                try scratch.locals.put(self.gpa, name, .{ .type_ = self.foreignFieldType(a, field.type_node), .is_mut = false });
+                try scratch.locals.put(self.gpa, name, .{ .type_ = self.foreignType(a, field.type_node), .is_mut = false });
             }
         }
         const t = try self.synthExprE(node.filter_value, &scratch);
@@ -7120,7 +7358,7 @@ pub const TypeChecker = struct {
                 // Resolved here (a bare type is not field-accessible otherwise).
                 if (self.arena.exprKind(fa.receiver) == .path) {
                     const path_name = self.arena.exprData(fa.receiver);
-                    if (self.enumDecl(path_name) != null) {
+                    if (self.enumNamed(path_name) != null) {
                         if (self.enumVariantIndex(path_name, fa.field_name) == null) {
                             try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(id), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(path_name), self.arena.strings.slice(fa.field_name) });
                             return ResolvedType.unknown;
@@ -7726,11 +7964,7 @@ pub const TypeChecker = struct {
                 // outside a test body returns null → falls through to E0102
                 // (§32: "fall through to E0102").
                 if (try self.synthBuiltinCall(id, call, callee_name, ctx_opt)) |t| return t;
-                if (self.symbols.get(callee_name)) |sym| {
-                    if (sym.kind == .fn_) {
-                        return try self.synthFreeFnCall(id, call, sym.item_id, ctx_opt);
-                    }
-                }
+                if (self.fnNamed(callee_name)) |f| return try self.synthFreeFnCall(id, call, callee_name, f, ctx_opt);
             }
         }
 
@@ -7860,11 +8094,14 @@ pub const TypeChecker = struct {
         return ok;
     }
 
-    /// Collect a callee's parameter names into a caller-owned buffer.
-    fn fnParamNames(self: *TypeChecker, params_start: u32, params_len: u32, buf: *std.ArrayListUnmanaged(StringId)) !void {
+    /// Collect the parameter names of `f` into a caller-owned buffer, as this
+    /// file's names: a name this file never writes is `0`, which no argument
+    /// label is.
+    fn fnParamNames(self: *TypeChecker, f: FnRef, buf: *std.ArrayListUnmanaged(StringId)) !void {
         var i: u32 = 0;
-        while (i < params_len) : (i += 1) {
-            try buf.append(self.gpa, self.arena.fn_params.items[params_start + i].name);
+        while (i < f.decl.params_len) : (i += 1) {
+            const name = f.arena.fn_params.items[f.decl.params_start + i].name;
+            try buf.append(self.gpa, if (f.arena == self.arena) name else self.arena.strings.find(f.arena.strings.slice(name)) orelse 0);
         }
     }
 
@@ -7872,41 +8109,42 @@ pub const TypeChecker = struct {
     /// the argument binding (named arguments per §3.3 — E0203) then
     /// each bound argument against its declared parameter type; the result
     /// is the declared return type (`unknown` for a void fn).
-    fn synthFreeFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, item_id: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
-        const decl = self.arena.fn_decls.items[self.arena.itemData(item_id)];
+    fn synthFreeFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, callee_name: StringId, f: FnRef, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const decl = f.decl;
+        const name = self.arena.strings.slice(callee_name);
         // Function coloring (§9.3): calling an `async fn` from a
         // non-async context is E0901. (A legal async→async call is via `await`,
         // which reaches here with `current_is_async` true.)
         if (decl.is_async and !self.current_is_async) {
-            try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async fn` '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{self.arena.strings.slice(decl.name)});
+            try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async fn` '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{name});
         } else if (decl.is_async and !self.consumesAsyncEffect(id)) {
             // E0905: a BARE async call in an async context. The
             // `await` is the SOLE call-grain consumer of the `{async}` effect
             // (§9.2 revision 2) — the four constructs relocate the suspension,
             // they do not consume it.
-            try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async fn` '{s}' — consume the async effect with `await` (inside spawn/branch/race/sync bodies too: the constructs relocate the await into a child task, they do not replace it)", .{self.arena.strings.slice(decl.name)});
+            try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async fn` '{s}' — consume the async effect with `await` (inside spawn/branch/race/sync bodies too: the constructs relocate the await into a child task, they do not replace it)", .{name});
         }
         // E0902: a `throws` callee needs somewhere for its throw
         // to go — an enclosing `try`/`catch`, or a `throws` caller.
         if (decl.throws and !self.current_can_throw) {
-            try self.emitUnhandledThrows(id, self.arena.strings.slice(decl.name));
+            try self.emitUnhandledThrows(id, name);
         }
-        const ret: ResolvedType = if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
+        const ret: ResolvedType = if (decl.return_type.isNone()) ResolvedType.unknown else self.typeIn(f.arena, decl.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
         defer pnames.deinit(self.gpa);
-        try self.fnParamNames(decl.params_start, decl.params_len, &pnames);
-        if (!try self.checkCallBinding(id, call.args_start, call.args_len, call.names_start, pnames.items, "function", decl.name)) {
+        try self.fnParamNames(f, &pnames);
+        if (!try self.checkCallBinding(id, call.args_start, call.args_len, call.names_start, pnames.items, "function", callee_name)) {
             return ret;
         }
-        if (decl.generics_len > 0) return try self.synthGenericFnCall(id, call, decl, ctx_opt);
+        if (decl.generics_len > 0) return try self.synthGenericFnCall(id, call, name, f, pnames.items, ctx_opt);
         var i: u32 = 0;
         while (i < decl.params_len) : (i += 1) {
-            const p = self.arena.fn_params.items[decl.params_start + i];
-            const ptype = self.namedTypeToResolved(p.type_node);
-            const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse continue;
+            const p = f.arena.fn_params.items[decl.params_start + i];
+            const ptype = self.typeIn(f.arena, p.type_node);
+            const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, pnames.items[i]) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
             if (!try self.valueFits(ptype, arg, arg_t)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{self.arena.strings.slice(decl.name)});
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{name});
             }
         }
         return ret;
@@ -7920,44 +8158,46 @@ pub const TypeChecker = struct {
     /// monomorphisation instance table (§6.2) drives a bytecode codegen
     /// lowering — there is no consumer in the direct AST→Zig path, so the
     /// resolver computes the substitution per call without persisting it.
-    fn synthGenericFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, decl: ast_mod.FnDecl, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    fn synthGenericFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, name: []const u8, f: FnRef, pnames: []const StringId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const decl = f.decl;
+        // Keyed by the parameter names of `f.arena`.
         var subst: std.AutoHashMapUnmanaged(StringId, ResolvedType) = .empty;
         defer subst.deinit(self.gpa);
+        // A formal naming a type parameter checks nothing: `unifyGeneric`
+        // judges it.
+        const unbound: std.AutoHashMapUnmanaged(StringId, ResolvedType) = .empty;
 
-        var pnames: std.ArrayListUnmanaged(StringId) = .empty;
-        defer pnames.deinit(self.gpa);
-        try self.fnParamNames(decl.params_start, decl.params_len, &pnames);
         var i: u32 = 0;
         while (i < decl.params_len) : (i += 1) {
-            const p = self.arena.fn_params.items[decl.params_start + i];
-            const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse continue;
+            const p = f.arena.fn_params.items[decl.params_start + i];
+            const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, pnames[i]) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
-            try self.unifyGeneric(decl, p.type_node, arg_t, &subst, self.arena.exprSpan(arg));
-            if (!try self.valueFits(self.namedTypeToResolved(p.type_node), arg, arg_t)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{self.arena.strings.slice(decl.name)});
+            try self.unifyGeneric(f, p.type_node, arg_t, &subst, self.arena.exprSpan(arg));
+            if (!try self.valueFits(self.substituteGeneric(f, p.type_node, &unbound), arg, arg_t)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{name});
             }
         }
 
         var gi: u32 = 0;
         while (gi < decl.generics_len) : (gi += 1) {
-            const gp = self.arena.generic_params.items[decl.generics_start + gi];
+            const gp = f.arena.generic_params.items[decl.generics_start + gi];
             const inferred = subst.get(gp.name);
             if (inferred == null) {
-                try self.emit(.generic_type_annotation_required, .error_, self.arena.exprSpan(id), "cannot infer type parameter '{s}' of '{s}' from the arguments", .{ self.arena.strings.slice(gp.name), self.arena.strings.slice(decl.name) });
+                try self.emit(.generic_type_annotation_required, .error_, self.arena.exprSpan(id), "cannot infer type parameter '{s}' of '{s}' from the arguments", .{ f.arena.strings.slice(gp.name), name });
                 continue;
             }
-            try self.checkGenericBounds(gp, inferred.?, self.arena.exprSpan(id));
+            try self.checkGenericBounds(f.arena, gp, inferred.?, self.arena.exprSpan(id));
         }
 
         if (decl.return_type.isNone()) return ResolvedType.unknown;
-        return self.substituteGeneric(decl, decl.return_type, &subst);
+        return self.substituteGeneric(f, decl.return_type, &subst);
     }
 
-    /// `true` if `name` is a generic parameter of `decl`.
-    fn isGenericParamOf(self: *TypeChecker, decl: ast_mod.FnDecl, name: StringId) bool {
+    /// `true` if `name`, a name of `f.arena`, is a generic parameter of `f`.
+    fn isGenericParamOf(f: FnRef, name: StringId) bool {
         var i: u32 = 0;
-        while (i < decl.generics_len) : (i += 1) {
-            if (self.arena.generic_params.items[decl.generics_start + i].name == name) return true;
+        while (i < f.decl.generics_len) : (i += 1) {
+            if (f.arena.generic_params.items[f.decl.generics_start + i].name == name) return true;
         }
         return false;
     }
@@ -7966,28 +8206,28 @@ pub const TypeChecker = struct {
     /// type, binding generic variables into `subst` (§6.4).
     /// Handles a bare param `T` and an element-of `T[]` / `T[N]`; deeper nesting
     /// is not inferred (leaves the param unbound → E0603 if unresolved).
-    fn unifyGeneric(self: *TypeChecker, decl: ast_mod.FnDecl, formal: NodeId, actual: ResolvedType, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType), span: SourceSpan) TypeError!void {
-        switch (self.arena.typeNodeKind(formal)) {
+    fn unifyGeneric(self: *TypeChecker, f: FnRef, formal: NodeId, actual: ResolvedType, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType), span: SourceSpan) TypeError!void {
+        switch (f.arena.typeNodeKind(formal)) {
             .named => {
-                const name = self.arena.namedTypeName(formal).?;
-                if (!self.isGenericParamOf(decl, name)) return; // concrete formal — no binding
+                const name = f.arena.namedTypeName(formal).?;
+                if (!isGenericParamOf(f, name)) return; // concrete formal — no binding
                 if (actual == .unknown) return; // don't pin a param to a post-error unknown
                 if (subst.get(name)) |prev| {
                     if (!ResolvedType.eql(prev, actual)) {
-                        try self.emit(.inconsistent_generic_inference, .error_, span, "type parameter '{s}' is inferred as two different types", .{self.arena.strings.slice(name)});
+                        try self.emit(.inconsistent_generic_inference, .error_, span, "type parameter '{s}' is inferred as two different types", .{f.arena.strings.slice(name)});
                     }
                 } else {
                     try subst.put(self.gpa, name, actual);
                 }
             },
             .array, .slice => {
-                const at = self.arena.array_types.items[self.arena.typeNodeData(formal)];
+                const at = f.arena.array_types.items[f.arena.typeNodeData(formal)];
                 const elem: ?ResolvedType = switch (actual) {
                     .array_fixed => |info| .{ .builtin = info.elem },
                     .array_dyn => |e| .{ .builtin = e },
                     else => null,
                 };
-                if (elem) |ea| try self.unifyGeneric(decl, at.elem, ea, subst, span);
+                if (elem) |ea| try self.unifyGeneric(f, at.elem, ea, subst, span);
             },
             else => {}, // generic_type / map / set — not inferred
         }
@@ -7997,22 +8237,22 @@ pub const TypeChecker = struct {
     /// param `T` → its inferred type (or `.generic` if still
     /// unbound); `T[]` → a dynamic array of the substituted element; otherwise
     /// the ordinary resolution.
-    fn substituteGeneric(self: *TypeChecker, decl: ast_mod.FnDecl, node: NodeId, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType)) ResolvedType {
-        switch (self.arena.typeNodeKind(node)) {
+    fn substituteGeneric(self: *TypeChecker, f: FnRef, node: NodeId, subst: *const std.AutoHashMapUnmanaged(StringId, ResolvedType)) ResolvedType {
+        switch (f.arena.typeNodeKind(node)) {
             .named => {
-                const name = self.arena.namedTypeName(node).?;
-                if (self.isGenericParamOf(decl, name)) {
+                const name = f.arena.namedTypeName(node).?;
+                if (isGenericParamOf(f, name)) {
                     return subst.get(name) orelse ResolvedType{ .generic = name };
                 }
-                return self.namedTypeToResolved(node);
+                return self.typeIn(f.arena, node);
             },
             .slice => {
-                const at = self.arena.array_types.items[self.arena.typeNodeData(node)];
-                const e = self.substituteGeneric(decl, at.elem, subst);
+                const at = f.arena.array_types.items[f.arena.typeNodeData(node)];
+                const e = self.substituteGeneric(f, at.elem, subst);
                 if (e == .builtin) return .{ .array_dyn = e.builtin };
                 return ResolvedType.unknown;
             },
-            else => return self.namedTypeToResolved(node),
+            else => return self.typeIn(f.arena, node),
         }
     }
 
@@ -8020,29 +8260,33 @@ pub const TypeChecker = struct {
     /// 4, §6.5). `component` / `resource` require the RTTI category;
     /// `trait` requires an `impl Trait for <actual>` in the compilation set;
     /// E0601 otherwise.
-    fn checkGenericBounds(self: *TypeChecker, gp: ast_mod.GenericParam, actual: ResolvedType, span: SourceSpan) TypeError!void {
+    fn checkGenericBounds(self: *TypeChecker, a: *const AstArena, gp: ast_mod.GenericParam, actual: ResolvedType, span: SourceSpan) TypeError!void {
         var bi: u32 = 0;
         while (bi < gp.bounds_len) : (bi += 1) {
-            const b = self.arena.generic_bounds.items[gp.bounds_start + bi];
+            const b = a.generic_bounds.items[gp.bounds_start + bi];
             const ok = switch (b.kind) {
                 .component => actual == .component,
                 .resource => actual == .resource,
                 .event => false, // `event` bound needs the `event` keyword
                 .trait_ => blk: {
                     const tn = typeNameOfResolved(actual) orelse break :blk false;
-                    break :blk self.typeImplementsTrait(tn, b.trait_name);
+                    const target = self.implTargetIn(self.arena, tn) orelse break :blk false;
+                    const trait = self.declNamedIn(a, b.trait_name) orelse break :blk false;
+                    break :blk self.typeImplementsTrait(target, trait);
                 },
             };
             if (!ok) {
-                try self.emit(.bound_not_satisfied, .error_, span, "type argument for '{s}' does not satisfy its bound", .{self.arena.strings.slice(gp.name)});
+                try self.emit(.bound_not_satisfied, .error_, span, "type argument for '{s}' does not satisfy its bound", .{a.strings.slice(gp.name)});
             }
         }
     }
 
-    /// `true` if an `impl <trait_name> for <type_name>` exists.
-    fn typeImplementsTrait(self: *TypeChecker, type_name: StringId, trait_name: StringId) bool {
+    /// `true` if an `impl` of `trait` for `target` is visible here.
+    fn typeImplementsTrait(self: *TypeChecker, target: ImplTarget, trait: DeclRef) bool {
         for (self.trait_impls.items) |entry| {
-            if (entry.type_name == type_name and entry.trait_name == trait_name) return true;
+            const t = self.implTargetIn(entry.arena, entry.type_name) orelse continue;
+            const tr = self.declNamedIn(entry.arena, entry.trait_name) orelse continue;
+            if (t.eql(target) and tr.eql(trait)) return true;
         }
         return false;
     }
@@ -8085,12 +8329,11 @@ pub const TypeChecker = struct {
     /// supplied by its context — check mode, resolver-types §4).
     fn checkStructLitAgainst(self: *TypeChecker, id: NodeId, data: u32, struct_name: StringId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const sl = self.arena.struct_lits.items[data];
-        const sym = self.symbols.get(struct_name);
-        if (sym == null or sym.?.kind != .struct_) {
+        const target = self.structNamed(struct_name) orelse {
             try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a struct type", .{self.arena.strings.slice(struct_name)});
             return ResolvedType.unknown;
-        }
-        const decl = self.arena.struct_decls.items[self.arena.itemData(sym.?.item_id)];
+        };
+        const decl = target.decl;
         var i: u32 = 0;
         while (i < sl.fields_len) : (i += 1) {
             const flit = self.arena.struct_lit_fields.items[sl.fields_start + i];
@@ -8098,9 +8341,9 @@ pub const TypeChecker = struct {
             var declared: ?ResolvedType = null;
             var f_i: u32 = 0;
             while (f_i < decl.fields_len) : (f_i += 1) {
-                const f = self.arena.fields.items[decl.fields_start + f_i];
-                if (f.name == flit.name) {
-                    declared = self.namedTypeToResolved(f.type_node);
+                const f = target.arena.fields.items[decl.fields_start + f_i];
+                if (self.sameName(target.arena, f.name, flit.name)) {
+                    declared = self.typeIn(target.arena, f.type_node);
                     break;
                 }
             }
@@ -8160,18 +8403,18 @@ pub const TypeChecker = struct {
         // zero-fill would diverge on nested declared defaults).
         var df_i: u32 = 0;
         while (df_i < decl.fields_len) : (df_i += 1) {
-            const f = self.arena.fields.items[decl.fields_start + df_i];
-            if (self.namedTypeToResolved(f.type_node) != .struct_t) continue;
+            const f = target.arena.fields.items[decl.fields_start + df_i];
+            if (self.typeIn(target.arena, f.type_node) != .struct_t) continue;
             var provided = false;
             var li: u32 = 0;
             while (li < sl.fields_len) : (li += 1) {
-                if (self.arena.struct_lit_fields.items[sl.fields_start + li].name == f.name) {
+                if (self.sameName(target.arena, f.name, self.arena.struct_lit_fields.items[sl.fields_start + li].name)) {
                     provided = true;
                     break;
                 }
             }
             if (!provided) {
-                try self.emit(.struct_field_missing, .error_, self.arena.exprSpan(id), "struct-typed field '{s}' must be provided in the literal (no declared default)", .{self.arena.strings.slice(f.name)});
+                try self.emit(.struct_field_missing, .error_, self.arena.exprSpan(id), "struct-typed field '{s}' must be provided in the literal (no declared default)", .{target.arena.strings.slice(f.name)});
             }
         }
         return .{ .struct_t = struct_name };
@@ -8224,11 +8467,11 @@ pub const TypeChecker = struct {
                 }
                 return try self.synthSetAssociated(id, mc, ctx_opt);
             }
-            const method = self.lookupMethod(type_name, mc.method_name) orelse {
+            const method = (try self.lookupMethod(type_name, mc.method_name, self.arena.exprSpan(id))) orelse {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no associated function '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
                 return ResolvedType.unknown;
             };
-            if (method.self_kind != .none) {
+            if (method.decl.self_kind != .none) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'{s}' is a method (takes self) — call it as a receiver method 'value.{s}(...)'", .{ method_slice, method_slice });
                 return ResolvedType.unknown;
             }
@@ -8748,12 +8991,12 @@ pub const TypeChecker = struct {
         };
 
         // Step 1 — inherent method (§5.1).
-        if (self.lookupMethod(type_name, mc.method_name)) |method| {
-            if (method.self_kind == .none) {
+        if (try self.lookupMethod(type_name, mc.method_name, self.arena.exprSpan(id))) |method| {
+            if (method.decl.self_kind == .none) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'{s}' is an associated function (no self) — call it as '{s}.{s}(...)'", .{ method_slice, self.arena.strings.slice(type_name), method_slice });
                 return ResolvedType.unknown;
             }
-            try self.checkMutSelfReceiver(method, mc, ctx_opt);
+            try self.checkMutSelfReceiver(method.decl, mc, ctx_opt);
             return try self.checkMethodArgs(id, mc, method, ctx_opt);
         }
 
@@ -8761,10 +9004,10 @@ pub const TypeChecker = struct {
         if (try self.findTraitMethod(type_name, mc.method_name, self.arena.exprSpan(id))) |disp| {
             // Conditional impl (§7.3): the `when` conditions must be provable
             // from the calling rule's `when` (E0215 otherwise).
-            if (!self.traitImplConditionsProven(disp.when_root, ctx_opt)) {
+            if (!self.traitImplConditionsProven(disp.impl_arena, disp.when_root, ctx_opt)) {
                 try self.emit(.conditional_impl_condition_not_proven, .error_, self.arena.exprSpan(id), "conditional impl method '{s}' requires components the calling context does not guarantee — add the matching 'when ... has' to the rule", .{method_slice});
             }
-            try self.checkMutSelfReceiver(disp.method, mc, ctx_opt);
+            try self.checkMutSelfReceiver(disp.method.decl, mc, ctx_opt);
             return try self.checkMethodArgs(id, mc, disp.method, ctx_opt);
         }
 
@@ -8773,75 +9016,88 @@ pub const TypeChecker = struct {
         return ResolvedType.unknown;
     }
 
-    /// One resolved trait-dispatch candidate: the
-    /// `FnDecl` to call (impl-provided or trait default) + the impl's `when_root`
-    /// (for the §7.3 conditional proof).
-    const TraitDispatch = struct { method: ast_mod.FnDecl, when_root: u32 };
+    /// One resolved trait-dispatch candidate: the method to call
+    /// (impl-provided or trait default) + the arena of its impl, whose
+    /// `when_root` it is (for the §7.3 conditional proof).
+    const TraitDispatch = struct { method: FnRef, impl_arena: *const AstArena, when_root: u32 };
 
     /// Find the trait method `method_name` on `type_name` (`etch-resolver-types.md
-    /// §5.2`). Scans `trait_impls` for the type; a candidate is an impl-provided
-    /// method or, failing that, the trait's default-bodied method. >1 distinct
-    /// candidate ⇒ E0211 AmbiguousTraitMethod (the first is returned to avoid a
-    /// cascade). Simplification: multiple conditional impls of the same
-    /// trait also surface as E0211 (the §7.3 most-specific-wins / E0216 tie-break
-    /// is a refinement — flagged for review).
+    /// §5.2`). Scans the visible trait impls for the type; a candidate is an
+    /// impl-provided method or, failing that, the trait's default-bodied
+    /// method. >1 distinct candidate ⇒ E0211 AmbiguousTraitMethod (the first
+    /// is returned to avoid a cascade). Simplification: multiple conditional
+    /// impls of the same trait also surface as E0211 (the §7.3
+    /// most-specific-wins / E0216 tie-break is a refinement — flagged for
+    /// review).
     fn findTraitMethod(self: *TypeChecker, type_name: StringId, method_name: StringId, span: SourceSpan) TypeError!?TraitDispatch {
+        const target = self.implTargetIn(self.arena, type_name) orelse return null;
+        const bytes = self.arena.strings.slice(method_name);
         var found: ?TraitDispatch = null;
         var count: u32 = 0;
         for (self.trait_impls.items) |entry| {
-            if (entry.type_name != type_name) continue;
-            var resolved: ?ast_mod.FnDecl = null;
-            var k: u32 = 0;
-            while (k < entry.methods_len) : (k += 1) {
-                const mth = self.arena.impl_methods.items[entry.methods_start + k];
-                if (mth.name == method_name) {
-                    resolved = mth;
-                    break;
-                }
+            const t = self.implTargetIn(entry.arena, entry.type_name) orelse continue;
+            if (!t.eql(target)) continue;
+            var resolved: ?FnRef = null;
+            if (methodIn(entry.arena, entry.methods_start, entry.methods_len, bytes)) |m| {
+                resolved = .{ .arena = entry.arena, .decl = m };
+            } else if (self.declNamedIn(entry.arena, entry.trait_name)) |trait| {
+                resolved = traitDefaultMethod(trait, bytes);
             }
-            if (resolved == null) resolved = self.traitDefaultMethod(entry.trait_name, method_name);
             if (resolved) |mth| {
                 count += 1;
-                if (found == null) found = .{ .method = mth, .when_root = entry.when_root };
+                if (found == null) found = .{ .method = mth, .impl_arena = entry.arena, .when_root = entry.when_root };
             }
         }
         if (count > 1) {
-            try self.emit(.ambiguous_trait_method, .error_, span, "ambiguous trait method '{s}' — implemented by more than one trait/impl for this type", .{self.arena.strings.slice(method_name)});
+            try self.emit(.ambiguous_trait_method, .error_, span, "ambiguous trait method '{s}' — implemented by more than one trait/impl for this type", .{bytes});
         }
         return found;
     }
 
-    /// The trait's default-bodied method `method_name`, or `null`.
-    fn traitDefaultMethod(self: *TypeChecker, trait_name: StringId, method_name: StringId) ?ast_mod.FnDecl {
-        const sym = self.symbols.get(trait_name) orelse return null;
-        if (sym.kind != .trait_) return null;
-        const tdecl = self.arena.trait_decls.items[self.arena.itemData(sym.item_id)];
+    /// The default-bodied method named `bytes` of `trait`, or `null`.
+    fn traitDefaultMethod(trait: DeclRef, bytes: []const u8) ?FnRef {
+        if (trait.arena.itemKind(trait.item) != .trait_decl) return null;
+        const tdecl = trait.arena.trait_decls.items[trait.arena.itemData(trait.item)];
         var m: u32 = 0;
         while (m < tdecl.methods_len) : (m += 1) {
-            const tm = self.arena.impl_methods.items[tdecl.methods_start + m];
-            if (tm.name == method_name and tm.has_body) return tm;
+            const tm = trait.arena.impl_methods.items[tdecl.methods_start + m];
+            if (tm.has_body and std.mem.eql(u8, trait.arena.strings.slice(tm.name), bytes)) return .{ .arena = trait.arena, .decl = tm };
         }
         return null;
     }
 
-    /// Prove a conditional trait impl's `when` (§7.3). Unconditional ⇒ always
-    /// proven; otherwise every `has C` the impl requires must be in the calling
-    /// rule's guaranteed component set (`ctx.components_in_when`). Outside a rule
-    /// context, or for an `or`/`not`/resource condition (not provable),
-    /// the proof fails (conservative).
-    fn traitImplConditionsProven(self: *TypeChecker, when_root: u32, ctx_opt: ?*RuleCtx) bool {
+    /// Prove a conditional trait impl's `when` (§7.3), a condition of arena
+    /// `a`. Unconditional ⇒ always proven; otherwise every `has C` the impl
+    /// requires must be in the calling rule's guaranteed component set
+    /// (`ctx.components_in_when`). Outside a rule context, or for an
+    /// `or`/`not`/resource condition (not provable), the proof fails
+    /// (conservative).
+    fn traitImplConditionsProven(self: *TypeChecker, a: *const AstArena, when_root: u32, ctx_opt: ?*RuleCtx) bool {
         if (when_root == ast_mod.RuleDecl.none_when) return true;
         const ctx = ctx_opt orelse return false;
-        return self.requiredComponentsProven(when_root, ctx);
+        return self.requiredComponentsProven(a, when_root, ctx);
     }
 
-    fn requiredComponentsProven(self: *TypeChecker, idx: u32, ctx: *RuleCtx) bool {
-        const node = self.arena.when_nodes.items[idx];
+    fn requiredComponentsProven(self: *TypeChecker, a: *const AstArena, idx: u32, ctx: *RuleCtx) bool {
+        const node = a.when_nodes.items[idx];
         return switch (node.kind) {
-            .has, .has_with_filter => ctx.components_in_when.contains(node.type_name),
-            .logical_and => self.requiredComponentsProven(node.lhs, ctx) and self.requiredComponentsProven(node.rhs, ctx),
+            .has, .has_with_filter => self.componentGuaranteed(a, node.type_name, ctx),
+            .logical_and => self.requiredComponentsProven(a, node.lhs, ctx) and self.requiredComponentsProven(a, node.rhs, ctx),
             else => false, // or / not / resource conditions are not provable
         };
+    }
+
+    /// Whether the calling rule's `when` guarantees the component that
+    /// `name`, a name of arena `a`, names.
+    fn componentGuaranteed(self: *TypeChecker, a: *const AstArena, name: StringId, ctx: *RuleCtx) bool {
+        if (a == self.arena) return ctx.components_in_when.contains(name);
+        const want = self.declNamedIn(a, name) orelse return false;
+        var it = ctx.components_in_when.keyIterator();
+        while (it.next()) |k| {
+            const have = self.declNamed(k.*) orelse continue;
+            if (have.eql(want)) return true;
+        }
+        return false;
     }
 
     /// E0220-shaped check for the builtin mutating collection methods: `push` /
@@ -8869,7 +9125,8 @@ pub const TypeChecker = struct {
     /// Check a method/associated-fn call's argument count + types against the
     /// resolved `method` and return its declared return type.
     /// `self` is not part of the argument list (it is the receiver).
-    fn checkMethodArgs(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, method: ast_mod.FnDecl, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    fn checkMethodArgs(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, m: FnRef, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const method = m.decl;
         // Function coloring (§9.3): calling an `async method` from a
         // non-async context is E0901 (a legal call is via `await` in an async
         // context, which reaches here with `current_is_async` true).
@@ -8879,18 +9136,18 @@ pub const TypeChecker = struct {
             // E0905 (mirror of the free-fn site, §9.2 revision 2).
             try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async` method '{s}' — consume the async effect with `await` (inside spawn/branch/race/sync bodies too: the constructs relocate the await into a child task, they do not replace it)", .{self.arena.strings.slice(mc.method_name)});
         }
-        const ret: ResolvedType = if (method.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(method.return_type);
+        const ret: ResolvedType = if (method.return_type.isNone()) ResolvedType.unknown else self.typeIn(m.arena, method.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
         defer pnames.deinit(self.gpa);
-        try self.fnParamNames(method.params_start, method.params_len, &pnames);
+        try self.fnParamNames(m, &pnames);
         if (!try self.checkCallBinding(id, mc.args_start, mc.args_len, mc.names_start, pnames.items, "method", mc.method_name)) {
             return ret;
         }
         var i: u32 = 0;
         while (i < method.params_len) : (i += 1) {
-            const p = self.arena.fn_params.items[method.params_start + i];
-            const ptype = self.namedTypeToResolved(p.type_node);
-            const arg = self.arena.callArgForParam(mc.args_start, mc.args_len, mc.names_start, i, p.name) orelse continue;
+            const p = m.arena.fn_params.items[method.params_start + i];
+            const ptype = self.typeIn(m.arena, p.type_node);
+            const arg = self.arena.callArgForParam(mc.args_start, mc.args_len, mc.names_start, i, pnames.items[i]) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
             if (!try self.valueFits(ptype, arg, arg_t)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of method '{s}'", .{self.arena.strings.slice(mc.method_name)});
@@ -8962,7 +9219,7 @@ pub const TypeChecker = struct {
         var covered: std.ArrayListUnmanaged(bool) = .empty;
         defer covered.deinit(self.gpa);
         if (enum_name) |en| {
-            if (self.enumDecl(en)) |d| try covered.appendNTimes(self.gpa, false, d.variants_len);
+            if (self.enumNamed(en)) |e| try covered.appendNTimes(self.gpa, false, e.decl.variants_len);
         }
 
         var i: u32 = 0;
@@ -9190,12 +9447,11 @@ pub const TypeChecker = struct {
             .struct_t => |name_id| {
                 // Field of a `struct` value — e.g. `self.x`
                 // inside a method or `v.x` on a struct local.
-                const sym = self.symbols.get(name_id) orelse return ResolvedType.unknown;
-                const decl = self.arena.struct_decls.items[self.arena.itemData(sym.item_id)];
+                const target = self.structNamed(name_id) orelse return ResolvedType.unknown;
                 var i: u32 = 0;
-                while (i < decl.fields_len) : (i += 1) {
-                    const f = self.arena.fields.items[decl.fields_start + i];
-                    if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
+                while (i < target.decl.fields_len) : (i += 1) {
+                    const f = target.arena.fields.items[target.decl.fields_start + i];
+                    if (self.sameName(target.arena, f.name, field_name)) return self.typeIn(target.arena, f.type_node);
                 }
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on struct '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
