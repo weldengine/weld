@@ -829,8 +829,8 @@ pub const TypeChecker = struct {
         try self.validateDeclarations();
     }
 
-    /// E0101 on two components reaching this file under one name, a component's
-    /// runtime identity being its name.
+    /// E0101 on two components or resources reaching this file under one name,
+    /// the runtime keying both by name in one registry.
     fn checkComponentIdentities(self: *TypeChecker) !void {
         const project = self.project orelse return;
         const Owner = struct { arena: *const AstArena, item: u32 };
@@ -841,9 +841,12 @@ pub const TypeChecker = struct {
         const spans = self.arena.items.items(.span);
         var i: u28 = 0;
         while (i < self.arena.items.len) : (i += 1) {
-            if (kinds[i] != .component_decl) continue;
-            const name = self.arena.strings.slice(self.arena.component_decls.items[datas[i]].name);
-            try owners.put(self.gpa, name, .{ .arena = self.arena, .item = i });
+            const name_id = switch (kinds[i]) {
+                .component_decl => self.arena.component_decls.items[datas[i]].name,
+                .resource_decl => self.arena.resource_decls.items[datas[i]].name,
+                else => continue,
+            };
+            try owners.put(self.gpa, self.arena.strings.slice(name_id), .{ .arena = self.arena, .item = i });
         }
         i = 0;
         while (i < self.arena.items.len) : (i += 1) {
@@ -853,15 +856,19 @@ pub const TypeChecker = struct {
             while (j < decl.items_len) : (j += 1) {
                 const item = self.arena.import_items.items[decl.items_start + j];
                 const entry = self.importedBinding(importLocalName(item)) orelse continue;
-                if (entry.kind != .component) continue;
                 const decl_arena = &project.arenas[entry.arena_index];
-                const name = decl_arena.strings.slice(decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)].name);
+                const name_id = switch (entry.kind) {
+                    .component => decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)].name,
+                    .resource => decl_arena.resource_decls.items[decl_arena.itemData(entry.item_id)].name,
+                    else => continue,
+                };
+                const name = decl_arena.strings.slice(name_id);
                 const owner: Owner = .{ .arena = decl_arena, .item = entry.item_id.index };
                 const gop = try owners.getOrPut(self.gpa, name);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = owner;
                 } else if (!std.meta.eql(gop.value_ptr.*, owner)) {
-                    try self.emit(.duplicate_symbol, .error_, spans[i], "two components named '{s}' reach this file, and a component's runtime identity is its name", .{name});
+                    try self.emit(.duplicate_symbol, .error_, spans[i], "two components or resources named '{s}' reach this file, and the runtime identifies both by name", .{name});
                 }
             }
         }
@@ -2257,7 +2264,7 @@ pub const TypeChecker = struct {
     /// mismatches. Mirrors `validateDataEntryField` — synthExprE with null ctx;
     /// check-mode for `.variant` shorthand + anonymous `.{ }` values. Permissive
     /// on non-builtin declared types (no false positives on Vec3-from-array).
-    fn checkInstanceField(self: *TypeChecker, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: ?DiagnosticCode) !void {
+    fn checkInstanceField(self: *TypeChecker, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: DiagnosticCode) !void {
         if (field.name == 0) return; // spread — not produced in component/resource bodies
         var declared: ?ResolvedType = null;
         var f: u32 = 0;
@@ -2270,13 +2277,6 @@ pub const TypeChecker = struct {
         }
         const d = declared orelse {
             try self.emit(code_unknown, .error_, self.arena.exprSpan(field.value), "'{s}' has no field '{s}'", .{ owner, self.arena.strings.slice(field.name) });
-            return;
-        };
-        const tcode = code_type orelse {
-            // A resource instance value is checked by field name, and for range.
-            if (d != .builtin) return;
-            const actual = try self.synthExprE(field.value, null);
-            if (actual == .builtin) _ = try self.literalTypeFits(d.builtin, field.value, actual.builtin);
             return;
         };
         const actual = blk: {
@@ -2293,7 +2293,7 @@ pub const TypeChecker = struct {
         };
         const mismatch = !try self.valueFits(d, field.value, actual);
         if (mismatch) {
-            try self.emit(tcode, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{self.arena.strings.slice(field.name)});
+            try self.emit(code_type, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{self.arena.strings.slice(field.name)});
         }
     }
 
@@ -2394,19 +2394,13 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Cross-arena field check for an imported component instance. The
-    /// instance field (`field`) lives in `self.arena`; the declared
-    /// fields live in `decl_arena`. Field names are matched by BYTES (StringIds
-    /// are per-arena). `code_unknown` (E1794) is full; the field-TYPE check
-    /// (`code_type`, E1795) resolves the foreign declared type via
-    /// `foreignBuiltinFieldType`. That covers EVERY valid component field type:
-    /// `validateFieldsInDecl(.component_like)` admits only builtin-POD field types
-    /// (named struct/enum/string are rejected on components), so a valid imported
-    /// component's fields are all builtins. The `orelse return` (named foreign
-    /// type) is therefore unreachable for a valid component — forward-compat
-    /// headroom if components ever gain named-typed fields, not a skipped check.
+    /// Cross-arena field check for an imported component or resource instance:
+    /// the instance field lives in `self.arena` and the declared fields in
+    /// `decl_arena`, so names are matched by bytes. A declared type is read
+    /// across arenas only as a builtin or `string`, so an enum or collection
+    /// field of an imported resource is checked by name alone.
     fn checkInstanceFieldForeign(self: *TypeChecker, decl_arena: *const AstArena, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: DiagnosticCode) !void {
-        if (field.name == 0) return; // spread — not produced in component bodies
+        if (field.name == 0) return; // spread — not produced in instance bodies
         const field_name_bytes = self.arena.strings.slice(field.name);
         var declared_type_node: ?NodeId = null;
         var f: u32 = 0;
@@ -2421,10 +2415,6 @@ pub const TypeChecker = struct {
             try self.emit(code_unknown, .error_, self.arena.exprSpan(field.value), "'{s}' has no field '{s}'", .{ owner, field_name_bytes });
             return;
         };
-        // Field-TYPE check. Component fields are builtin-POD only
-        // (validateFieldsInDecl .component_like), so this resolves for every
-        // valid imported component; the `orelse return` is unreachable for a
-        // valid component (forward-compat headroom).
         const declared_builtin = foreignBuiltinFieldType(decl_arena, tn) orelse return;
         const actual = try self.synthExprE(field.value, null);
         if (!try self.valueFits(.{ .builtin = declared_builtin }, field.value, actual)) {
@@ -2433,18 +2423,23 @@ pub const TypeChecker = struct {
     }
 
     /// Resolve a `resources { … }` entry against the resource RTTI: E1789 if not
-    /// a declared resource; E0303 per unknown field (no resource-field-type code).
+    /// a declared resource, then E0303 per unknown field and E0308 per mistyped
+    /// one. An imported resource's fields are read from the arena that declares
+    /// it.
     fn checkResourceInstance(self: *TypeChecker, ci: ast_mod.ComponentInstance) !void {
-        const sym = self.symbols.get(ci.type_name);
-        if (sym == null or sym.?.kind != .resource) {
-            try self.emit(.scene_resource_type_unknown, .error_, ci.span, "'{s}' is not a declared resource", .{self.arena.strings.slice(ci.type_name)});
-            return;
-        }
-        const decl = self.arena.resource_decls.items[self.arena.itemData(sym.?.item_id)];
         const owner = self.arena.strings.slice(ci.type_name);
+        const resource = self.resourceNamed(ci.type_name) orelse {
+            try self.emit(.scene_resource_type_unknown, .error_, ci.span, "'{s}' is not a declared resource", .{owner});
+            return;
+        };
         var f: u32 = 0;
         while (f < ci.fields_len) : (f += 1) {
-            try self.checkInstanceField(owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], .resource_field_unknown, null);
+            const field = self.arena.struct_lit_fields.items[ci.fields_start + f];
+            if (resource.arena == self.arena) {
+                try self.checkInstanceField(owner, resource.decl.fields_start, resource.decl.fields_len, field, .resource_field_unknown, .resource_field_type_invalid);
+            } else {
+                try self.checkInstanceFieldForeign(resource.arena, owner, resource.decl.fields_start, resource.decl.fields_len, field, .resource_field_unknown, .resource_field_type_invalid);
+            }
         }
     }
 
@@ -15561,4 +15556,90 @@ test "a mistyped collection literal in a let is reported once per element" {
     try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
     try std.testing.expectEqual(@as(usize, 2), r.diagnostics.items.len);
     try std.testing.expectEqual(@as(usize, 2), countMessage(r.diagnostics.items, .type_mismatch, "collection element type"));
+}
+
+const scene_resource_refused = [_]UnitCase{
+    .{ .name = "bool into an int field", .code = .resource_field_type_invalid, .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { players: true } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+    .{ .name = "array into an int field", .code = .resource_field_type_invalid, .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { players: [1, 2] } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+    .{ .name = "int literal into a float field", .code = .resource_field_type_invalid, .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { rate: 2 } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+    .{ .name = "int into a string field", .code = .resource_field_type_invalid, .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { title: 3 } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+    .{ .name = "unknown variant into an enum field", .code = .enum_variant_not_found, .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { tag: .z } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+};
+
+const scene_resource_accepted = [_]ClosureJumpCase{
+    .{ .name = "each field of its type", .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { players: 8, rate: 2.5, title: "wave", tag: .b } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+};
+
+test "a scene resource field of the wrong type is refused" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (scene_resource_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (countMessage(r.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "a scene resource field of its type is accepted" {
+    const gpa = std.testing.allocator;
+    for (scene_resource_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+    }
 }

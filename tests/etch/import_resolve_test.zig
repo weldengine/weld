@@ -269,6 +269,8 @@ const position_cases = [_]Case{
     .{ .name = "malformed when has resource", .body = "rule r(entity: Entity) when entity has R { }" },
     .{ .name = "malformed when resource comp", .body = "rule r() when resource C { }" },
     .{ .name = "malformed emit component", .body = "rule r() { emit C { v: 1 } }" },
+    .{ .name = "scene resource", .body = "scene \"S\" {\n  resources { R { v: 1 } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
+    .{ .name = "malformed scene resource field type", .body = "scene \"S\" {\n  resources { R { v: true } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
 };
 
 fn codesOf(files: []const etch.ProjectFile, out: *std.ArrayListUnmanaged(DiagnosticCode)) !void {
@@ -333,4 +335,36 @@ test "one component under two local names is one type" {
     defer deinitDiags(gpa, &diags);
     try etch.validateProject(gpa, &files, &diags);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+test "a mistyped field of an imported resource in a scene file is refused" {
+    const gpa = std.testing.allocator;
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "resource Mode { players: int = 4, title: string = \"x\" }\ncomponent C { v: int = 0 }\n" },
+        .{ .name = "level.scene.etch", .source =
+        \\import lib { Mode, C }
+        \\scene "S" {
+        \\  resources { Mode { players: true, title: 3 } }
+        \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+        \\}
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 2), diags.items.len);
+    try std.testing.expectEqual(@as(usize, 2), countCode(diags.items, .resource_field_type_invalid));
+}
+
+test "a component and an imported resource of one name are refused, the runtime naming both alike" {
+    const gpa = std.testing.allocator;
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "resource Mode { x: int = 0 }\n" },
+        .{ .name = "main.etch", .source = "import lib { Mode as Setting }\ncomponent Mode { v: int = 0 }\n" },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .duplicate_symbol));
 }

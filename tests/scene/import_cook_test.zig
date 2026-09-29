@@ -665,3 +665,104 @@ test "a layer file beside a scene does not refuse the scene's cook" {
     var cooked = try scene_cook.cookSceneInProject(gpa, &files, 2, null, null);
     cooked.deinit(gpa);
 }
+
+const game =
+    \\resource GameMode { max_players: int = 4, title: string = "x" }
+    \\component Health { current: i32 = 100, max: i32 = 100 }
+;
+
+test "a scene importing its resource cooks as one declaring it" {
+    const gpa = std.testing.allocator;
+    const files = [_]ProjectFile{
+        .{ .name = "src/game.etch", .source = game },
+        .{ .name = "src/level.scene.etch", .source =
+        \\import game { GameMode, Health }
+        \\scene "Level" {
+        \\  resources { GameMode { max_players: 8, title: "wave" } }
+        \\  entity "npc" { uuid: "00000000-0000-0000-0000-000000000002" Health { max: 40 } }
+        \\}
+        },
+    };
+    try expectChecked(&files);
+    var imported = try scene_cook.cookSceneInProject(gpa, &files, 1, null, null);
+    defer imported.deinit(gpa);
+    const imported_bytes = try written(&imported);
+    defer gpa.free(imported_bytes);
+    var declared = try scene_cook.cook(gpa, game ++
+        \\
+        \\scene "Level" {
+        \\  resources { GameMode { max_players: 8, title: "wave" } }
+        \\  entity "npc" { uuid: "00000000-0000-0000-0000-000000000002" Health { max: 40 } }
+        \\}
+    , null);
+    defer declared.deinit(gpa);
+    const declared_bytes = try written(&declared);
+    defer gpa.free(declared_bytes);
+    try std.testing.expectEqualSlices(u8, declared_bytes, imported_bytes);
+}
+
+test "a scene importing its resource under an alias cooks under the resource's own name" {
+    const gpa = std.testing.allocator;
+    const files = [_]ProjectFile{
+        .{ .name = "src/game.etch", .source = game },
+        .{ .name = "src/level.scene.etch", .source =
+        \\import game { GameMode as Mode, Health }
+        \\scene "Level" {
+        \\  resources { Mode { max_players: 8 } }
+        \\  entity "npc" { uuid: "00000000-0000-0000-0000-000000000002" Health { max: 40 } }
+        \\}
+        },
+    };
+    try expectChecked(&files);
+    var imported = try scene_cook.cookSceneInProject(gpa, &files, 1, null, null);
+    defer imported.deinit(gpa);
+    const imported_bytes = try written(&imported);
+    defer gpa.free(imported_bytes);
+    var declared = try scene_cook.cook(gpa, game ++
+        \\
+        \\scene "Level" {
+        \\  resources { GameMode { max_players: 8 } }
+        \\  entity "npc" { uuid: "00000000-0000-0000-0000-000000000002" Health { max: 40 } }
+        \\}
+    , null);
+    defer declared.deinit(gpa);
+    const declared_bytes = try written(&declared);
+    defer gpa.free(declared_bytes);
+    try std.testing.expectEqualSlices(u8, declared_bytes, imported_bytes);
+}
+
+test "two imported resources under one name refuse the cook" {
+    const files = [_]ProjectFile{
+        .{ .name = "src/a.etch", .source = "resource Mode { x: int = 0 }\ncomponent Health { current: i32 = 100 }" },
+        .{ .name = "src/b.etch", .source = "resource Mode { y: int = 0 }" },
+        .{ .name = "src/level.scene.etch", .source =
+        \\import a { Mode, Health }
+        \\import b { Mode as Other }
+        \\scene "Level" {
+        \\  resources { Mode { x: 1 } Other { y: 2 } }
+        \\  entity "npc" { uuid: "00000000-0000-0000-0000-000000000002" Health { current: 40 } }
+        \\}
+        },
+    };
+    try expectCheckReports(&files, .duplicate_symbol);
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(error.DuplicateType, scene_cook.cookSceneInProject(gpa, &files, 2, null, null));
+}
+
+test "one resource imported under two names cooks once" {
+    const gpa = std.testing.allocator;
+    const files = [_]ProjectFile{
+        .{ .name = "src/game.etch", .source = game },
+        .{ .name = "src/level.scene.etch", .source =
+        \\import game { GameMode, Health }
+        \\import game { GameMode as Mode }
+        \\scene "Level" {
+        \\  resources { Mode { max_players: 8 } }
+        \\  entity "npc" { uuid: "00000000-0000-0000-0000-000000000002" Health { max: 40 } }
+        \\}
+        },
+    };
+    try expectChecked(&files);
+    var cooked = try scene_cook.cookSceneInProject(gpa, &files, 1, null, null);
+    defer cooked.deinit(gpa);
+}

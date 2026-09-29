@@ -575,12 +575,20 @@ const Builder = struct {
                 const item = self.ast.import_items.items[decl.items_start + j];
                 const bound = self.scope.imports.get(types_mod.TypeChecker.importLocalName(item)) orelse continue;
                 if (bound.kind == .component) _ = try self.registerImported(bound, diag_out);
+                if (bound.kind == .resource) try self.registerImportedResource(bound, diag_out);
                 if (item.alias == 0) continue;
                 // The item that binds its alias last is the one the scope kept.
                 const own = types_mod.TypeChecker.importedExport(self.project, self.ast, target, item) orelse continue;
                 if (std.meta.eql(own, bound)) try self.aliases.put(self.gpa, self.ast.strings.slice(item.alias), self.ast.strings.slice(item.name));
             }
         }
+    }
+
+    /// Register the resource `entry` names under its own name.
+    fn registerImportedResource(self: *Builder, entry: ExportEntry, diag_out: ?*[]const u8) CookError!void {
+        const arena = &self.project.arenas[entry.arena_index];
+        const decl = arena.resource_decls.items[arena.itemData(entry.item_id)];
+        _ = try self.registerOne(arena, arena.strings.slice(decl.name), decl.fields_start, decl.fields_len, .resource, &.{}, .table, diag_out);
     }
 
     /// Register the component `entry` names, after the requisites its own
@@ -1481,7 +1489,8 @@ const Builder = struct {
         const insts = self.ast.component_instances.items[scene_decl.resources_start .. scene_decl.resources_start + scene_decl.resources_len];
         const out = try self.a().alloc(format.ResourceEntry, insts.len);
         for (insts, 0..) |ci, ri| {
-            const type_name = self.ast.strings.slice(ci.type_name);
+            const written_name = self.ast.strings.slice(ci.type_name);
+            const type_name = self.aliases.get(written_name) orelse written_name;
             const id = self.registry.idOf(type_name) orelse return fail(diag_out, error.UndeclaredType, "resources block references an undeclared resource type");
             if (self.registry.componentKind(id) != .resource) return fail(diag_out, error.ComponentAsResource, "resources block names an entity component, which is no resource");
             out[ri] = try self.buildResourceEntry(id, ci, diag_out);

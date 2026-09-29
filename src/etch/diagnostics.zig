@@ -63,6 +63,7 @@ pub const DiagnosticCode = enum {
     prefab_spawn_not_executable, // E0305 PrefabSpawnNotExecutable (spawn("Name") recognized but gated on the prefab runtime; not executable)
     structural_component_field_unknown, // E0306 StructuralComponentFieldUnknown (spawn/add component-literal field absent from the component decl)
     structural_component_field_type_invalid, // E0307 StructuralComponentFieldTypeInvalid (spawn/add component-literal field value type mismatch)
+    resource_field_type_invalid, // E0308 ResourceFieldTypeInvalid (scene `resources` block field value type mismatch)
 
     // ── Annotation errors (E0500-E0599) ──
     annotation_misapplied, // E0502 AnnotationMisapplied
@@ -446,6 +447,7 @@ pub const DiagnosticCode = enum {
             .prefab_spawn_not_executable => "E0305",
             .structural_component_field_unknown => "E0306",
             .structural_component_field_type_invalid => "E0307",
+            .resource_field_type_invalid => "E0308",
             .annotation_misapplied => "E0502",
             .annotation_arg_mismatch => "E0503",
             .requires_cycle => "E0505",
@@ -660,6 +662,7 @@ pub const DiagnosticCode = enum {
             .prefab_spawn_not_executable => "PrefabSpawnNotExecutable",
             .structural_component_field_unknown => "StructuralComponentFieldUnknown",
             .structural_component_field_type_invalid => "StructuralComponentFieldTypeInvalid",
+            .resource_field_type_invalid => "ResourceFieldTypeInvalid",
             .annotation_misapplied => "AnnotationMisapplied",
             .annotation_arg_mismatch => "AnnotationArgMismatch",
             .requires_cycle => "RequiresCycle",
