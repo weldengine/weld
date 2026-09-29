@@ -640,9 +640,41 @@ test "a throwing tick_until predicate fails the test with the throw" {
     try std.testing.expectEqualStrings("uncaught throw", report.results[0].message.?);
 }
 
-const EqualityRun = struct { name: []const u8, src: []const u8 };
+const RunCase = struct { name: []const u8, src: []const u8 };
 
-const equality_runs = [_]EqualityRun{
+/// How many of `cases` fail to check clean or to pass their one test, each
+/// failure printed.
+fn failingRuns(cases: []const RunCase) !usize {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (cases) |c| {
+        var pr = try parser_mod.parse(gpa, c.src);
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        if (diags.items.len != 0) {
+            wrong += 1;
+            for (diags.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+            continue;
+        }
+        var threaded: Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        var report = try run(gpa, threaded.io(), &pr.ast);
+        defer report.deinit();
+        if (report.passed != 1) {
+            wrong += 1;
+            for (report.results) |r| std.debug.print("{s}: {t} {s}\n", .{ c.name, r.status, r.message orelse "" });
+        }
+    }
+    return wrong;
+}
+
+const equality_runs = [_]RunCase{
     .{ .name = "a run string against a literal", .src =
     \\test "t" {
     \\  let a = "a" + "b"
@@ -715,36 +747,10 @@ const equality_runs = [_]EqualityRun{
 };
 
 test "== and != follow Eq at run time, and an ordered type orders" {
-    const gpa = std.testing.allocator;
-    var wrong: usize = 0;
-    for (equality_runs) |c| {
-        var pr = try parser_mod.parse(gpa, c.src);
-        defer pr.deinit(gpa);
-        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
-        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
-        defer {
-            for (diags.items) |*d| d.deinit(gpa);
-            diags.deinit(gpa);
-        }
-        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
-        if (diags.items.len != 0) {
-            wrong += 1;
-            for (diags.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
-            continue;
-        }
-        var threaded: Io.Threaded = .init(gpa, .{});
-        defer threaded.deinit();
-        var report = try run(gpa, threaded.io(), &pr.ast);
-        defer report.deinit();
-        if (report.passed != 1) {
-            wrong += 1;
-            for (report.results) |r| std.debug.print("{s}: {t} {s}\n", .{ c.name, r.status, r.message orelse "" });
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 0), wrong);
+    try std.testing.expectEqual(@as(usize, 0), try failingRuns(&equality_runs));
 }
 
-const shorthand_runs = [_]EqualityRun{
+const shorthand_runs = [_]RunCase{
     .{ .name = "a let with an enum annotation", .src = "enum Dir { north, south }\ntest \"t\" {\n  let e: Dir = .south\n  assert(e == Dir.south)\n}" },
     .{ .name = "a fn argument", .src = "enum Dir { north, south }\nfn is_south(d: Dir) -> bool { d == Dir.south }\ntest \"t\" {\n  assert(is_south(.south))\n}" },
     .{ .name = "a return value, trailing and by return", .src = "enum Dir { north, south }\nfn g() -> Dir { .south }\nfn h() -> Dir {\n  return .north\n}\ntest \"t\" {\n  assert(g() == Dir.south)\n  assert(h() == Dir.north)\n}" },
@@ -758,31 +764,33 @@ const shorthand_runs = [_]EqualityRun{
 };
 
 test "a .variant shorthand runs as the variant its expected type names" {
-    const gpa = std.testing.allocator;
-    var wrong: usize = 0;
-    for (shorthand_runs) |c| {
-        var pr = try parser_mod.parse(gpa, c.src);
-        defer pr.deinit(gpa);
-        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
-        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
-        defer {
-            for (diags.items) |*d| d.deinit(gpa);
-            diags.deinit(gpa);
-        }
-        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
-        if (diags.items.len != 0) {
-            wrong += 1;
-            for (diags.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
-            continue;
-        }
-        var threaded: Io.Threaded = .init(gpa, .{});
-        defer threaded.deinit();
-        var report = try run(gpa, threaded.io(), &pr.ast);
-        defer report.deinit();
-        if (report.passed != 1) {
-            wrong += 1;
-            for (report.results) |r| std.debug.print("{s}: {t} {s}\n", .{ c.name, r.status, r.message orelse "" });
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 0), wrong);
+    try std.testing.expectEqual(@as(usize, 0), try failingRuns(&shorthand_runs));
+}
+
+const option_runs = [_]RunCase{
+    .{ .name = "if let and match on an optional struct", .src = "struct P { x: int = 0 }\ntest \"t\" {\n  let o = some(P { x: 7 })\n  if let p = o { assert(p.x == 7) } else { assert(false) }\n  let v = match o { some(p) => p.x, none => 0 }\n  assert(v == 7)\n}" },
+    .{ .name = "an optional struct as a fn parameter and return", .src = "struct P { x: int = 0 }\nfn f(o: P?) -> int { o?.x ?? 0 }\nfn g() -> P? { some(P { x: 3 }) }\ntest \"t\" {\n  assert(f(g()) == 3)\n  assert(f(none) == 0)\n}" },
+    .{ .name = "an optional struct as a method parameter and return", .src = "struct P { x: int = 0 }\nimpl P {\n  fn pick(self, o: P?) -> P? { o }\n}\ntest \"t\" {\n  let p = P { x: 1 }\n  let q = p.pick(some(P { x: 9 }))\n  assert((q?.x ?? 0) == 9)\n}" },
+    .{ .name = "?. reaches an optional field, flattened", .src = "struct P { x: int = 0 }\nstruct Q { p: P? = none }\ntest \"t\" {\n  let q = some(Q { p: some(P { x: 4 }) })\n  let v = q?.p\n  assert((v?.x ?? 0) == 4)\n  let empty = some(Q { })\n  assert((empty?.p?.x ?? 1) == 1)\n}" },
+    .{ .name = "?. reaches an optional method result, flattened", .src = "struct P { x: int = 0 }\nimpl P {\n  fn half(self) -> int? { some(self.x / 2) }\n}\ntest \"t\" {\n  let o = some(P { x: 6 })\n  let v = o?.half()\n  assert((v ?? 0) == 3)\n}" },
+    .{ .name = "a generic optional parameter and return", .src = "fn first<T>(o: T?, d: T) -> T { o ?? d }\nfn wrap<T>(x: T) -> T? { some(x) }\nfn take<T>(o: T?) -> T { o! }\ntest \"t\" {\n  assert(first(some(2), 0) == 2)\n  assert(first(none, 5) == 5)\n  assert(wrap(2) == some(2))\n  assert(take(some(3)) == 3)\n}" },
+    .{ .name = "a value wrapped into its optional", .src = "struct P { x: int = 0 }\nstruct Q { p: P? = none }\nfn f(o: P?) -> int { o?.x ?? 0 }\nfn g() -> int? { 5 }\ntest \"t\" {\n  let o: int? = 5\n  assert(o == some(5))\n  assert(f(P { x: 2 }) == 2)\n  assert(g() == some(5))\n  let q = Q { p: P { x: 8 } }\n  assert((q.p?.x ?? 0) == 8)\n}" },
+    .{ .name = "an optional of a collection", .src = "test \"t\" {\n  let o: int[]? = some([1, 2])\n  if let a = o { assert(a.len() == 2) } else { assert(false) }\n  let n: int[]? = none\n  assert((n?.len() ?? 7) == 7)\n  let m: [string: int]? = some([\"a\": 1])\n  assert((m?.len() ?? 0) == 1)\n}" },
+    .{ .name = "an optional of an enum, from a shorthand", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let d: Dir? = some(.south)\n  assert(d == some(Dir.south))\n  let e: Dir? = .north\n  assert(e == some(Dir.north))\n}" },
+    .{ .name = "an optional struct unwrapped and looped", .src = "struct P { x: int = 0 }\ntest \"t\" {\n  let o = some(P { x: 9 })\n  assert(o!.x == 9)\n  let mut w = some(P { x: 2 })\n  let mut n = 0\n  while let p = w {\n    n = p.x\n    w = none\n  }\n  assert(n == 2)\n}" },
+
+    .{ .name = "a none branch makes an if optional", .src = "test \"t\" {\n  let c = false\n  let d = true\n  let x: int? = if c { none } else { 5 }\n  assert(x == some(5))\n  let y = if c { 5 } else { none }\n  assert(y == none)\n  let z: int? = if d { 5 } else { none }\n  assert(z == some(5))\n  let o: int? = none\n  let q = if d { 5 } else { o }\n  assert(q == some(5))\n}" },
+    .{ .name = "a none arm makes a match and a loop optional", .src = "test \"t\" {\n  let m: int? = match 2 { 1 => none, _ => 7 }\n  assert(m == some(7))\n  let k = match 1 { 1 => none, _ => 7 }\n  assert(k == none)\n  let mut i = 0\n  let l = loop {\n    if i > 0 {\n      break none\n    }\n    i += 1\n    break 3\n  }\n  assert(l == some(3))\n}" },
+    .{ .name = "a generic value returned into its optional", .src = "fn opt<T>(x: T) -> T? { x }\ntest \"t\" {\n  assert(opt(3) == some(3))\n  let o: int? = none\n  let w = opt(o)\n  assert(w != none)\n  if let inner = w { assert(inner == none) } else { assert(false) }\n  let mut d = opt(o)\n  d = 5\n  if let inner = d { assert(inner == some(5)) } else { assert(false) }\n}" },
+    .{ .name = "a generic parameter named like a declared type", .src = "struct Item { x: int = 0 }\nfn w<Item>(x: Item) -> Item? { some(x) }\ntest \"t\" {\n  let a: Item? = none\n  assert((a?.x ?? 1) == 1)\n  assert(w(5) == some(5))\n}" },
+    .{ .name = "a default wrapped into its optional field", .src = "enum Dir { north, south }\nstruct S { f: int? = 5, d: Dir? = .north, n: int? = none }\ntest \"t\" {\n  let s = S { }\n  assert(s.f == some(5))\n  assert(s.d == some(Dir.north))\n  assert(s.n == none)\n}" },
+    .{ .name = "a constant wrapped into its optional", .src = "const K: int? = 5\ntest \"t\" {\n  assert(K == some(5))\n}" },
+    .{ .name = "an optional chain continues past a plain access", .src = "struct Q { n: int = 0 }\nimpl Q {\n  fn twice(self) -> int { self.n * 2 }\n}\nstruct P { q: Q }\ntest \"t\" {\n  let o = some(P { q: Q { n: 4 } })\n  assert((o?.q.n ?? 0) == 4)\n  assert((o?.q.twice() ?? 0) == 8)\n  let z: P? = none\n  assert((z?.q.n ?? 7) == 7)\n}" },
+    .{ .name = "a named argument reaches a method through ?.", .src = "struct P { x: int = 0 }\nimpl P {\n  fn add(self, n: int) -> int { self.x + n }\n}\ntest \"t\" {\n  let o = some(P { x: 1 })\n  assert((o?.add(n: 2) ?? 0) == 3)\n}" },
+    .{ .name = "an awaited value wrapped into its optional", .src = "component Box { n: int = 0, m: int = 0 }\nasync fn five() -> int { 5 }\nasync fn six() -> int {\n  return 6\n}\nasync rule r(entity: Entity) when entity has Box {\n  let x: int? = await five()\n  if x == some(5) { entity.get_mut(Box).n = 1 }\n}\nasync rule q(entity: Entity) when entity has Box {\n  let y: int? = await six()\n  if y == some(6) { entity.get_mut(Box).m = 1 }\n}\ntest \"t\" {\n  let world = test_world()\n  let e = world.spawn_with([Box { }])\n  world.tick(3)\n  assert(e.get(Box).n == 1)\n  assert(e.get(Box).m == 1)\n}" },
+    .{ .name = "a resource string read through ?. outlives a later write", .src = "resource R { s: string = \"a\" }\ntest \"t\" {\n  get_mut(R).s = \"x{1}\"\n  let o = some(get(R))\n  let s = o?.s\n  get_mut(R).s = \"y{2}\"\n  assert(s == some(\"x1\"))\n}" },
+};
+
+test "an optional carries any payload, checked and run" {
+    try std.testing.expectEqual(@as(usize, 0), try failingRuns(&option_runs));
 }

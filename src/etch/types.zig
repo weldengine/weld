@@ -343,11 +343,10 @@ pub const ResolvedType = union(enum) {
     /// parameter name. Opaque within a generic body (operations are permissive,
     /// like `unknown`); resolved to a concrete type by inference at the call site.
     generic: StringId,
-    /// `T?` optional of a builtin-scalar payload. Non-builtin
-    /// payloads (`struct?` / `enum?`) are deferred — they resolve to `.unknown`
-    /// (the optional-ness is not tracked; permissive). `if let` / `while let`
-    /// unwrap this to the payload builtin.
-    optional: BuiltinType,
+    /// `T?`, of any payload. The payload lives in the checker: a builtin one in
+    /// `builtin_payloads`, a type node's in a slot `reserveOptionalSlots` made,
+    /// any other in `TypeChecker.payloads`.
+    optional: *const ResolvedType,
     /// The current test's World handle — the return type of
     /// `test_world()` (test bodies only). Receiver of `spawn_with`/`emit`/`tick`
     /// in `dispatchMethodOnType`. No payload (mono-world). Not field-storable.
@@ -377,7 +376,7 @@ pub const ResolvedType = union(enum) {
             .enum_t => |id| id == b.enum_t,
             .event_t => |id| id == b.event_t,
             .generic => |id| id == b.generic,
-            .optional => |bt| bt == b.optional,
+            .optional => |p| p.eql(b.optional.*),
             .test_world => true,
             .unit => true,
             .unknown => true,
@@ -395,6 +394,31 @@ pub const ResolvedType = union(enum) {
         };
     }
 };
+
+/// An optional type node of one arena, resolved inside a generic scope or
+/// outside any: a generic parameter can shadow a declared type's name.
+const OptionalNode = struct { arena: usize, node: u32, generic: bool };
+
+/// Each builtin as a `ResolvedType`, the payload of an optional of a builtin.
+const builtin_payloads = blk: {
+    const fields = @typeInfo(BuiltinType).@"enum".fields;
+    var table: [fields.len]ResolvedType = undefined;
+    for (fields, 0..) |f, i| table[i] = .{ .builtin = @enumFromInt(f.value) };
+    break :blk table;
+};
+
+/// How many optionals `t` nests.
+fn optionalDepth(t: ResolvedType) u8 {
+    var depth: u8 = 0;
+    var cur = t;
+    while (cur == .optional) : (depth += 1) cur = cur.optional.*;
+    return depth;
+}
+
+/// The optional of the builtin `b`.
+fn optionalOfBuiltin(b: BuiltinType) ResolvedType {
+    return .{ .optional = &builtin_payloads[@intFromEnum(b)] };
+}
 
 /// Symbol entry in the file-local symbol table built by pass 1.
 pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_, sequence_, anim_graph_, shader_, const_ };
@@ -562,6 +586,23 @@ pub const TypeChecker = struct {
     /// The `.variant` shorthands synthesized with no expected type that no enum,
     /// or several, name; reported once the file is checked.
     unresolved_shorthands: std.AutoArrayHashMapUnmanaged(u32, void) = .empty,
+    /// Set while `valueCompares` runs: the value is compared with the slot, not
+    /// stored in it, so it is never wrapped.
+    comparing: bool = false,
+    /// How many closure bodies are being typed for a call. A body is typed
+    /// again at each call, and runs as one: a value it fits must wrap the same
+    /// at every call, and a shorthand it holds must name the same enum.
+    closure_calls: u32 = 0,
+    /// Each value a closure body fits → how many times it wraps.
+    closure_wraps: std.AutoHashMapUnmanaged(u32, u8) = .empty,
+    /// Payloads of the optionals built at check time.
+    payloads: std.ArrayListUnmanaged(*ResolvedType) = .empty,
+    /// Each optional type node of the files this check reads → its payload's
+    /// slot, made by `reserveOptionalSlots` so a type node resolves without
+    /// allocating; `.unknown` until its node first resolves.
+    optional_slots: std.AutoHashMapUnmanaged(OptionalNode, *ResolvedType) = .empty,
+    optional_slot_store: []ResolvedType = &.{},
+    optional_slots_reserved: bool = false,
     /// The `await_expr` node that is the statement-head `await` of the statement
     /// currently being checked, or `NodeId.none`. Set at the top of
     /// `checkStmt` for the allowed positions (expr-stmt / `let` init / simple
@@ -810,6 +851,11 @@ pub const TypeChecker = struct {
         self.foreign_events.deinit(self.gpa);
         self.range_reported.deinit(self.gpa);
         self.unresolved_shorthands.deinit(self.gpa);
+        for (self.payloads.items) |p| self.gpa.destroy(p);
+        self.payloads.deinit(self.gpa);
+        self.optional_slots.deinit(self.gpa);
+        self.closure_wraps.deinit(self.gpa);
+        self.gpa.free(self.optional_slot_store);
         if (self.tag_table) |*t| t.deinit(self.gpa);
     }
 
@@ -976,11 +1022,12 @@ pub const TypeChecker = struct {
 
     /// The passes before the imports bind: the file's own symbols.
     fn collectDeclarations(self: *TypeChecker) !void {
-        // E1901 runs FIRST: it decides whether the file is even allowed to
-        // contain what it contains, and a `.d.etch` carrying a `rule` would
-        // otherwise produce a cascade of resolution errors on a body that had
-        // no business being parsed. Cheap either way — one walk of the item
-        // column, and an immediate return in `.standard` mode.
+        try self.reserveOptionalSlots();
+        // E1901 is the FIRST check: it decides whether the file is even
+        // allowed to contain what it contains, and a `.d.etch` carrying a
+        // `rule` would otherwise produce a cascade of resolution errors on a
+        // body that had no business being parsed. Cheap either way — one walk
+        // of the item column, and an immediate return in `.standard` mode.
         try self.checkDeclarationFileConstructs();
         try self.checkTypedExtension();
         try self.checkLiteralRanges();
@@ -1519,10 +1566,7 @@ pub const TypeChecker = struct {
                 const v = self.foreignType(a, mt.value);
                 return if (k == .builtin and v == .builtin) .{ .map_t = .{ .key = k.builtin, .value = v.builtin } } else .unknown;
             },
-            .optional => {
-                const payload = self.foreignType(a, @bitCast(a.typeNodeData(type_node)));
-                return if (payload == .builtin) .{ .optional = payload.builtin } else .unknown;
-            },
+            .optional => return self.internedOptional(a, type_node, self.foreignType(a, @bitCast(a.typeNodeData(type_node)))),
             else => return .unknown,
         }
     }
@@ -2327,7 +2371,7 @@ pub const TypeChecker = struct {
     /// unimplemented). The stage bodies are walked in SHADER MODE: a STRUCTURAL pass
     /// (§15.3) that flags the §15.2 GPU-incompatible CONSTRUCTS with the single
     /// representative E0400 ShaderModeViolation — it does NOT resolve symbols
-    /// (shader bodies reference undeclared GPU builtins; a synthExpr-based check
+    /// (shader bodies reference undeclared GPU builtins; a synthExprE-based check
     /// would false-positive E0102). E0420 ShaderRecursion (call-graph DFS) +
     /// E0421 NonShaderFnCalledFromShader (GPU-builtin table) are RESERVED — their
     /// emission is deferred. SPIR-V/MSL/DXIL emission is out of scope; eval of a
@@ -4679,14 +4723,12 @@ pub const TypeChecker = struct {
             // surface — fields stay scalar POD.
             const tspan = self.arena.typeNodeSpan(field.type_node);
             const field_type_name = self.arena.namedTypeName(field.type_node) orelse {
-                // One bounded exception: a `struct` field
-                // may be `Error?` — the builtin Error's `source` chaining field
-                // (part1 §10.2). General optional fields are unsupported.
+                // A struct field may be optional, of any payload (`Error.source:
+                // Error?`, part1 §10.2); a stored field's optional needs a slot
+                // kind the registry does not have.
                 if (origin == .struct_ and self.arena.typeNodeKind(field.type_node) == .optional) {
-                    const payload: NodeId = @bitCast(self.arena.typeNodeData(field.type_node));
-                    if (self.arena.namedTypeName(payload)) |pn| {
-                        if (pn == self.arena.error_type_name) continue;
-                    }
+                    if (!field.default_value.isNone()) try self.checkFieldDefault(field.default_value, field.type_node);
+                    continue;
                 }
                 // Resource collection fields: `T[]` (`.slice`),
                 // `[K: V]` (`.map_type`), `Set<T>` (`.set_type`) unlock on
@@ -4924,7 +4966,7 @@ pub const TypeChecker = struct {
                 try self.emit(.type_mismatch, .error_, span, "a string element must be a string literal", .{});
             },
             .builtin => |bt| {
-                const et = self.synthExpr(e, null);
+                const et = try self.synthExprE(e, null);
                 const fits = et == .builtin and try self.literalTypeFits(bt, e, et.builtin);
                 if (!fits) try self.emit(.type_mismatch, .error_, span, "collection element type does not match the declared element type", .{});
             },
@@ -4962,12 +5004,12 @@ pub const TypeChecker = struct {
     /// Validate a top-level `const` value: it must be const-evaluable
     /// (`E1101`) and its synthesized type must match the declared `: type`
     /// (`E0200`). Reuses the field-default const surface (`isConstEvaluable` +
-    /// `namedTypeToResolved` + `synthExpr` + `literalTypeFits`); the only
+    /// `namedTypeToResolved` + `synthExprE` + `literalTypeFits`); the only
     /// difference is the const-specific diagnostic wording.
     fn checkConstValue(self: *TypeChecker, value: NodeId, type_node: NodeId) !void {
         if (!try self.foldsAsConstant(value, "const value must be a constant expression (literal, arithmetic on literals, or parenthesized)")) return;
         const declared = self.namedTypeToResolved(type_node);
-        const actual = self.synthExpr(value, null);
+        const actual = try self.synthExprE(value, null);
         if (!try self.valueFits(declared, value, actual)) {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "const value type does not match the declared type", .{});
         }
@@ -4982,7 +5024,7 @@ pub const TypeChecker = struct {
             } else try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "an enum field default must be a variant of that enum", .{});
             return;
         }
-        const actual = self.synthExpr(value, null);
+        const actual = try self.synthExprE(value, null);
         if (!try self.valueFits(declared, value, actual)) {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "default value type does not match declared field type", .{});
         }
@@ -5048,7 +5090,7 @@ pub const TypeChecker = struct {
             if (f.default_value.isNone()) continue;
             const declared = self.namedTypeToResolved(f.type_node);
             if (declared != .builtin) continue;
-            const actual = self.synthExpr(f.default_value, null);
+            const actual = try self.synthExprE(f.default_value, null);
             if (actual == .builtin) _ = try self.literalTypeFits(declared.builtin, f.default_value, actual.builtin);
         }
     }
@@ -5060,7 +5102,7 @@ pub const TypeChecker = struct {
     /// folds `true`: the type check and the literal pass report those.
     fn foldsAsConstant(self: *TypeChecker, value: NodeId, not_constant: []const u8) !bool {
         switch (self.arena.exprKind(value)) {
-            .string_lit, .tag_path => return true,
+            .string_lit, .tag_path, .none_lit => return true,
             else => {},
         }
         _ = const_eval.fold(self.gpa, self.arena, value) catch |err| {
@@ -5160,16 +5202,49 @@ pub const TypeChecker = struct {
     /// Whether a value of type `actual` fits a slot of type `declared`. A
     /// generic fits anything: a struct's own type parameters resolve against the
     /// caller's.
-    fn valueFits(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) !bool {
-        if (declared == .enum_t) try self.fitShorthands(declared.enum_t, value);
-        if (!value.isNone() and self.arena.isEnumShorthand(value) and declared != .enum_t and declared != .unknown and declared != .generic) {
+    fn valueFits(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) TypeError!bool {
+        if (self.closure_calls == 0 or value.isNone() or self.comparing) return self.fitsValue(declared, value, actual);
+        _ = self.arena.implicit_wraps.remove(value.raw());
+        const fits = try self.fitsValue(declared, value, actual);
+        const layers = self.arena.implicit_wraps.get(value.raw()) orelse 0;
+        const earlier = try self.closure_wraps.getOrPut(self.gpa, value.raw());
+        if (!earlier.found_existing) {
+            earlier.value_ptr.* = layers;
+        } else if (earlier.value_ptr.* != layers) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "this closure wraps the value into an optional at one call and not at another; annotate its parameters", .{});
+        }
+        return fits;
+    }
+
+    fn fitsValue(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) TypeError!bool {
+        var target = declared;
+        while (target == .optional) target = target.optional.*;
+        if (target == .enum_t) try self.fitShorthands(target.enum_t, value);
+        if (!value.isNone() and self.arena.isEnumShorthand(value) and target != .unknown and target != .generic) {
+            if (target == .enum_t) return declared != .optional or try self.wrapsInto(value, optionalDepth(declared));
             _ = self.unresolved_shorthands.swapRemove(value.raw());
             try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "'.{s}' names an enum variant where no enum is expected", .{self.arena.strings.slice(self.arena.exprData(value))});
             return true;
         }
-        if (declared == .enum_t and !value.isNone() and self.arena.isEnumShorthand(value)) return true;
-        if (declared == .unknown or actual == .unknown or declared == .generic or actual == .generic) return true;
-        if (declared == .builtin and actual == .builtin) return self.literalTypeFits(declared.builtin, value, actual.builtin);
+        if (declared == .unknown or actual == .unknown or declared == .generic) return true;
+        // A `T` fits a `T?` by the implicit wrap (`etch-reference-part1.md` §3.6),
+        // which the interpreter applies to `value` once per layer. A generic
+        // counts no layer of its own, whatever it is bound to.
+        if (actual == .generic) {
+            if (declared != .optional or target != .generic or self.comparing) return true;
+            return self.wrapsInto(value, optionalDepth(declared));
+        }
+        if (optionalDepth(declared) > optionalDepth(actual)) {
+            var payload = declared;
+            var layers: u8 = 0;
+            while (optionalDepth(payload) > optionalDepth(actual)) : (layers += 1) payload = payload.optional.*;
+            if (!try self.valueFits(payload, value, actual)) return false;
+            return self.wrapsInto(value, layers);
+        }
+        if (declared == .builtin and actual == .builtin) {
+            if (value.isNone()) return declared.builtin == actual.builtin;
+            return self.literalTypeFits(declared.builtin, value, actual.builtin);
+        }
         if (declared == .builtin and declared.builtin == .vec3 and actual == .array_fixed)
             return actual.array_fixed.len == 3 and actual.array_fixed.elem.isNumeric();
         if ((declared == .builtin) != (actual == .builtin)) return false;
@@ -5178,9 +5253,25 @@ pub const TypeChecker = struct {
         return self.elementsFit(declared, value, actual);
     }
 
+    /// `valueFits` for a value a pattern or an operator compares with the slot.
+    fn valueCompares(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) TypeError!bool {
+        const saved = self.comparing;
+        self.comparing = true;
+        defer self.comparing = saved;
+        return self.valueFits(declared, value, actual);
+    }
+
+    /// Records that `value` is wrapped `layers` times into its slot's optional;
+    /// false when the slot compares it instead.
+    fn wrapsInto(self: *TypeChecker, value: NodeId, layers: u8) TypeError!bool {
+        if (self.comparing) return false;
+        if (!value.isNone()) try self.arena.implicit_wraps.put(self.gpa, value.raw(), layers);
+        return true;
+    }
+
     /// Two collections, optionals or ranges of one kind: the elements of a
     /// literal each by the literal rule, any other value by equal element types.
-    fn elementsFit(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) !bool {
+    fn elementsFit(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) TypeError!bool {
         const kind: ?ast_mod.ExprKind = if (value.isNone()) null else self.arena.exprKind(value);
         switch (declared) {
             .array_fixed, .array_dyn => {
@@ -5214,8 +5305,8 @@ pub const TypeChecker = struct {
                 return want.key == actual.map_t.key and want.value == actual.map_t.value;
             },
             .optional => |want| {
-                if (kind == .some_lit) return self.elementFits(want, @bitCast(self.arena.exprData(value)), actual.optional);
-                return want == actual.optional;
+                if (kind == .some_lit) return self.valueFits(want.*, @bitCast(self.arena.exprData(value)), actual.optional.*);
+                return self.valueFits(want.*, NodeId.none, actual.optional.*);
             },
             .range => |want| return want == actual.range,
             else => return true,
@@ -5289,8 +5380,11 @@ pub const TypeChecker = struct {
     const BreakFrame = struct {
         label: StringId,
         yields: bool,
-        value_t: ?ResolvedType = null,
+        values: std.ArrayListUnmanaged(Branch) = .empty,
     };
+
+    /// A value one branch of an `if`, a `match` or a loop's `break`s yields.
+    const Branch = struct { node: NodeId, t: ResolvedType, span: SourceSpan };
 
     const Declaration = struct { arena: *const AstArena, name: StringId };
 
@@ -5321,6 +5415,54 @@ pub const TypeChecker = struct {
     fn armsAgree(self: *TypeChecker, earlier: ResolvedType, body: NodeId, body_t: ResolvedType) !bool {
         if (earlier == .builtin and body_t == .builtin) return ResolvedType.eql(earlier, body_t);
         return self.valueFits(earlier, body, body_t);
+    }
+
+    /// Whether `value` yields `none` on every path.
+    fn yieldsNone(self: *TypeChecker, value: NodeId) bool {
+        if (value.isNone()) return false;
+        const data = self.arena.exprData(value);
+        switch (self.arena.exprKind(value)) {
+            .none_lit => return true,
+            .block_expr => return self.yieldsNone(self.arena.block_exprs.items[data].value),
+            .if_expr => {
+                const ife = self.arena.if_exprs.items[data];
+                return self.yieldsNone(ife.then_block) and self.yieldsNone(ife.else_branch);
+            },
+            .match_expr => {
+                const m = self.arena.match_exprs.items[data];
+                var i: u32 = 0;
+                while (i < m.arms_len) : (i += 1) {
+                    if (!self.yieldsNone(self.arena.match_arms.items[m.arms_start + i].body)) return false;
+                }
+                return m.arms_len != 0;
+            },
+            else => return false,
+        }
+    }
+
+    /// The type `branches` join to (`etch-reference-part1.md` §3.6): the first
+    /// value's, the optional of it that a later value is, and the optional of
+    /// it when a branch yields `none`.
+    fn joinBranches(self: *TypeChecker, branches: []const Branch) TypeError!ResolvedType {
+        var join: ?ResolvedType = null;
+        var none = false;
+        for (branches) |b| {
+            if (self.yieldsNone(b.node)) {
+                none = true;
+            } else if (join) |j| {
+                if (optionalDepth(b.t) > optionalDepth(j) and try self.valueFits(b.t, NodeId.none, j)) join = b.t;
+            } else join = b.t;
+        }
+        const t = join orelse return ResolvedType.unknown;
+        if (none and t != .optional and t != .unknown and t != .unit) return self.optionalOf(t);
+        return t;
+    }
+
+    /// Whether branch `b` fits the type its branches join to; `strict` applies
+    /// `armsAgree`.
+    fn branchFits(self: *TypeChecker, join: ResolvedType, b: Branch, strict: bool) TypeError!bool {
+        if (self.yieldsNone(b.node)) return true;
+        return if (strict) self.armsAgree(join, b.node, b.t) else self.valueFits(join, b.node, b.t);
     }
 
     fn isNominal(t: ResolvedType) bool {
@@ -5474,15 +5616,7 @@ pub const TypeChecker = struct {
                 if (elem != .builtin) return .unknown;
                 return .{ .set_t = elem.builtin };
             },
-            .optional => {
-                // `T?`. The payload type-node is stored as the
-                // type-node data. A builtin-scalar payload → `.optional(bt)`;
-                // a non-builtin payload (`struct?`/`enum?`) is deferred → `.unknown`.
-                const payload_node: NodeId = @bitCast(self.arena.typeNodeData(type_node));
-                const payload = self.namedTypeToResolved(payload_node);
-                if (payload != .builtin) return .unknown;
-                return .{ .optional = payload.builtin };
-            },
+            .optional => return self.internedOptional(self.arena, type_node, self.namedTypeToResolved(@bitCast(self.arena.typeNodeData(type_node)))),
             else => return .unknown,
         }
     }
@@ -5662,7 +5796,7 @@ pub const TypeChecker = struct {
         }
 
         if (!decl.value.isNone()) {
-            const vt = self.synthExpr(decl.value, &ctx);
+            const vt = try self.synthExprE(decl.value, &ctx);
             if (!decl.return_type.isNone() and !try self.valueFits(ret_t, decl.value, vt)) {
                 try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(decl.value), "method '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
             }
@@ -6291,7 +6425,7 @@ pub const TypeChecker = struct {
         // The trailing block value is the implicit return — check it against the
         // declared return type (E0200, consistent with the closure-call path).
         if (!decl.value.isNone()) {
-            const vt = self.synthExpr(decl.value, &ctx);
+            const vt = try self.synthExprE(decl.value, &ctx);
             if (!decl.return_type.isNone() and !try self.valueFits(ret_t, decl.value, vt)) {
                 try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(decl.value), "function '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
             }
@@ -6451,8 +6585,8 @@ pub const TypeChecker = struct {
             return;
         };
         if (!try self.foldsAsConstant(node.filter_value, "field filter value must be a constant expression")) return;
-        const actual = self.synthExpr(node.filter_value, null);
-        if (!try self.valueFits(declared, node.filter_value, actual)) {
+        const actual = try self.synthExprE(node.filter_value, null);
+        if (!try self.valueCompares(declared, node.filter_value, actual)) {
             try self.emit(.invalid_field_filter, .error_, node.span, "field filter type does not match field declared type", .{});
         }
     }
@@ -6463,15 +6597,16 @@ pub const TypeChecker = struct {
     /// expression` must name a field of `T` (`E1211 InvalidFieldFilter` else)
     /// and its value must fit that field's declared type (`E0200 TypeMismatch`
     /// else).
-    fn checkEventFieldRun(self: *TypeChecker, ev: ForeignEvent, start: u32, len: u32, ctx_opt: ?*RuleCtx) !void {
+    fn checkEventFieldRun(self: *TypeChecker, ev: ForeignEvent, start: u32, len: u32, compares: bool, ctx_opt: ?*RuleCtx) !void {
         const decl = ev.decl;
         var i: u32 = 0;
         while (i < len) : (i += 1) {
             const flit = self.arena.struct_lit_fields.items[start + i];
             const declared = self.fieldTypeIn(ev.arena, decl.fields_start, decl.fields_len, flit.name);
-            const actual = self.synthExpr(flit.value, ctx_opt);
+            const actual = try self.synthExprE(flit.value, ctx_opt);
             if (declared) |d| {
-                if (!try self.valueFits(d, flit.value, actual)) {
+                const fits = if (compares) try self.valueCompares(d, flit.value, actual) else try self.valueFits(d, flit.value, actual);
+                if (!fits) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "event field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
                 }
             } else {
@@ -6498,7 +6633,7 @@ pub const TypeChecker = struct {
                 .ambiguous => try self.emit(.ambiguous_event_entity_target, .error_, self.arena.exprSpan(await_id), "event '{s}' has multiple Entity fields — annotate the target field with '@entity_target'", .{self.arena.strings.slice(aw.event_type)}),
             }
         }
-        try self.checkEventFieldRun(ev, aw.filter_start, aw.filter_len, ctx_opt);
+        try self.checkEventFieldRun(ev, aw.filter_start, aw.filter_len, true, ctx_opt);
     }
 
     fn checkStmt(self: *TypeChecker, ctx: *RuleCtx, stmt_id: NodeId) !void {
@@ -6552,10 +6687,10 @@ pub const TypeChecker = struct {
                     if (declared != null and declared.? == .struct_t and self.arena.exprKind(let.value) == .struct_lit) {
                         const sl_data = self.arena.exprData(let.value);
                         if (self.arena.struct_lits.items[sl_data].type_name == 0) {
-                            break :blk self.checkStructLitAgainst(let.value, sl_data, declared.?.struct_t, ctx) catch ResolvedType.unknown;
+                            break :blk try self.checkStructLitAgainst(let.value, sl_data, declared.?.struct_t, ctx);
                         }
                     }
-                    break :blk self.synthHeadValue(let.value, ctx);
+                    break :blk try self.synthHeadValue(let.value, ctx);
                 };
                 const final = if (declared) |d| blk: {
                     const reported = self.diagnostics.items.len;
@@ -6591,8 +6726,9 @@ pub const TypeChecker = struct {
                             const span = self.arena.exprSpan(assign.target);
                             try self.emit(.type_mismatch, .error_, span, "cannot assign to immutable binding (use 'let mut')", .{});
                         }
-                        const rhs_type = self.synthHeadValue(assign.value, ctx);
-                        if (!try self.valueFits(local.type_, assign.value, rhs_type)) {
+                        const rhs_type = try self.synthHeadValue(assign.value, ctx);
+                        const fits = if (assign.op == .assign) try self.valueFits(local.type_, assign.value, rhs_type) else try self.valueCompares(local.type_, assign.value, rhs_type);
+                        if (!fits) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match binding type", .{});
                         }
                         // Compound assignment on strings (`s += t`) is not in
@@ -6617,9 +6753,10 @@ pub const TypeChecker = struct {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.target), "assignment target field must be accessed via entity.get_mut(T) or a mutable binding", .{});
                     }
                     // Synthesize the field type and check the value matches it.
-                    const lhs_type = self.synthExpr(assign.target, ctx);
-                    const rhs_type = self.synthExpr(assign.value, ctx);
-                    if (!try self.valueFits(lhs_type, assign.value, rhs_type)) {
+                    const lhs_type = try self.synthExprE(assign.target, ctx);
+                    const rhs_type = try self.synthExprE(assign.value, ctx);
+                    const fits = if (assign.op == .assign) try self.valueFits(lhs_type, assign.value, rhs_type) else try self.valueCompares(lhs_type, assign.value, rhs_type);
+                    if (!fits) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match field type", .{});
                     }
                 } else {
@@ -6630,19 +6767,19 @@ pub const TypeChecker = struct {
                 const expr_id: NodeId = @bitCast(data);
                 // A structural `spawn(...)` is statement-position only (§4.5, no
                 // body handle): check it here so the value-position refusal
-                // (E0304) in `synthExpr` does NOT fire on a legal statement use.
+                // (E0304) in `synthExprE` does NOT fire on a legal statement use.
                 // Every other expression types normally.
                 if (self.arena.exprKind(expr_id) == .spawn_struct) {
                     _ = try self.checkSpawnStruct(expr_id, self.arena.exprData(expr_id), ctx, false);
                 } else {
-                    _ = self.synthExpr(expr_id, ctx);
+                    _ = try self.synthExprE(expr_id, ctx);
                 }
             },
             .assert_stmt => {
                 // `assert(cond[, msg])` — the condition must be bool (v0.6
                 // foundations, `etch-reference-part1.md` §10.3).
                 const a = self.arena.assert_stmts.items[data];
-                const cond_t = self.synthExpr(a.cond, ctx);
+                const cond_t = try self.synthExprE(a.cond, ctx);
                 if (cond_t != .builtin or cond_t.builtin != .bool_) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(a.cond), "assert condition must be a bool expression", .{});
                 }
@@ -6652,7 +6789,7 @@ pub const TypeChecker = struct {
                 // variable binds to the range's integer element type, then the
                 // body is checked with it in scope.
                 const f = self.arena.for_stmts.items[data];
-                const iter_t = self.synthExpr(f.iterable, ctx);
+                const iter_t = try self.synthExprE(f.iterable, ctx);
                 // The loop variables share the body's scope.
                 try ctx.enter(self.gpa);
                 defer ctx.leave();
@@ -6714,7 +6851,7 @@ pub const TypeChecker = struct {
                 // `while let x = <optional> { body }` — `x`
                 // binds the optional's payload in the body scope each iteration.
                 const wh = self.arena.while_stmts.items[data];
-                const cond_t = self.synthExpr(wh.cond, ctx);
+                const cond_t = try self.synthExprE(wh.cond, ctx);
                 // The `while let` payload shares the body's scope.
                 try ctx.enter(self.gpa);
                 defer ctx.leave();
@@ -6738,13 +6875,11 @@ pub const TypeChecker = struct {
                 // `break [label] [value]`. Loop membership and label validity
                 // are permissive.
                 const b = self.arena.break_stmts.items[data];
-                const t: ResolvedType = if (b.value.isNone()) .unit else self.synthExpr(b.value, ctx);
+                const t: ResolvedType = if (b.value.isNone()) .unit else try self.synthExprE(b.value, ctx);
                 if (self.breakTarget(b.label)) |frame| {
                     if (frame.yields) {
-                        if (frame.value_t) |earlier| {
-                            const span = if (b.value.isNone()) self.arena.stmtSpan(stmt_id) else self.arena.exprSpan(b.value);
-                            if (!try self.armsAgree(earlier, b.value, t)) try self.emit(.type_mismatch, .error_, span, "break values of a loop must all have the same type", .{});
-                        } else frame.value_t = t;
+                        const span = if (b.value.isNone()) self.arena.stmtSpan(stmt_id) else self.arena.exprSpan(b.value);
+                        try frame.values.append(self.gpa, .{ .node = b.value, .t = t, .span = span });
                     }
                 }
                 // E0907: the break must not cross the enclosing
@@ -6768,7 +6903,7 @@ pub const TypeChecker = struct {
                     try self.emit(.illegal_statement_in_extension_hook, .error_, self.arena.stmtSpan(stmt_id), "'throw' outside a 'try' is illegal in an extension hook (on_attach / on_detach): a hook has no error channel", .{});
                 }
                 const t = self.arena.throw_stmts.items[data];
-                const vt = self.synthExpr(t.value, ctx);
+                const vt = try self.synthExprE(t.value, ctx);
                 const is_error = vt == .struct_t and vt.struct_t == self.arena.error_type_name;
                 if (!is_error and vt != .unknown) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(t.value), "thrown value must be the builtin 'Error' struct (part1 §10.2)", .{});
@@ -6826,7 +6961,7 @@ pub const TypeChecker = struct {
                 }
                 const value: NodeId = @bitCast(data);
                 if (!value.isNone()) {
-                    const vt = self.synthHeadValue(value, ctx);
+                    const vt = try self.synthHeadValue(value, ctx);
                     // The winner's value is parked in `AsyncTask.result` and
                     // re-raised at the race site several ticks later, after the
                     // rule arena has been reset — and `result` is a bare `Value`
@@ -6854,7 +6989,7 @@ pub const TypeChecker = struct {
                 if (self.eventNamed(em.event_type)) |ev| {
                     // Field-value validation is shared with the `entity_event` /
                     // `global_event` payload filter.
-                    try self.checkEventFieldRun(ev, em.fields_start, em.fields_len, ctx);
+                    try self.checkEventFieldRun(ev, em.fields_start, em.fields_len, false, ctx);
                 } else {
                     try self.emit(.undefined_symbol, .error_, self.arena.stmtSpan(stmt_id), "'{s}' is not a declared event", .{self.arena.strings.slice(em.event_type)});
                 }
@@ -6866,7 +7001,7 @@ pub const TypeChecker = struct {
                 // clears a single bit. Resolves only; the deferred structural mutation
                 // runs in the interpreter / codegen.
                 const tm = self.arena.tag_mutation_stmts.items[data];
-                const recv_t = self.synthExpr(tm.receiver, ctx);
+                const recv_t = try self.synthExprE(tm.receiver, ctx);
                 if (recv_t != .builtin or recv_t.builtin != .entity) {
                     const op_name = switch (tm.kind) {
                         .add => "add_tag",
@@ -6909,7 +7044,7 @@ pub const TypeChecker = struct {
                 while (i < range.branches_len) : (i += 1) {
                     const br = self.arena.concurrency_branches.items[range.branches_start + i];
                     if (!br.cond.isNone()) {
-                        const cond_t = self.synthExpr(br.cond, ctx);
+                        const cond_t = try self.synthExprE(br.cond, ctx);
                         if (!builtinWhere(cond_t, isBool)) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(br.cond), "conditional branch guard must be a bool expression", .{});
                         }
@@ -6957,7 +7092,7 @@ pub const TypeChecker = struct {
                 const ts = self.arena.timer_stmts.items[data];
                 // The duration argument is a full expression typed `Duration`
                 // (§9.10), evaluated once at scheduling time.
-                const arg_t = self.synthExpr(ts.arg, ctx);
+                const arg_t = try self.synthExprE(ts.arg, ctx);
                 if (arg_t != .unknown and !(arg_t == .builtin and arg_t.builtin == .duration)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ts.arg), "timer argument must be a Duration expression", .{});
                 }
@@ -7264,22 +7399,8 @@ pub const TypeChecker = struct {
         return switch (t) {
             .array_fixed, .array_dyn, .map_t, .set_t => true,
             .closure, .struct_t, .optional => true,
-            // AN UNRESOLVED TYPE IS REFUSED, and this is not symmetry with the
-            // arms above: it is the admission that safety cannot be ESTABLISHED.
-            // `.unknown` carries two meanings under one tag — the fallback after a
-            // diagnostic, and a DEFERRAL emitted with no diagnostic at all (the
-            // `.optional` and `.some_lit` arms return it for a non-builtin
-            // payload). So `Spec?` arrives here as `.unknown`, and reading the tag
-            // as "a diagnostic already fired" let a struct-payload optional escape
-            // into a capture with nothing said. The cost of that reading was a
-            // SIGABRT reachable from ordinary code.
-            //
-            // `.generic` joins it for the reason its own doc gives — "operations
-            // are permissive, like `unknown`" — and costs nothing: measured, it
-            // adds zero refusals to the corpus.
-            //
-            // The direction is `E0223`'s own: a false refusal is a compile error
-            // the author reads, a missed capture is an abort in production.
+            // `.unknown` also marks a deferral no diagnostic reported, and a
+            // `.generic` is as permissive, so neither can be shown safe.
             .unknown, .generic => true,
             .builtin => |b| b == .string_,
             else => false,
@@ -7413,21 +7534,17 @@ pub const TypeChecker = struct {
 
     const TypeError = std.mem.Allocator.Error;
 
-    fn synthExpr(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) ResolvedType {
-        return self.synthExprE(id, ctx_opt) catch ResolvedType.unknown;
-    }
-
     /// Synthesize a statement-head VALUE expression (`let` init / assignment RHS /
     /// `return` operand) with the correct suspendable context: the
     /// value is on the frame-driven spine ONLY if it IS this statement's head
     /// `await` (`let x = await f()`). Any other value (an `if`/`match`/`loop`/
     /// block, or an expression merely containing an `await`) is synchronous, so a
     /// statement-head `await` nested inside it is inexecutable → E0904.
-    fn synthHeadValue(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) ResolvedType {
+    fn synthHeadValue(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const saved = self.await_suspendable;
         self.await_suspendable = @as(u32, @bitCast(id)) == @as(u32, @bitCast(self.stmt_head_await));
         defer self.await_suspendable = saved;
-        return self.synthExpr(id, ctx_opt);
+        return self.synthExprE(id, ctx_opt);
     }
 
     fn synthExprE(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
@@ -7468,14 +7585,7 @@ pub const TypeChecker = struct {
             // `none`: an optional with an unknown payload —
             // typed by the binding annotation / context (e.g. `let o: int? = none`).
             .none_lit => return ResolvedType.unknown,
-            // `some(x)`: an optional of `x`'s type. Builtin-scalar payload →
-            // `.optional(bt)`; a non-builtin payload (`some(struct)`) is deferred.
-            .some_lit => {
-                const inner: NodeId = @bitCast(data);
-                const inner_t = try self.synthExprE(inner, ctx_opt);
-                if (inner_t == .builtin) return .{ .optional = inner_t.builtin };
-                return ResolvedType.unknown;
-            },
+            .some_lit => return self.optionalOf(try self.synthExprE(@bitCast(data), ctx_opt)),
             .ident => {
                 const name_id: StringId = data;
                 if (ctx_opt) |ctx| {
@@ -7538,14 +7648,20 @@ pub const TypeChecker = struct {
             },
             .field_access => {
                 const fa = self.arena.field_accesses.items[data];
-                // `recv?.field`: optional payloads are
-                // builtin scalars — they have no fields, so the
-                // chained field form has nothing to resolve against. The
-                // interpreter stays the reference for the op set delivered
-                // (`?.method`, `??`, `!`, patterns).
-                if (fa.opt_chain) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "optional-chained field access is not in the M0.8 minimal subset (scalar optional payloads have no fields)", .{});
-                    return ResolvedType.unknown;
+                // `recv?.field`, or a field read after one, is the field of the
+                // payload, optional; a field already optional stays `U?`
+                // (`etch-reference-part1.md` §6.6).
+                if (fa.opt_chain or self.arena.inOptionalChain(fa.receiver)) {
+                    const recv_t = try self.synthExprE(fa.receiver, ctx_opt);
+                    if (recv_t == .unknown) return ResolvedType.unknown;
+                    if (recv_t != .optional) {
+                        if (!fa.opt_chain) return self.lookupFieldType(recv_t, fa.field_name, self.arena.exprSpan(id));
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "optional chain '?.' requires an optional receiver", .{});
+                        return ResolvedType.unknown;
+                    }
+                    const field_t = try self.lookupFieldType(recv_t.optional.*, fa.field_name, self.arena.exprSpan(id));
+                    if (field_t == .optional) return field_t;
+                    return self.optionalOf(field_t);
                 }
                 // Enum value `Difficulty.hard`: a
                 // `.path` receiver naming a declared enum + a variant field.
@@ -7707,7 +7823,7 @@ pub const TypeChecker = struct {
             .block_expr => return try self.synthBlock(data, ctx_opt),
             .measure_expr => return try self.synthMeasure(id, data, ctx_opt),
             .if_expr => return try self.synthIf(id, data, ctx_opt),
-            // Reaching a structural spawn through `synthExpr` means it is being
+            // Reaching a structural spawn through `synthExprE` means it is being
             // used as a VALUE (let binding, field receiver, call argument) — the
             // v0.6 refusal (E0304): structural spawn is statement-position only,
             // no body handle (§4.5). `checkStmt` handles the legal statement
@@ -7753,7 +7869,7 @@ pub const TypeChecker = struct {
                         // The entity operand (evaluated once at suspension in the
                         // interpreter) must type `Entity` — reuse E0200 (
                         // this operand was never synthesized before).
-                        const et = self.synthExpr(aw.entity_expr, ctx_opt);
+                        const et = try self.synthExprE(aw.entity_expr, ctx_opt);
                         if (!(et == .builtin and et.builtin == .entity)) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(aw.entity_expr), "the first argument of entity_event(e, T) must be an Entity", .{});
                         }
@@ -7904,7 +8020,10 @@ pub const TypeChecker = struct {
                 _ = self.conc_labels.pop();
             };
             try self.break_frames.append(self.gpa, .{ .label = lp.label, .yields = true });
-            defer _ = self.break_frames.pop();
+            defer {
+                var frame = self.break_frames.pop().?;
+                frame.values.deinit(self.gpa);
+            }
             try ctx.enter(self.gpa);
             defer ctx.leave();
             var i: u32 = 0;
@@ -7912,14 +8031,19 @@ pub const TypeChecker = struct {
                 const stmt: NodeId = @bitCast(self.arena.extra.items[lp.body_start + i]);
                 try self.checkStmt(ctx, stmt);
             }
-            return self.break_frames.getLast().value_t orelse ResolvedType.unknown;
+            const values = self.break_frames.getLast().values.items;
+            const join = try self.joinBranches(values);
+            for (values) |v| {
+                if (!try self.branchFits(join, v, true)) try self.emit(.type_mismatch, .error_, v.span, "break values of a loop must all have the same type", .{});
+            }
+            return join;
         }
         var i: u32 = 0;
         while (i < lp.body_len) : (i += 1) {
             const stmt: NodeId = @bitCast(self.arena.extra.items[lp.body_start + i]);
             if (self.arena.stmtKind(stmt) == .break_stmt) {
                 const b = self.arena.break_stmts.items[self.arena.stmtData(stmt)];
-                return if (b.value.isNone()) ResolvedType.unit else self.synthExpr(b.value, ctx_opt);
+                return if (b.value.isNone()) ResolvedType.unit else try self.synthExprE(b.value, ctx_opt);
             }
         }
         return ResolvedType.unknown;
@@ -8012,22 +8136,27 @@ pub const TypeChecker = struct {
                 break :blk try self.synthBodyIn(ife.then_block, ctx);
             } else try self.synthExprE(ife.then_block, null);
             if (ife.else_branch.isNone()) return ResolvedType.unit;
-            const else_t = try self.synthExprE(ife.else_branch, ctx_opt);
-            if (!try self.valueFits(then_t, ife.else_branch, else_t)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "if branches must yield the same type", .{});
-            }
-            return then_t;
+            return self.joinIf(id, ife, then_t, try self.synthExprE(ife.else_branch, ctx_opt));
         }
         if (!builtinWhere(cond_t, isBool)) {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ife.cond), "if condition must be a bool expression", .{});
         }
         const then_t = try self.synthExprE(ife.then_block, ctx_opt);
         if (ife.else_branch.isNone()) return ResolvedType.unit;
-        const else_t = try self.synthExprE(ife.else_branch, ctx_opt);
-        if (!try self.valueFits(then_t, ife.else_branch, else_t)) {
-            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "if branches must yield the same type", .{});
+        return self.joinIf(id, ife, then_t, try self.synthExprE(ife.else_branch, ctx_opt));
+    }
+
+    fn joinIf(self: *TypeChecker, id: NodeId, ife: ast_mod.IfExpr, then_t: ResolvedType, else_t: ResolvedType) TypeError!ResolvedType {
+        const span = self.arena.exprSpan(id);
+        const branches = [_]Branch{ .{ .node = ife.then_block, .t = then_t, .span = span }, .{ .node = ife.else_branch, .t = else_t, .span = span } };
+        const join = try self.joinBranches(&branches);
+        for (branches) |b| {
+            if (!try self.branchFits(join, b, false)) {
+                try self.emit(.type_mismatch, .error_, span, "if branches must yield the same type", .{});
+                break;
+            }
         }
-        return then_t;
+        return join;
     }
 
     /// The payload type unwrapped by `if let` / `while let`.
@@ -8036,7 +8165,7 @@ pub const TypeChecker = struct {
     /// non-optional scrutinee is an error.
     fn optionalPayload(self: *TypeChecker, cond_t: ResolvedType, span: SourceSpan, comptime form: []const u8) TypeError!ResolvedType {
         return switch (cond_t) {
-            .optional => |bt| .{ .builtin = bt },
+            .optional => |p| p.*,
             .unknown => ResolvedType.unknown,
             else => blk: {
                 try self.emit(.type_mismatch, .error_, span, "'" ++ form ++ "' requires an optional (T?) value", .{});
@@ -8291,6 +8420,8 @@ pub const TypeChecker = struct {
             self.conc_labels_base = saved_labels;
             self.break_base = saved_break_base;
         }
+        self.closure_calls += 1;
+        defer self.closure_calls -= 1;
         return try self.synthBodyIn(ce.body, ctx);
     }
 
@@ -8424,7 +8555,7 @@ pub const TypeChecker = struct {
             const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, pnames[i]) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
             try self.unifyGeneric(f, p.type_node, arg_t, &subst, self.arena.exprSpan(arg));
-            if (!try self.valueFits(self.substituteGeneric(f, p.type_node, &unbound), arg, arg_t)) {
+            if (!try self.valueFits(try self.substituteGeneric(f, p.type_node, &unbound), arg, arg_t)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{name});
             }
         }
@@ -8441,7 +8572,7 @@ pub const TypeChecker = struct {
         }
 
         if (decl.return_type.isNone()) return ResolvedType.unknown;
-        return self.substituteGeneric(f, decl.return_type, &subst);
+        return try self.substituteGeneric(f, decl.return_type, &subst);
     }
 
     /// `true` if `name`, a name of `f.arena`, is a generic parameter of `f`.
@@ -8480,6 +8611,12 @@ pub const TypeChecker = struct {
                 };
                 if (elem) |ea| try self.unifyGeneric(f, at.elem, ea, subst, span);
             },
+            // A `T` argument fits a `T?` formal by the implicit wrap
+            // (`etch-reference-part1.md` §3.6).
+            .optional => {
+                const payload: NodeId = @bitCast(f.arena.typeNodeData(formal));
+                try self.unifyGeneric(f, payload, if (actual == .optional) actual.optional.* else actual, subst, span);
+            },
             else => {}, // generic_type / map / set — not inferred
         }
     }
@@ -8488,7 +8625,7 @@ pub const TypeChecker = struct {
     /// param `T` → its inferred type (or `.generic` if still
     /// unbound); `T[]` → a dynamic array of the substituted element; otherwise
     /// the ordinary resolution.
-    fn substituteGeneric(self: *TypeChecker, f: FnRef, node: NodeId, subst: *const std.AutoHashMapUnmanaged(StringId, ResolvedType)) ResolvedType {
+    fn substituteGeneric(self: *TypeChecker, f: FnRef, node: NodeId, subst: *const std.AutoHashMapUnmanaged(StringId, ResolvedType)) TypeError!ResolvedType {
         switch (f.arena.typeNodeKind(node)) {
             .named => {
                 const name = f.arena.namedTypeName(node).?;
@@ -8499,10 +8636,11 @@ pub const TypeChecker = struct {
             },
             .slice => {
                 const at = f.arena.array_types.items[f.arena.typeNodeData(node)];
-                const e = self.substituteGeneric(f, at.elem, subst);
+                const e = try self.substituteGeneric(f, at.elem, subst);
                 if (e == .builtin) return .{ .array_dyn = e.builtin };
                 return ResolvedType.unknown;
             },
+            .optional => return self.optionalOf(try self.substituteGeneric(f, @bitCast(f.arena.typeNodeData(node)), subst)),
             else => return self.typeIn(f.arena, node),
         }
     }
@@ -8556,12 +8694,77 @@ pub const TypeChecker = struct {
         const variant: StringId = self.arena.exprData(value);
         _ = self.unresolved_shorthands.swapRemove(value.raw());
         if (self.enumVariantIndex(enum_name, variant) != null) {
-            try self.arena.enum_shorthands.put(self.gpa, value.raw(), enum_name);
+            const earlier = try self.arena.enum_shorthands.fetchPut(self.gpa, value.raw(), enum_name);
+            if (self.closure_calls != 0 and earlier != null and earlier.?.value != enum_name) {
+                try self.emit(.ambiguous_enum_variant, .error_, self.arena.exprSpan(value), "this closure reads '.{s}' as a variant of another enum at each call; write it qualified", .{self.arena.strings.slice(variant)});
+            }
             return .{ .enum_t = enum_name };
         }
         _ = self.arena.enum_shorthands.remove(value.raw());
         try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(enum_name), self.arena.strings.slice(variant) });
         return ResolvedType.unknown;
+    }
+
+    /// Two slots per optional type node of this file and of every project file,
+    /// the arenas `typeIn` can read a type node from.
+    fn reserveOptionalSlots(self: *TypeChecker) !void {
+        if (self.optional_slots_reserved) return;
+        var arenas: std.ArrayListUnmanaged(*const AstArena) = .empty;
+        defer arenas.deinit(self.gpa);
+        try arenas.append(self.gpa, self.arena);
+        if (self.project) |proj| {
+            for (proj.arenas) |*a| {
+                if (a != self.arena) try arenas.append(self.gpa, a);
+            }
+        }
+        var count: usize = 0;
+        for (arenas.items) |a| {
+            for (a.type_nodes.items(.kind)) |k| {
+                if (k == .optional) count += 2;
+            }
+        }
+        const store = try self.gpa.alloc(ResolvedType, count);
+        errdefer self.gpa.free(store);
+        try self.optional_slots.ensureTotalCapacity(self.gpa, @intCast(count));
+        var next: usize = 0;
+        for (arenas.items) |a| {
+            for (a.type_nodes.items(.kind), 0..) |k, i| {
+                if (k != .optional) continue;
+                for ([_]bool{ false, true }) |generic| {
+                    store[next] = .unknown;
+                    self.optional_slots.putAssumeCapacity(.{ .arena = @intFromPtr(a), .node = @intCast(i), .generic = generic }, &store[next]);
+                    next += 1;
+                }
+            }
+        }
+        self.optional_slot_store = store;
+        self.optional_slots_reserved = true;
+    }
+
+    /// The optional of `payload` resolved from the type node `node` of `a`: its
+    /// reserved slot, so no allocation.
+    fn internedOptional(self: *TypeChecker, a: *const AstArena, node: NodeId, payload: ResolvedType) ResolvedType {
+        if (payload == .unknown) return .unknown;
+        if (payload == .builtin) return optionalOfBuiltin(payload.builtin);
+        const key: OptionalNode = .{ .arena = @intFromPtr(a), .node = node.index, .generic = self.generic_scope.count() != 0 };
+        const slot = self.optional_slots.get(key) orelse unreachable;
+        if (slot.* == .unknown) {
+            slot.* = payload;
+        } else {
+            std.debug.assert(slot.eql(payload));
+        }
+        return .{ .optional = slot };
+    }
+
+    /// The optional of `payload`, built at check time.
+    fn optionalOf(self: *TypeChecker, payload: ResolvedType) TypeError!ResolvedType {
+        if (payload == .unknown) return .unknown;
+        if (payload == .builtin) return optionalOfBuiltin(payload.builtin);
+        try self.payloads.ensureUnusedCapacity(self.gpa, 1);
+        const p = try self.gpa.create(ResolvedType);
+        p.* = payload;
+        self.payloads.appendAssumeCapacity(p);
+        return .{ .optional = p };
     }
 
     /// A `.variant` shorthand with no expected type (`etch-resolver-types.md`
@@ -8605,6 +8808,7 @@ pub const TypeChecker = struct {
             .tag_path => if (self.arena.isEnumShorthand(value)) {
                 _ = try self.checkEnumShorthand(value, enum_name);
             },
+            .some_lit => try self.fitShorthands(enum_name, @bitCast(self.arena.exprData(value))),
             .block_expr => try self.fitShorthands(enum_name, self.arena.block_exprs.items[self.arena.exprData(value)].value),
             .if_expr => {
                 const ife = self.arena.if_exprs.items[self.arena.exprData(value)];
@@ -8838,29 +9042,33 @@ pub const TypeChecker = struct {
         }
 
         const raw_t = try self.synthExprE(mc.receiver, ctx_opt);
+        const chained = mc.opt_chain or (raw_t == .optional and self.arena.inOptionalChain(mc.receiver));
+        const dispatch_t = if (chained and raw_t == .optional) raw_t.optional.* else raw_t;
 
         // Named arguments bind against DECLARED signatures: struct methods
         // route through `checkMethodArgs` below;
         // every builtin-method route (string / collections / ECS access)
         // is positional-only — reject up front rather than silently
         // ignoring the labels.
-        if (mc.names_start != ast_mod.no_arg_names and raw_t != .struct_t and raw_t != .unknown) {
+        if (mc.names_start != ast_mod.no_arg_names and dispatch_t != .struct_t and dispatch_t != .unknown) {
             try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "named arguments require a declared fn or method callee (M0.8 bound)", .{});
             return ResolvedType.unknown;
         }
 
-        // `recv?.method(args)` — optional chain (part1 §6.6):
-        // the method dispatches against the payload type and the
+        // `recv?.method(args)`, or a method called after one — optional chain
+        // (part1 §6.6): the method dispatches against the payload type and the
         // result re-wraps in an optional (`none` short-circuits at runtime).
-        if (mc.opt_chain) {
+        if (chained) {
             if (raw_t == .unknown) return ResolvedType.unknown;
             if (raw_t != .optional) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "optional chain '?.' requires an optional receiver", .{});
                 return ResolvedType.unknown;
             }
-            const res = try self.dispatchMethodOnType(id, mc, .{ .builtin = raw_t.optional }, ctx_opt);
-            if (res == .builtin) return .{ .optional = res.builtin };
-            return ResolvedType.unknown;
+            // `?.` flattens (`etch-reference-part1.md` §6): an optional result
+            // stays `U?`.
+            const res = try self.dispatchMethodOnType(id, mc, raw_t.optional.*, ctx_opt);
+            if (res == .optional) return res;
+            return self.optionalOf(res);
         }
         return try self.dispatchMethodOnType(id, mc, raw_t, ctx_opt);
     }
@@ -8924,7 +9132,7 @@ pub const TypeChecker = struct {
 
     /// type-check a structural `spawn(...)` node (`etch-grammar.md`
     /// §3.2 / §4.5). The spawn is statement-position only (no body handle, v0.6):
-    /// `value_position` is `true` when reached through `synthExpr` (a value use:
+    /// `value_position` is `true` when reached through `synthExprE` (a value use:
     /// `let e = spawn(…)`, `spawn(…).field`, `spawn(…)` as an argument) → E0304;
     /// `checkStmt` passes `false` for the legal `expr_stmt` position. The
     /// prefab-name form is recognized but refused (E0305, gated on the prefab
@@ -9029,7 +9237,7 @@ pub const TypeChecker = struct {
             try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(arg), "'{s}' is not a declared event", .{self.arena.strings.slice(sl.type_name)});
             return;
         };
-        try self.checkEventFieldRun(ev, sl.fields_start, sl.fields_len, ctx_opt);
+        try self.checkEventFieldRun(ev, sl.fields_start, sl.fields_len, false, ctx_opt);
     }
 
     /// validate a type name used in a structural mutation
@@ -9115,7 +9323,7 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method 'pop' takes no arguments", .{});
                 }
                 try self.checkMutCollectionReceiver(mc, ctx_opt);
-                return .{ .optional = recv_t.array_dyn };
+                return optionalOfBuiltin(recv_t.array_dyn);
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method '{s}' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
             return ResolvedType.unknown;
@@ -9245,7 +9453,7 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "tick takes exactly one count 'tick(n)'", .{});
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
-                    const t = self.synthExpr(arg, ctx_opt);
+                    const t = try self.synthExprE(arg, ctx_opt);
                     if (!builtinWhere(t, BuiltinType.isInteger)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "tick(n) requires an integer tick count", .{});
                     }
@@ -9525,7 +9733,7 @@ pub const TypeChecker = struct {
                 if (!try self.valueFits(.{ .builtin = mi.key }, ix.index, idx_t)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "map index key type does not match the map key type", .{});
                 }
-                return .{ .optional = mi.value };
+                return optionalOfBuiltin(mi.value);
             },
             .unknown => return ResolvedType.unknown,
             else => {
@@ -9543,7 +9751,8 @@ pub const TypeChecker = struct {
         const m = self.arena.match_exprs.items[data];
         const scrut_t = try self.synthExprE(m.scrutinee, ctx_opt);
 
-        var result_t: ?ResolvedType = null;
+        var arms: std.ArrayListUnmanaged(Branch) = .empty;
+        defer arms.deinit(self.gpa);
         var has_catch_all = false;
         var saw_true = false;
         var saw_false = false;
@@ -9578,7 +9787,7 @@ pub const TypeChecker = struct {
                 .literal => {
                     const lit: NodeId = @bitCast(arm.pattern_payload);
                     const lit_t = try self.synthExprE(lit, ctx_opt);
-                    if (!try self.valueFits(scrut_t, lit, lit_t)) {
+                    if (!try self.valueCompares(scrut_t, lit, lit_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(lit), "match pattern literal type does not match the scrutinee type", .{});
                     }
                     if (scrut_t == .builtin and scrut_t.builtin == .bool_ and self.arena.exprKind(lit) == .bool_lit) {
@@ -9610,7 +9819,7 @@ pub const TypeChecker = struct {
                     if (scrut_t == .optional) {
                         saw_some = true;
                         if (ctx_opt) |ctx| {
-                            try self.bindLocal(ctx, arm.pattern_payload, .{ .type_ = .{ .builtin = scrut_t.optional }, .is_mut = false }, self.arena.exprSpan(arm.body));
+                            try self.bindLocal(ctx, arm.pattern_payload, .{ .type_ = scrut_t.optional.*, .is_mut = false }, self.arena.exprSpan(arm.body));
                         }
                     } else if (scrut_t != .unknown) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "some(...) pattern used on a non-optional scrutinee", .{});
@@ -9624,12 +9833,11 @@ pub const TypeChecker = struct {
                     }
                 },
             }
-            const body_t = try self.synthBodyIn(arm.body, ctx_opt);
-            if (result_t == null) {
-                result_t = body_t;
-            } else if (!try self.armsAgree(result_t.?, arm.body, body_t)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "match arms must all yield the same type", .{});
-            }
+            try arms.append(self.gpa, .{ .node = arm.body, .t = try self.synthBodyIn(arm.body, ctx_opt), .span = self.arena.exprSpan(arm.body) });
+        }
+        const result_t = try self.joinBranches(arms.items);
+        for (arms.items) |b| {
+            if (!try self.branchFits(result_t, b, true)) try self.emit(.type_mismatch, .error_, b.span, "match arms must all yield the same type", .{});
         }
 
         if (!has_catch_all) {
@@ -9649,7 +9857,7 @@ pub const TypeChecker = struct {
             }
         }
 
-        return result_t orelse ResolvedType.unknown;
+        return result_t;
     }
 
     fn synthBinary(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
@@ -9710,10 +9918,10 @@ pub const TypeChecker = struct {
                 // the default must fit the payload type; the result is the
                 // unwrapped payload.
                 if (lhs_t == .optional) {
-                    if (!try self.valueFits(.{ .builtin = lhs_t.optional }, bin.rhs, rhs_t)) {
+                    if (!try self.valueFits(lhs_t.optional.*, bin.rhs, rhs_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(bin.rhs), "'??' default type does not match the optional payload type", .{});
                     }
-                    return .{ .builtin = lhs_t.optional };
+                    return lhs_t.optional.*;
                 }
                 if (lhs_t == .unknown) return rhs_t;
                 try self.emit(.type_mismatch, .error_, span, "'??' requires an optional left operand", .{});
@@ -9763,7 +9971,7 @@ pub const TypeChecker = struct {
     fn isEqType(t: ResolvedType) bool {
         return switch (t) {
             .builtin => |b| b.isEq(),
-            .optional => |b| b.isEq(),
+            .optional => |p| isEqType(p.*),
             .enum_t => true,
             else => false,
         };
@@ -9790,7 +9998,7 @@ pub const TypeChecker = struct {
             },
             .force_unwrap => {
                 // `expr!` ≡ `expr.unwrap()` — panic if none (stdlib §16.2).
-                if (operand_t == .optional) return .{ .builtin = operand_t.optional };
+                if (operand_t == .optional) return operand_t.optional.*;
                 if (operand_t == .unknown) return ResolvedType.unknown;
                 try self.emit(.type_mismatch, .error_, span, "'!' force unwrap requires an optional operand", .{});
                 return ResolvedType.unknown;
@@ -9845,7 +10053,19 @@ pub const TypeChecker = struct {
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on event '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
-            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .optional, .test_world, .unit, .unknown => return ResolvedType.unknown,
+            .optional => {
+                try self.emit(.type_mismatch, .error_, span, "a field of an optional's payload is read through '?.' or after unwrapping", .{});
+                return ResolvedType.unknown;
+            },
+            // `Vec3` and `Color` carry their components, which no table lists.
+            .builtin => |b| switch (b) {
+                .vec3, .color => return ResolvedType.unknown,
+                else => {
+                    try self.emit(.type_mismatch, .error_, span, "a value of type '{t}' has no field '{s}'", .{ b, self.arena.strings.slice(field_name) });
+                    return ResolvedType.unknown;
+                },
+            },
+            .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .test_world, .unit, .unknown => return ResolvedType.unknown,
         }
     }
 
@@ -12588,7 +12808,7 @@ test "type-checker rejects misused Optional ops" {
     defer partial.deinit(gpa);
     try expectAnyCode(partial.diagnostics.items, .non_exhaustive_match);
 
-    // `?.field` is out of the subset (scalar payloads have no fields).
+    // `?.field` reads a field of the payload, and a string has none.
     var chain_field = try parseAndCheck(gpa,
         \\rule r(entity: Entity) {
         \\  let s: string? = none
@@ -14986,16 +15206,8 @@ test "escape_false_refusal: the conservative rule also refuses two SAFE captures
     try expectAnyCode(literal.diagnostics.items, .rule_arena_value_escapes);
 }
 
-test "an optional whose payload is not a builtin is still refused" {
+test "an optional of a struct captured across a suspension is refused" {
     const gpa = std.testing.allocator;
-
-    // `.optional` with a NON-BUILTIN payload resolves to `.unknown` — the
-    // `.optional` arm and the `.some_lit` arm both defer, with no diagnostic —
-    // so before the conservative refusal this capture type-checked ENTIRELY
-    // CLEAN, zero diagnostics of any kind, while the optional store is reset at
-    // the rule-body boundary. The cost was a SIGABRT reachable from ordinary
-    // code, which is why an unresolved type is now refused rather than named an
-    // accepted adjacent case.
     var v = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\struct Spec { hp: int }
@@ -17099,6 +17311,84 @@ test "a .variant shorthand resolves against the expected type, else against the 
     const gpa = std.testing.allocator;
     var wrong: usize = 0;
     for (shorthand_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const option_refused = [_]UnitCase{
+    .{ .name = "an int is no optional struct", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let o: P? = 5\n}" },
+    .{ .name = "an int is no optional array", .code = .type_mismatch, .src = "rule r() {\n  let o: int[]? = 5\n}" },
+    .{ .name = "a ?? default of another type than the payload", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let v = some(P { x: 1 }) ?? 0\n}" },
+    .{ .name = "a field of an optional read without unwrapping", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let o = some(P { x: 1 })\n  let v = o.x\n}" },
+    .{ .name = "a missing field reached through ?.", .code = .invalid_field_filter, .src = "struct P { x: int = 0 }\nrule r() {\n  let o = some(P { x: 1 })\n  let v = o?.nope\n}" },
+    .{ .name = "an optional struct has no equality", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let o = some(P { x: 1 })\n  let b = o == none\n}" },
+    .{ .name = "an int passed for an optional struct", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn f(o: P?) -> int { 1 }\nrule r() {\n  let n = f(1)\n}" },
+    .{ .name = "some of a bool is no optional int", .code = .type_mismatch, .src = "rule r() {\n  let o: int? = some(true)\n}" },
+    .{ .name = "a literal pattern against an optional", .code = .type_mismatch, .src = "rule r() {\n  let o: int? = some(1)\n  let v = match o { 1 => 1, _ => 0 }\n}" },
+    .{ .name = "a compound assignment to an optional", .code = .type_mismatch, .src = "rule r() {\n  let mut o: int? = none\n  o += 1\n}" },
+    .{ .name = "a compound assignment to an optional field", .code = .type_mismatch, .src = "struct S { o: int? = none }\nrule r() {\n  let mut s = S { }\n  s.o += 1\n}" },
+    .{ .name = "an if joining none and a value is no bare value", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let n: int = if c { 5 } else { none }\n}" },
+    .{ .name = "a match joining none and a value is no bare value", .code = .type_mismatch, .src = "rule r() {\n  let n: int = match 1 { 1 => 5, _ => none }\n}" },
+    .{ .name = "a closure wrapping a value at one call only", .code = .type_mismatch, .src = "rule r() {\n  let f = |x| {\n    let y: int? = x\n    y\n  }\n  let a = f(1)\n  let o: int? = some(2)\n  let b = f(o)\n}" },
+    .{ .name = "a closure's shorthand naming another enum at each call", .code = .ambiguous_enum_variant, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let f = |x| x == .north\n  let a = f(Dir.south)\n  let b = f(Pole.south)\n}" },
+    .{ .name = "a loop breaking none and a value is no bare value", .code = .type_mismatch, .src = "rule r() {\n  let mut i = 0\n  let n: int = loop {\n    if i > 0 {\n      break none\n    }\n    i += 1\n    break 5\n  }\n}" },
+};
+
+test "an allocation failure while typing an optional is an error, never an accepted program" {
+    var backing = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer backing.deinit();
+    const src = "struct P { x: int = 0 }\nrule r() {\n  let n: int = some(P { x: 1 })\n}";
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        var pr = try parser_mod.parse(backing.allocator(), src);
+        var failing: @import("weld_core").testing.alloc_counting.OneShotFailing = .{ .backing = backing.allocator(), .fail_at = index };
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        if (TypeChecker.check(failing.allocator(), &pr.ast, &diags)) {
+            try std.testing.expect(!failing.failed);
+            try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+            try std.testing.expectEqual(DiagnosticCode.type_mismatch, diags.items[0].code);
+            break;
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+}
+
+test "a scene's scope resolves an optional of a declared type" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa, "enum Dir { north, south }\naudio_graph G {\n  params {\n    d: Dir? = none\n  }\n  output(wave_player(\"a.wav\"))\n}");
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var prefabs: std.StringHashMapUnmanaged(void) = .empty;
+    var uuids: std.StringHashMapUnmanaged(void) = .empty;
+    var module_index: std.StringHashMapUnmanaged(usize) = .empty;
+    const project: TypeChecker.ProjectContext = .{
+        .prefabs = &prefabs,
+        .uuids = &uuids,
+        .module_index = &module_index,
+        .exports = &.{},
+        .arenas = &.{},
+    };
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    var scope = try TypeChecker.cookScope(gpa, &pr.ast, &project, &diags);
+    defer scope.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+test "an optional of any payload refuses what does not fit it" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (option_refused) |c| {
         var r = try parseAndCheck(gpa, c.src);
         defer r.deinit(gpa);
         try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);

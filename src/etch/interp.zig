@@ -1081,6 +1081,8 @@ const CallFrame = struct {
     scope: *Locals,
     value_expr: ?NodeId = null,
     ret: RetTarget,
+    /// How many times the await site wraps `f`'s value into an optional.
+    wraps: u8 = 0,
 };
 
 /// A suspendable task — the dynamic-pool replacement for the per-rule
@@ -3237,7 +3239,7 @@ pub const Interpreter = struct {
     /// and push a `call` frame carrying `ret` (where `f`'s return value lands). `f`
     /// then runs as frames on this task; its own `await` suspends the whole task.
     /// A direct call to a SYNC fn/method, or an unresolved callee, fails loud.
-    fn beginAsyncCall(self: *Interpreter, world: *World, task: *AsyncTask, scope: *Locals, cursor: *u32, call_expr: NodeId, ret: RetTarget) StmtError!StepAction {
+    fn beginAsyncCall(self: *Interpreter, world: *World, task: *AsyncTask, scope: *Locals, cursor: *u32, call_expr: NodeId, ret: RetTarget, wraps: u8) StmtError!StepAction {
         const new_scope = try self.gpa.create(Locals);
         new_scope.* = .{};
         errdefer {
@@ -3294,6 +3296,7 @@ pub const Interpreter = struct {
             .scope = new_scope,
             .value_expr = if (fndecl.value.isNone()) null else fndecl.value,
             .ret = ret,
+            .wraps = wraps,
         } });
         return .pushed;
     }
@@ -3536,8 +3539,10 @@ pub const Interpreter = struct {
                         // caller's await site.
                         const val = cf.value_expr;
                         const ret = cf.ret;
+                        const wraps = cf.wraps;
                         var rv: Value = .{ .unit = {} };
                         if (val) |v| rv = try self.evalExpr(world, scope, v);
+                        rv = try self.wrapped(rv, wraps);
                         self.popFrame(task);
                         switch (ret) {
                             .return_ => {
@@ -3583,7 +3588,7 @@ pub const Interpreter = struct {
                     // evaluate it to a `TaskHandle` and join.
                     const ak = self.ast.exprKind(aw.arg_expr);
                     if (ak == .fn_call or ak == .method_call) {
-                        return try self.beginAsyncCall(world, task, scope, cursor, aw.arg_expr, site.ret);
+                        return try self.beginAsyncCall(world, task, scope, cursor, aw.arg_expr, site.ret, self.ast.implicit_wraps.get(site.await_id.raw()) orelse 0);
                     }
                     const hv = try self.evalExpr(world, scope, aw.arg_expr);
                     if (hv != .task_handle) return error.RuntimeFailure;
@@ -3962,8 +3967,9 @@ pub const Interpreter = struct {
                     self.return_value = .{ .unit = {} };
                     return false;
                 }
-                const ret = task.frames.items[task.frames.items.len - 1].call.ret;
-                const v = self.return_value;
+                const top = task.frames.items[task.frames.items.len - 1].call;
+                const ret = top.ret;
+                const v = try self.wrapped(self.return_value, top.wraps);
                 self.popFrame(task);
                 switch (ret) {
                     .return_ => self.return_value = v, // enclosing fn returns `v` too → loop
@@ -5360,14 +5366,31 @@ pub const Interpreter = struct {
     /// The value of the top-level `const` `name` names, `null` when none does.
     fn constValue(self: *Interpreter, name: StringId) StmtError!?Value {
         const decl = self.consts.get(name) orelse return null;
-        return switch (self.ast.exprKind(decl.value)) {
-            .string_lit => Value{ .string_id = self.ast.exprData(decl.value) },
-            .tag_path => self.enumShorthandOf(decl.type_node, decl.value) orelse error.RuntimeFailure,
-            else => evalConst(self.gpa, self.ast, decl.value) catch |err| switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                else => error.RuntimeFailure,
+        return try self.constantOf(decl.type_node, decl.value);
+    }
+
+    /// The constant expression `value` a slot of type `type_node` holds,
+    /// wrapped into its optional as the checker recorded.
+    fn constantOf(self: *Interpreter, type_node: NodeId, value: NodeId) StmtError!Value {
+        const v: Value = switch (self.ast.exprKind(value)) {
+            .string_lit => .{ .string_id = self.ast.exprData(value) },
+            .tag_path => blk: {
+                const ename = self.ast.shorthandEnum(value) orelse break :blk self.enumShorthandOf(type_node, value) orelse return error.RuntimeFailure;
+                const edecl = self.enum_decls.get(ename) orelse return error.RuntimeFailure;
+                const vidx = self.enumVariantIndexOf(edecl, self.ast.exprData(value)) orelse return error.RuntimeFailure;
+                break :blk .{ .enum_value = .{ .type_name = ename, .variant = vidx } };
+            },
+            .none_lit => blk: {
+                const handle: u32 = @intCast(self.optionals.items.len);
+                try self.optionals.append(self.gpa, null);
+                break :blk .{ .optional = handle };
+            },
+            else => evalConst(self.gpa, self.ast, value) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.RuntimeFailure,
             },
         };
+        return self.wrapped(v, self.ast.implicit_wraps.get(value.raw()) orelse 0);
     }
 
     /// Resolve an enum assignment RHS against a known enum type id. A bare
@@ -5402,16 +5425,7 @@ pub const Interpreter = struct {
         // A struct-typed field has no agreed default: the resolver requires it
         // provided (E0208).
         if (self.structFieldTypeName(f) != null) return error.RuntimeFailure;
-        if (!f.default_value.isNone()) {
-            return switch (self.ast.exprKind(f.default_value)) {
-                .string_lit => Value{ .string_id = self.ast.exprData(f.default_value) },
-                .tag_path => self.enumFieldShorthand(f, f.default_value) orelse error.RuntimeFailure,
-                else => evalConst(self.gpa, self.ast, f.default_value) catch |err| switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    else => error.RuntimeFailure,
-                },
-            };
-        }
+        if (!f.default_value.isNone()) return self.constantOf(f.type_node, f.default_value);
         if (self.ast.typeNodeKind(f.type_node) == .optional) {
             const handle: u32 = @intCast(self.optionals.items.len);
             try self.optionals.append(self.gpa, null);
@@ -6395,6 +6409,24 @@ pub const Interpreter = struct {
         return block;
     }
 
+    /// The field `name` of `recv`.
+    fn fieldOf(self: *Interpreter, world: *World, recv: Value, name: StringId, id: NodeId) StmtError!Value {
+        const field_name = self.ast.strings.slice(name);
+        switch (recv) {
+            .component_ref => |cref| return Bridge.readComponentField(&world.registry, cref, world, field_name) catch |e|
+                self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
+            .resource_ref => |rref| return Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
+                self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
+            .struct_ref => |handle| {
+                for (self.structs.list.items[handle].fields.items) |f| {
+                    if (f.name == name) return f.value;
+                }
+                return error.RuntimeFailure;
+            },
+            else => return error.RuntimeFailure,
+        }
+    }
+
     /// Runtime value equality: two strings compare by bytes, whatever their
     /// tags; two optionals by what they hold; anything else by `Value.eql`,
     /// which compares a `.string_id` by pool id and never matches a
@@ -6524,7 +6556,20 @@ pub const Interpreter = struct {
             .fn_call, .method_call => {},
             else => try self.retainArena(v),
         }
-        return v;
+        if (self.ast.implicit_wraps.count() == 0) return v;
+        return self.wrapped(v, self.ast.implicit_wraps.get(id.raw()) orelse 0);
+    }
+
+    /// `v` wrapped `layers` times into an optional.
+    fn wrapped(self: *Interpreter, v: Value, layers: u8) StmtError!Value {
+        var out = v;
+        var i: u8 = 0;
+        while (i < layers) : (i += 1) {
+            const oh: u32 = @intCast(self.optionals.items.len);
+            try self.optionals.append(self.gpa, out);
+            out = .{ .optional = oh };
+        }
+        return out;
     }
 
     fn evalExprValue(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!Value {
@@ -6623,21 +6668,21 @@ pub const Interpreter = struct {
                     }
                 }
                 const recv = try self.evalExpr(world, locals, fa.receiver);
-                const field_name = self.ast.strings.slice(fa.field_name);
-                switch (recv) {
-                    .component_ref => |cref| return Bridge.readComponentField(&world.registry, cref, world, field_name) catch |e|
-                        self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
-                    .resource_ref => |rref| return Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
-                        self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
-                    // Struct field read — `self.x` / `v.x`.
-                    .struct_ref => |handle| {
-                        for (self.structs.list.items[handle].fields.items) |f| {
-                            if (f.name == fa.field_name) return f.value;
-                        }
-                        return error.RuntimeFailure;
-                    },
-                    else => return error.RuntimeFailure,
+                // `recv?.field`, or a field read after one: `none`, or the
+                // payload's field, optional.
+                if (fa.opt_chain or (recv == .optional and self.ast.inOptionalChain(fa.receiver))) {
+                    if (recv != .optional) return error.RuntimeFailure;
+                    const payload = self.optionals.items[recv.optional] orelse {
+                        const oh: u32 = @intCast(self.optionals.items.len);
+                        try self.optionals.append(self.gpa, null);
+                        return Value{ .optional = oh };
+                    };
+                    const field = try self.fieldOf(world, payload, fa.field_name, id);
+                    if (field == .optional) return field;
+                    try self.retainArena(field);
+                    return self.wrapped(field, 1);
                 }
+                return self.fieldOf(world, recv, fa.field_name, id);
             },
             .method_get, .method_get_mut => {
                 const mg = self.ast.method_gets.items[data];
@@ -7078,11 +7123,11 @@ pub const Interpreter = struct {
                     }
                 }
                 const recv = try self.evalExpr(world, locals, mc.receiver);
-                // `recv?.method(args)` — optional chain (part1
+                // `recv?.method(args)`, or a method called after one (part1
                 // §6.6): `none` short-circuits to a fresh `none` without
                 // dispatching; `some(p)` dispatches on the payload and
                 // re-wraps the result in an optional.
-                if (mc.opt_chain) {
+                if (mc.opt_chain or (recv == .optional and self.ast.inOptionalChain(mc.receiver))) {
                     if (recv != .optional) return error.RuntimeFailure;
                     const payload = self.optionals.items[recv.optional] orelse {
                         const oh: u32 = @intCast(self.optionals.items.len);
@@ -7090,9 +7135,8 @@ pub const Interpreter = struct {
                         return Value{ .optional = oh };
                     };
                     const res = try self.dispatchMethodOnValue(world, locals, mc, payload);
-                    const oh: u32 = @intCast(self.optionals.items.len);
-                    try self.optionals.append(self.gpa, res);
-                    return Value{ .optional = oh };
+                    if (res == .optional) return res;
+                    return self.wrapped(res, 1);
                 }
                 return try self.dispatchMethodOnValue(world, locals, mc, recv);
             },

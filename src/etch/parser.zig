@@ -1238,7 +1238,7 @@ pub const Parser = struct {
         // type beginning with `[` is always a map type — array / slice are the
         // postfix `T[...]` form handled below.
         if (self.peek() == .lbracket) {
-            return try self.parseMapTypeSugar();
+            return try self.parseOptionalSuffix(try self.parseMapTypeSugar());
         }
         var base = try self.parseBaseType();
         // Postfix `T[N]` (fixed) / `T[]` (dynamic slice) array types
@@ -1256,16 +1256,18 @@ pub const Parser = struct {
                 .byte_end = closing.span.byte_end,
             });
         }
-        // Optional suffix `T?` (`etch-grammar.md` §267).
-        if (self.peek() == .question) {
-            const q = try self.advance();
-            const base_span = self.arena.typeNodeSpan(base);
-            base = try self.arena.addOptionalType(self.gpa, base, .{
-                .byte_start = base_span.byte_start,
-                .byte_end = q.span.byte_end,
-            });
-        }
-        return base;
+        return try self.parseOptionalSuffix(base);
+    }
+
+    /// `base`, or `base?` (`etch-grammar.md` §267).
+    fn parseOptionalSuffix(self: *Parser, base: NodeId) ParseError!NodeId {
+        if (self.peek() != .question) return base;
+        const q = try self.advance();
+        const base_span = self.arena.typeNodeSpan(base);
+        return try self.arena.addOptionalType(self.gpa, base, .{
+            .byte_start = base_span.byte_start,
+            .byte_end = q.span.byte_end,
+        });
     }
 
     /// Parse a base type: a primitive / engine / user type identifier, with

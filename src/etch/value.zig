@@ -215,7 +215,7 @@ pub const Value = union(enum) {
             .set_persistent => false, // as with set_ref
             .closure => false,
             .struct_ref => false,
-            .optional => false, // optional equality is unexercised (unwrap via if/while let)
+            .optional => false, // a handle into the interpreter's store; `Interpreter.valueEql` compares the payloads
             .enum_value => |a| a.type_name == other.enum_value.type_name and a.variant == other.enum_value.variant,
             .string_persistent, .string_view => unreachable,
             // Handle equality is not an Etch v0.6 operation (no `==` on

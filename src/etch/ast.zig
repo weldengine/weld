@@ -885,8 +885,7 @@ pub const FieldAccessExpr = struct {
     receiver: NodeId,
     field_name: StringId,
     /// `recv?.field`: short-circuits to `none` when the
-    /// receiver is `none`. Out of the accepted subset (scalar optional payloads
-    /// have no fields) — parsed so the resolver rejects it with a pointer.
+    /// receiver is `none`.
     opt_chain: bool = false,
 };
 
@@ -2600,6 +2599,9 @@ pub const AstArena = struct {
     tag_path_literals: std.AutoHashMapUnmanaged(u32, void) = .empty,
     /// Each `.variant` shorthand the checker resolved → the enum it names.
     enum_shorthands: std.AutoHashMapUnmanaged(u32, StringId) = .empty,
+    /// The expressions whose value the checker found wrapped into an optional
+    /// (`etch-reference-part1.md` §3.6) → how many times.
+    implicit_wraps: std.AutoHashMapUnmanaged(u32, u8) = .empty,
     tag_filters: std.ArrayListUnmanaged(TagFilter) = .empty,
     tag_operands: std.ArrayListUnmanaged(NodeId) = .empty,
     tag_mutation_stmts: std.ArrayListUnmanaged(TagMutationStmt) = .empty,
@@ -2844,6 +2846,7 @@ pub const AstArena = struct {
         self.tag_path_segs.deinit(gpa);
         self.tag_path_literals.deinit(gpa);
         self.enum_shorthands.deinit(gpa);
+        self.implicit_wraps.deinit(gpa);
         self.tag_filters.deinit(gpa);
         self.tag_operands.deinit(gpa);
         self.tag_mutation_stmts.deinit(gpa);
@@ -3784,6 +3787,28 @@ pub const AstArena = struct {
     /// The enum the checker resolved the shorthand `id` to.
     pub fn shorthandEnum(self: *const AstArena, id: NodeId) ?StringId {
         return self.enum_shorthands.get(id.raw());
+    }
+
+    /// Whether `id` is an access of an optional chain: a `?.` link, or a `.`
+    /// read after one, which the chain's `none` skips too
+    /// (`etch-reference-part1.md` §6.6).
+    pub fn inOptionalChain(self: *const AstArena, id: NodeId) bool {
+        var cur = id;
+        while (true) {
+            switch (self.exprKind(cur)) {
+                .field_access => {
+                    const fa = self.field_accesses.items[self.exprData(cur)];
+                    if (fa.opt_chain) return true;
+                    cur = fa.receiver;
+                },
+                .method_call => {
+                    const mc = self.method_calls.items[self.exprData(cur)];
+                    if (mc.opt_chain) return true;
+                    cur = mc.receiver;
+                },
+                else => return false,
+            }
+        }
     }
 
     pub fn addTryCatchStmt(self: *AstArena, gpa: std.mem.Allocator, tc: TryCatchStmt, span: SourceSpan) !NodeId {
