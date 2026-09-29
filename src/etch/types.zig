@@ -1231,9 +1231,10 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// E0858 (`etch-grammar.md` §21.2): a typed file holds exactly one construct
-    /// of its type and imports, and a `scene` or `prefab` lives only in its own
-    /// typed file.
+    /// E0858 (`etch-grammar.md` §21.2, `etch-style-guide.md` §8): a typed file
+    /// holds exactly one construct of its type and imports, a `scene` or
+    /// `prefab` lives only in its own typed file, and a world manifest's scene
+    /// holds no entity.
     fn checkTypedExtension(self: *TypeChecker) !void {
         const ext = self.arena.typed_extension;
         if (ext == .unknown) return;
@@ -1245,6 +1246,7 @@ pub const TypeChecker = struct {
         };
         const main_name: []const u8 = if (ext == .prefab) "prefab" else "scene";
         const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
         var mains: u32 = 0;
         for (kinds, 0..) |k, i| {
             if (i >= self.arena.builtin_items_from) break;
@@ -1263,12 +1265,26 @@ pub const TypeChecker = struct {
             if (main != null and k == main.?) {
                 mains += 1;
                 if (mains > 1) try self.emit(.typed_extension_mismatch, .error_, span, "a .{s}.etch file holds exactly one {s}", .{ @tagName(ext), main_name });
+                if (ext == .manifest) try self.refuseManifestPopulation(self.arena.scene_decls.items[datas[i]]);
                 continue;
             }
             try self.emit(.typed_extension_mismatch, .error_, span, "'{s}' is not allowed in a .{s}.etch file, which holds one {s} and its imports", .{ @tagName(k), @tagName(ext), main_name });
         }
         if (ext != .plain and mains == 0)
             try self.emit(.typed_extension_mismatch, .error_, .{ .byte_start = 0, .byte_end = 0 }, "a .{s}.etch file holds exactly one {s}", .{ @tagName(ext), main_name });
+    }
+
+    /// E0858 for each entity or instance of a world manifest's scene.
+    fn refuseManifestPopulation(self: *TypeChecker, decl: ast_mod.SceneDecl) !void {
+        var c: u32 = 0;
+        while (c < decl.children_len) : (c += 1) {
+            const child = self.arena.scene_children.items[decl.children_start + c];
+            const name: StringId, const span: SourceSpan = switch (child.kind) {
+                .entity => .{ self.arena.scene_entities.items[child.index].name, self.arena.scene_entities.items[child.index].span },
+                .instance => .{ self.arena.scene_instances.items[child.index].instance_name, self.arena.scene_instances.items[child.index].span },
+            };
+            try self.emit(.typed_extension_mismatch, .error_, span, "{s} '{s}' is not allowed in a .manifest.etch file, whose scene holds resources and no entity", .{ @tagName(child.kind), self.arena.strings.slice(name) });
+        }
     }
 
     /// Index every `service` this check can see. With a

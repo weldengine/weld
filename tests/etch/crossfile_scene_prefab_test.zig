@@ -224,14 +224,28 @@ test "no E0858 on a layer file holding one scene and its imports" {
     }));
 }
 
-test "no E0858 on a manifest file holding one scene and its imports" {
-    try std.testing.expectEqual(@as(usize, 0), try e0858Count(&.{
-        .{ .name = "src/settings.etch", .source = "resource Clock { hz: int = 60 }\ncomponent Marker { id: int = 0 }" },
-        .{ .name = "src/village.manifest.etch", .source =
-        \\import settings { Clock, Marker }
-        \\scene "Village" { resources { Clock { hz: 30 } } entity "e" { Marker { id: 1 } } }
-        },
-    }));
+const settings: etch.ProjectFile = .{ .name = "src/settings.etch", .source = "resource Clock { hz: int = 60 }\ncomponent Marker { id: int = 0 }" };
+const torch: etch.ProjectFile = .{ .name = "src/torch.prefab.etch", .source = "import settings { Marker }\nprefab \"Torch\" { entity \"t\" { Marker { id: 1 } } }" };
+
+const PopulationCase = struct { name: []const u8, file: etch.ProjectFile, e0858: usize };
+const population_cases = [_]PopulationCase{
+    .{ .name = "manifest scene holding an entity", .e0858 = 1, .file = .{ .name = "src/village.manifest.etch", .source = "import settings { Clock, Marker }\nscene \"Village\" { resources { Clock { hz: 30 } } entity \"e\" { Marker { id: 1 } } }" } },
+    .{ .name = "manifest scene holding an instance", .e0858 = 1, .file = .{ .name = "src/village.manifest.etch", .source = "import settings { Clock, Marker }\nscene \"Village\" { resources { Clock { hz: 30 } } instance of \"Torch\" \"t1\" { Marker { id: 2 } } }" } },
+    .{ .name = "manifest scene holding two entities", .e0858 = 2, .file = .{ .name = "src/village.manifest.etch", .source = "import settings { Marker }\nscene \"Village\" { entity \"a\" { Marker { id: 1 } } entity \"b\" { Marker { id: 2 } } }" } },
+    .{ .name = "manifest scene holding resources alone", .e0858 = 0, .file = .{ .name = "src/village.manifest.etch", .source = "import settings { Clock }\nscene \"Village\" { resources { Clock { hz: 30 } } }" } },
+    .{ .name = "layer scene holding an entity", .e0858 = 0, .file = .{ .name = "src/gameplay.layer.etch", .source = "import settings { Clock, Marker }\nscene \"Gameplay\" { resources { Clock { hz: 30 } } entity \"e\" { Marker { id: 1 } } }" } },
+};
+
+test "E0858 on each entity or instance a manifest's scene holds" {
+    var wrong: usize = 0;
+    for (population_cases) |c| {
+        const n = try e0858Count(&.{ settings, torch, c.file });
+        if (n != c.e0858) {
+            wrong += 1;
+            std.debug.print("{s}: {d} E0858, expected {d}\n", .{ c.name, n, c.e0858 });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
 }
 
 test "no E1780 on a manifest file whose scene holds resources alone" {

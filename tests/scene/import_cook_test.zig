@@ -690,6 +690,18 @@ test "a manifest file holding a scene of resources cooks as a scene file does" {
     try std.testing.expectEqualSlices(u8, reference, manifest);
 }
 
+test "a manifest file whose scene holds an entity refuses the cook, as E0858 refuses it" {
+    const files = [_]ProjectFile{
+        .{ .name = "src/game.etch", .source = game },
+        .{ .name = "src/village.manifest.etch", .source =
+        \\import game { Health }
+        \\scene "Village" { entity "npc" { uuid: "00000000-0000-0000-0000-000000000002" Health { max: 40 } } }
+        },
+    };
+    try expectCheckReports(&files, .typed_extension_mismatch);
+    try std.testing.expectError(error.TypedExtensionMismatch, scene_cook.cookSceneInProject(std.testing.allocator, &files, 1, null, null));
+}
+
 test "a layer file beside a scene does not refuse the scene's cook" {
     const gpa = std.testing.allocator;
     const files = [_]ProjectFile{
