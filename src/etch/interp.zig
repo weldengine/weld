@@ -4527,14 +4527,20 @@ pub const Interpreter = struct {
     ) StmtError!Value {
         if (mc.args_len != spec.params.len) return error.RuntimeFailure;
 
+        // Evaluated in source order, then bound to the parameters by label.
+        const values = try self.gpa.alloc(Value, mc.args_len);
+        defer self.gpa.free(values);
+        var j: u32 = 0;
+        while (j < mc.args_len) : (j += 1) {
+            values[j] = try self.evalExpr(world, locals, @bitCast(self.ast.extra.items[mc.args_start + j]));
+        }
         var args: std.ArrayListUnmanaged(services_mod.Arg) = .empty;
         defer args.deinit(self.gpa);
         try args.ensureTotalCapacity(self.gpa, spec.params.len);
-        var i: u32 = 0;
-        while (i < mc.args_len) : (i += 1) {
-            const arg_id: NodeId = @bitCast(self.ast.extra.items[mc.args_start + i]);
-            const v = try self.evalExpr(world, locals, arg_id);
-            args.appendAssumeCapacity(try self.valueToArg(v, spec.params[i].type));
+        for (spec.params, 0..) |param, i| {
+            const name = self.ast.strings.find(param.name) orelse 0;
+            const idx = self.ast.callArgIndexForParam(mc.args_start, mc.args_len, mc.names_start, @intCast(i), name) orelse return error.RuntimeFailure;
+            args.appendAssumeCapacity(try self.valueToArg(values[idx], param.type));
         }
 
         const ret = spec.call(entry.ctx, args.items) catch |err| {
@@ -4549,11 +4555,7 @@ pub const Interpreter = struct {
     fn valueToArg(self: *Interpreter, v: Value, want: services_mod.TypeRef) StmtError!services_mod.Arg {
         return switch (want) {
             .int_ => if (v == .int_) services_mod.Arg{ .int_ = v.int_ } else error.RuntimeFailure,
-            .float_ => switch (v) {
-                .float_ => |f| services_mod.Arg{ .float_ = f },
-                .int_ => |n| services_mod.Arg{ .float_ = @floatFromInt(n) },
-                else => error.RuntimeFailure,
-            },
+            .float_ => if (v == .float_) services_mod.Arg{ .float_ = v.float_ } else error.RuntimeFailure,
             .bool_ => if (v == .bool_) services_mod.Arg{ .bool_ = v.bool_ } else error.RuntimeFailure,
             .string_ => services_mod.Arg{ .string_ = self.stringBytes(v) orelse return error.RuntimeFailure },
             .entity_ => if (v == .entity_id) services_mod.Arg{ .entity_ = v.entity_id } else error.RuntimeFailure,

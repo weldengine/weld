@@ -1283,10 +1283,9 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Resolve `svc.method(args)` against a declared `service`.
-    /// Names and arity only — this gate owns the RESOLUTION; the runtime
-    /// dispatch lives in the interpreter, and the argument-type confrontation needs the foreign
-    /// arena's type nodes, bounded below.
+    /// Resolve `svc.method(args)` against a declared `service`: the method by
+    /// name, then the arguments' arity, labels and types against its parameters,
+    /// which live in the declaring arena.
     fn checkServiceCall(
         self: *TypeChecker,
         id: NodeId,
@@ -1309,11 +1308,12 @@ pub const TypeChecker = struct {
         }
 
         // Arguments are synthesised whatever the outcome, so an error inside an
-        // argument is reported even when the method name is wrong — the same
-        // discipline `checkMethodArgs` follows.
+        // argument is reported even when the method name is wrong.
+        var arg_types: std.ArrayListUnmanaged(ResolvedType) = .empty;
+        defer arg_types.deinit(self.gpa);
         var ai: u32 = 0;
         while (ai < mc.args_len) : (ai += 1) {
-            _ = try self.synthExprE(@bitCast(self.arena.extra.items[mc.args_start + ai]), ctx_opt);
+            try arg_types.append(self.gpa, try self.synthExprE(@bitCast(self.arena.extra.items[mc.args_start + ai]), ctx_opt));
         }
 
         const method = found orelse {
@@ -1340,6 +1340,27 @@ pub const TypeChecker = struct {
                 .{ svc_slice, method_slice, method.params_len, mc.args_len },
             );
             return ResolvedType.unknown;
+        }
+
+        // A parameter name the caller never wrote is interned nowhere in its
+        // pool, and `0` is a name no label carries.
+        var pnames: std.ArrayListUnmanaged(StringId) = .empty;
+        defer pnames.deinit(self.gpa);
+        var pi: u32 = 0;
+        while (pi < method.params_len) : (pi += 1) {
+            const p = svc.arena.fn_params.items[method.params_start + pi];
+            try pnames.append(self.gpa, self.arena.strings.find(svc.arena.strings.slice(p.name)) orelse 0);
+        }
+        if (try self.checkCallBinding(id, mc.args_start, mc.args_len, mc.names_start, pnames.items, "service method", mc.method_name)) {
+            pi = 0;
+            while (pi < method.params_len) : (pi += 1) {
+                const idx = self.arena.callArgIndexForParam(mc.args_start, mc.args_len, mc.names_start, pi, pnames.items[pi]) orelse continue;
+                const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start + idx]);
+                const ptype = self.foreignFieldType(svc.arena, svc.arena.fn_params.items[method.params_start + pi].type_node);
+                if (!try self.valueFits(ptype, arg, arg_types.items[idx])) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of service method '{s}.{s}'", .{ svc_slice, method_slice });
+                }
+            }
         }
 
         return self.foreignReturnType(svc.arena, method);
@@ -15642,4 +15663,69 @@ test "a scene resource field of its type is accepted" {
         for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
         try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
     }
+}
+
+const service_decl =
+    \\service svc {
+    \\  fn echo(n: int) -> int
+    \\  fn half(x: float) -> float
+    \\  fn pair(a: int, b: string) -> int
+    \\}
+;
+
+const ServiceArgCase = struct { name: []const u8, call: []const u8, code: DiagnosticCode = .type_mismatch };
+
+const service_args_refused = [_]ServiceArgCase{
+    .{ .name = "bool into an int parameter", .call = "let v = svc.echo(true)", .code = .type_mismatch },
+    .{ .name = "string into an int parameter", .call = "let v = svc.echo(\"x\")", .code = .type_mismatch },
+    .{ .name = "struct into an int parameter", .call = "let v = svc.echo(P { x: 1 })", .code = .type_mismatch },
+    .{ .name = "int literal into a float parameter", .call = "let v = svc.half(2)", .code = .type_mismatch },
+    .{ .name = "int into a string parameter", .call = "let v = svc.pair(1, 2)", .code = .type_mismatch },
+    .{ .name = "reordered labels of the wrong types", .call = "let v = svc.pair(b: 1, a: \"x\")", .code = .type_mismatch },
+    .{ .name = "a label the method does not declare", .call = "let v = svc.echo(zzz: 5)", .code = .arg_count_mismatch },
+    .{ .name = "a label already bound positionally", .call = "let v = svc.pair(1, a: 2)", .code = .arg_count_mismatch },
+};
+
+const service_args_accepted = [_]ServiceArgCase{
+    .{ .name = "int into an int parameter", .call = "let v = svc.echo(5)" },
+    .{ .name = "float into a float parameter", .call = "let v = svc.half(2.5)" },
+    .{ .name = "each argument of its type", .call = "let v = svc.pair(1, \"x\")" },
+    .{ .name = "reordered labels", .call = "let v = svc.pair(b: \"x\", a: 1)" },
+    .{ .name = "a label", .call = "let v = svc.echo(n: 5)" },
+};
+
+fn serviceCaller(gpa: std.mem.Allocator, call: []const u8) ![]u8 {
+    return std.mem.concat(gpa, u8, &.{ "struct P { x: int = 0 }\nrule r() {\n  ", call, "\n}\n" });
+}
+
+test "a service argument of the wrong type or label is refused" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (service_args_refused) |c| {
+        const src = try serviceCaller(gpa, c.call);
+        defer gpa.free(src);
+        var out = try checkServiceProject(gpa, service_decl, src);
+        defer out.deinit(gpa);
+        if (countMessage(out.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "a service argument of its parameter's type and label is accepted" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (service_args_accepted) |c| {
+        const src = try serviceCaller(gpa, c.call);
+        defer gpa.free(src);
+        var out = try checkServiceProject(gpa, service_decl, src);
+        defer out.deinit(gpa);
+        if (out.diagnostics.items.len != 0) {
+            wrong += 1;
+            for (out.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
 }
