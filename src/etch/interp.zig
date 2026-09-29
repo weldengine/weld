@@ -6395,13 +6395,47 @@ pub const Interpreter = struct {
     }
 
     /// Runtime value equality: two strings compare by bytes, whatever their
-    /// tags; anything else by `Value.eql`, which compares a `.string_id` by pool
-    /// id and never matches a `.string_run`.
+    /// tags; two optionals by what they hold; anything else by `Value.eql`,
+    /// which compares a `.string_id` by pool id and never matches a
+    /// `.string_run`.
     fn valueEql(self: *const Interpreter, a: Value, b: Value) bool {
         const ab = self.stringBytes(a);
         const bb = self.stringBytes(b);
         if (ab != null and bb != null) return std.mem.eql(u8, ab.?, bb.?);
+        if (a == .optional and b == .optional) {
+            const pa = self.optionals.items[a.optional] orelse return self.optionals.items[b.optional] == null;
+            const pb = self.optionals.items[b.optional] orelse return false;
+            return self.valueEql(pa, pb);
+        }
         return a.eql(b);
+    }
+
+    /// `==` at run time: two values of one kind, as the checker admits them.
+    fn equalityOf(self: *const Interpreter, a: Value, b: Value) error{RuntimeFailure}!bool {
+        const strings = self.stringBytes(a) != null and self.stringBytes(b) != null;
+        if (!strings and std.meta.activeTag(a) != std.meta.activeTag(b)) return error.RuntimeFailure;
+        return self.valueEql(a, b);
+    }
+
+    /// `<`, `>`, `<=` and `>=` at run time, on the ordered types of
+    /// `etch-resolver-types.md` §16.4.
+    fn orderOf(self: *const Interpreter, op: ast_mod.BinaryOp, a: Value, b: Value) error{RuntimeFailure}!Value {
+        const order: std.math.Order = blk: {
+            if (self.stringBytes(a)) |ab| if (self.stringBytes(b)) |bb| break :blk std.mem.order(u8, ab, bb);
+            if (a == .entity_id and b == .entity_id) {
+                const x: CoreEntityId = @bitCast(a.entity_id);
+                const y: CoreEntityId = @bitCast(b.entity_id);
+                break :blk if (x.index != y.index) std.math.order(x.index, y.index) else std.math.order(x.generation, y.generation);
+            }
+            return binaryCompare(op, a, b);
+        };
+        return Value{ .bool_ = switch (op) {
+            .lt => order == .lt,
+            .gt => order == .gt,
+            .le => order != .gt,
+            .ge => order != .lt,
+            else => unreachable,
+        } };
     }
 
     /// Insert `(k, v)` into a persistent map with the unique-key / last-write-wins
@@ -6651,7 +6685,9 @@ pub const Interpreter = struct {
                 return switch (b.op) {
                     .add, .sub, .mul, .div, .rem => binaryArith(b.op, lhs, rhs) catch
                         return self.fail(arithFailureKind(b.op, lhs, rhs), self.ast.exprSpan(id)),
-                    .eq, .neq, .lt, .gt, .le, .ge => binaryCompare(b.op, lhs, rhs) catch return error.RuntimeFailure,
+                    .eq => Value{ .bool_ = try self.equalityOf(lhs, rhs) },
+                    .neq => Value{ .bool_ = !try self.equalityOf(lhs, rhs) },
+                    .lt, .gt, .le, .ge => self.orderOf(b.op, lhs, rhs) catch return error.RuntimeFailure,
                     .logical_and => {
                         if (lhs != .bool_ or rhs != .bool_) return error.RuntimeFailure;
                         return Value{ .bool_ = lhs.bool_ and rhs.bool_ };
@@ -18903,4 +18939,22 @@ test "a binding a nested scope shadows keeps its reference until the scope close
     locals.leave(gpa);
     try std.testing.expectEqual(@as(u32, 1), persistent.refcount(block));
     try std.testing.expectEqual(held, locals.get(1).?);
+}
+
+test "an equality between two kinds of value fails loud when nothing checked it" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\resource Out { n: int = 0 }
+        \\rule r() when resource Out {
+        \\  get_mut(Out).n = if 1 == true { 1 } else { 2 }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "Out", "n"));
 }

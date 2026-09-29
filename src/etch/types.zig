@@ -172,6 +172,23 @@ pub const BuiltinType = enum {
         };
     }
 
+    /// `etch-resolver-types.md` §16.4: every builtin but the two handles is `Eq`.
+    pub fn isEq(self: BuiltinType) bool {
+        return switch (self) {
+            .task_handle, .timer_handle => false,
+            else => true,
+        };
+    }
+
+    /// `etch-resolver-types.md` §16.4: the numbers, `Duration`, `Time`, `string`
+    /// and `Entity` are `Ord`.
+    pub fn isOrd(self: BuiltinType) bool {
+        return switch (self) {
+            .int_, .float_, .i32_, .u32_, .f32_, .f64_, .duration, .time, .string_, .entity => true,
+            else => false,
+        };
+    }
+
     pub fn isInteger(self: BuiltinType) bool {
         return switch (self) {
             .int_, .i32_, .u32_ => true,
@@ -8021,10 +8038,7 @@ pub const TypeChecker = struct {
     /// scalars/strings (`.builtin`, incl. `string_`/`Entity`), enums, or `unknown`
     /// (already-diagnosed). Aggregates lack a structural `Value.eql`.
     fn assertComparable(t: ResolvedType) bool {
-        return switch (t) {
-            .builtin, .enum_t, .unknown => true,
-            else => false,
-        };
+        return t == .unknown or isEqType(t);
     }
 
     /// Whether a type is a float (or `unknown`, already-diagnosed) — the operand
@@ -8081,7 +8095,7 @@ pub const TypeChecker = struct {
                 // false-fail `assert_eq` and false-PASS `assert_neq`. Reject them
                 // fail-loud rather than mis-compare.
                 if (!assertComparable(ta) or !assertComparable(tb)) {
-                    try self.emit(.type_mismatch, .error_, span, "{s} compares scalar / string / enum values (structs, arrays, maps, sets, optionals are not comparable in v0.6)", .{name});
+                    try self.emit(.type_mismatch, .error_, span, "{s} compares two values of a type with equality (structs, arrays, maps and sets have none)", .{name});
                 } else if (ta != .unknown and tb != .unknown and !ResolvedType.eql(ta, tb)) {
                     try self.emit(.type_mismatch, .error_, span, "{s} compares two values of the same type", .{name});
                 }
@@ -9566,20 +9580,18 @@ pub const TypeChecker = struct {
                 try self.emit(.type_mismatch, .error_, span, "arithmetic requires numeric primitive operands", .{});
                 return ResolvedType.unknown;
             },
-            .eq, .neq, .lt, .gt, .le, .ge => {
-                // String `Eq`/`Ord` (content equality, lexicographic order —
-                // stdlib §12.4) are NOT in the minimal subset: reject at
-                // type-check so neither backend sees one (fail loud here, not
-                // divergently at runtime / in generated Zig).
-                if ((lhs_t == .builtin and lhs_t.builtin == .string_) or (rhs_t == .builtin and rhs_t.builtin == .string_)) {
-                    try self.emit(.type_mismatch, .error_, span, "string comparison is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{});
-                    return ResolvedType.unknown;
-                }
-                if (lhs_t == .builtin and rhs_t == .builtin and lhs_t.builtin == rhs_t.builtin) {
+            .eq, .neq => return self.synthEquality(bin.lhs, bin.rhs, lhs_t, rhs_t, span),
+            .lt, .gt, .le, .ge => {
+                if (lhs_t == .builtin and rhs_t == .builtin and lhs_t.builtin == rhs_t.builtin and lhs_t.builtin.isOrd()) {
                     return .{ .builtin = .bool_ };
                 }
-                if (lhs_t == .unknown or rhs_t == .unknown) return ResolvedType.unknown;
-                try self.emit(.type_mismatch, .error_, span, "comparison requires matching primitive operands", .{});
+                // `none` is an optional and `.variant` an enum, neither ordered.
+                const literal = for ([_]NodeId{ bin.lhs, bin.rhs }) |operand| {
+                    const k = self.arena.exprKind(operand);
+                    if (k == .none_lit or k == .tag_path) break true;
+                } else false;
+                if (!literal and (lhs_t == .unknown or rhs_t == .unknown)) return ResolvedType.unknown;
+                try self.emit(.type_mismatch, .error_, span, "an ordering compares two values of one ordered type", .{});
                 return ResolvedType.unknown;
             },
             .logical_and, .logical_or => {
@@ -9606,6 +9618,46 @@ pub const TypeChecker = struct {
                 return ResolvedType.unknown;
             },
         }
+    }
+
+    /// `==` and `!=` (`etch-resolver-types.md` §16.4): two values of one `Eq`
+    /// type, or `none` against an optional.
+    fn synthEquality(self: *TypeChecker, lhs: NodeId, rhs: NodeId, lhs_t: ResolvedType, rhs_t: ResolvedType, span: SourceSpan) TypeError!ResolvedType {
+        const lhs_none = self.arena.exprKind(lhs) == .none_lit;
+        const rhs_none = self.arena.exprKind(rhs) == .none_lit;
+        if (lhs_none and rhs_none) {
+            try self.emit(.ambiguous_type, .error_, span, "'none' against 'none' has no type to compare in", .{});
+            return ResolvedType.unknown;
+        }
+        if (lhs_none or rhs_none) {
+            const other = if (lhs_none) rhs_t else lhs_t;
+            if (other == .unknown) return ResolvedType.unknown;
+            if (other != .optional) {
+                try self.emit(.type_mismatch, .error_, span, "'none' compares only with an optional", .{});
+                return ResolvedType.unknown;
+            }
+        } else {
+            if (lhs_t == .unknown or rhs_t == .unknown) return ResolvedType.unknown;
+            if (!lhs_t.eql(rhs_t)) {
+                try self.emit(.type_mismatch, .error_, span, "an equality compares two values of one type", .{});
+                return ResolvedType.unknown;
+            }
+        }
+        if (!isEqType(if (lhs_none) rhs_t else lhs_t)) {
+            try self.emit(.type_mismatch, .error_, span, "this type has no equality", .{});
+            return ResolvedType.unknown;
+        }
+        return .{ .builtin = .bool_ };
+    }
+
+    /// Whether `t` is `Eq` (`etch-resolver-types.md` §16.4).
+    fn isEqType(t: ResolvedType) bool {
+        return switch (t) {
+            .builtin => |b| b.isEq(),
+            .optional => |b| b.isEq(),
+            .enum_t => true,
+            else => false,
+        };
     }
 
     fn synthUnary(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
@@ -16892,6 +16944,35 @@ test "a binding shadowing one of an enclosing scope is accepted, and ends with i
         defer r.deinit(gpa);
         try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
         if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const equality_refused = [_]UnitCase{
+    .{ .name = "bool is not ordered", .code = .type_mismatch, .src = "rule r() {\n  let b = true < false\n}" },
+    .{ .name = "an enum is not ordered", .code = .type_mismatch, .src = "enum Dir { north, south }\nrule r() {\n  let b = Dir.north < Dir.south\n}" },
+    .{ .name = "an optional is not ordered", .code = .type_mismatch, .src = "rule r() {\n  let o = some(1)\n  let b = o < none\n}" },
+    .{ .name = "a struct is not Eq", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let a = P { x: 1 }\n  let b = a == a\n}" },
+    .{ .name = "an int against a string", .code = .type_mismatch, .src = "rule r() {\n  let b = 1 == \"a\"\n}" },
+    .{ .name = "none against an int", .code = .type_mismatch, .src = "rule r() {\n  let b = none == 1\n}" },
+    .{ .name = "optionals of two payload types", .code = .type_mismatch, .src = "rule r() {\n  let b = some(1) == some(true)\n}" },
+    .{ .name = "an optional against its payload type", .code = .type_mismatch, .src = "rule r() {\n  let o = some(1)\n  let b = o == 1\n}" },
+    .{ .name = "none against none", .code = .ambiguous_type, .src = "rule r() {\n  let b = none == none\n}" },
+    .{ .name = "a task handle is not Eq", .code = .type_mismatch, .src = "resource Out { n: int = 0 }\nasync rule r()\n  when resource Out\n{\n  let h = spawn { }\n  let b = h == h\n}" },
+};
+
+test "== refuses a type that is not Eq, and an ordering a type that is not Ord" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (equality_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
             wrong += 1;
             std.debug.print("{s}:\n", .{c.name});
             for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });

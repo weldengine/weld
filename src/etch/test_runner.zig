@@ -639,3 +639,107 @@ test "a throwing tick_until predicate fails the test with the throw" {
     // not a timeout / a downstream assert.
     try std.testing.expectEqualStrings("uncaught throw", report.results[0].message.?);
 }
+
+const EqualityRun = struct { name: []const u8, src: []const u8 };
+
+const equality_runs = [_]EqualityRun{
+    .{ .name = "a run string against a literal", .src =
+    \\test "t" {
+    \\  let a = "a" + "b"
+    \\  assert(a == "ab")
+    \\  assert(a != "a")
+    \\}
+    },
+    .{ .name = "strings are ordered by their bytes", .src =
+    \\test "t" {
+    \\  assert("a" < "b")
+    \\  assert("b" > "a")
+    \\  assert("ab" <= "ab")
+    \\}
+    },
+    .{ .name = "an enum, variant against variant", .src =
+    \\enum Dir { north, south }
+    \\test "t" {
+    \\  let d = Dir.south
+    \\  assert(d == Dir.south)
+    \\  assert(d != Dir.north)
+    \\}
+    },
+    .{ .name = "an optional against some and none", .src =
+    \\test "t" {
+    \\  let o = some(1)
+    \\  assert(o == some(1))
+    \\  assert(o != some(2))
+    \\  assert(o != none)
+    \\  let n: int? = none
+    \\  assert(n == none)
+    \\  assert(none == n)
+    \\}
+    },
+    .{ .name = "an optional of a string compares its bytes", .src =
+    \\test "t" {
+    \\  let s = some("a" + "b")
+    \\  assert(s == some("ab"))
+    \\}
+    },
+    .{ .name = "an entity against itself and another", .src =
+    \\component C { v: int = 0 }
+    \\test "t" {
+    \\  let w = test_world()
+    \\  let a = w.spawn_with([C { v: 1 }])
+    \\  let b = w.spawn_with([C { v: 2 }])
+    \\  assert(a == a)
+    \\  assert(a != b)
+    \\  assert(a < b)
+    \\}
+    },
+    .{ .name = "an entity is ordered by index before generation", .src =
+    \\component C { v: int = 0 }
+    \\test "t" {
+    \\  let w = test_world()
+    \\  let a = w.spawn_with([C { v: 1 }])
+    \\  let b = w.spawn_with([C { v: 2 }])
+    \\  a.despawn()
+    \\  w.tick(1)
+    \\  let c = w.spawn_with([C { v: 3 }])
+    \\  assert(c != a)
+    \\  assert(c < b)
+    \\}
+    },
+    .{ .name = "assert_eq and assert_neq on optionals", .src =
+    \\test "t" {
+    \\  assert_eq(some(1), some(1))
+    \\  assert_neq(some(1), none)
+    \\}
+    },
+};
+
+test "== and != follow Eq at run time, and an ordered type orders" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (equality_runs) |c| {
+        var pr = try parser_mod.parse(gpa, c.src);
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        if (diags.items.len != 0) {
+            wrong += 1;
+            for (diags.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+            continue;
+        }
+        var threaded: Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        var report = try run(gpa, threaded.io(), &pr.ast);
+        defer report.deinit();
+        if (report.passed != 1) {
+            wrong += 1;
+            for (report.results) |r| std.debug.print("{s}: {t} {s}\n", .{ c.name, r.status, r.message orelse "" });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
