@@ -380,31 +380,88 @@ const Local = struct {
     is_mut: bool,
 };
 
-/// A scope. Each local holding a persistent handle owns one reference.
+/// A body's locals. Each local holding a persistent handle owns one reference,
+/// and so does each binding a nested scope shadows, until that scope closes
+/// (`etch-reference-part1.md` §4.3).
 const Locals = struct {
+    /// The bindings visible now.
     map: std.AutoHashMapUnmanaged(StringId, Local) = .empty,
+    /// Every binding made in an open nested scope, with the one it shadows.
+    log: std.ArrayListUnmanaged(Shadowed) = .empty,
+    /// Where each open nested scope begins in `log`.
+    starts: std.ArrayListUnmanaged(usize) = .empty,
+
+    const Shadowed = struct { name: StringId, shadowed: ?Local };
 
     pub fn deinit(self: *Locals, gpa: std.mem.Allocator) void {
         self.releaseAll(gpa);
         self.map.deinit(gpa);
+        self.log.deinit(gpa);
+        self.starts.deinit(gpa);
     }
 
-    /// Drop every local, keeping the map's capacity.
+    /// Drop every local, keeping the capacity.
     pub fn clear(self: *Locals, gpa: std.mem.Allocator) void {
         self.releaseAll(gpa);
         self.map.clearRetainingCapacity();
+        self.log.clearRetainingCapacity();
+        self.starts.clearRetainingCapacity();
     }
 
     fn releaseAll(self: *Locals, gpa: std.mem.Allocator) void {
         var it = self.map.valueIterator();
         while (it.next()) |l| releaseHandle(gpa, l.value);
+        for (self.log.items) |e| {
+            if (e.shadowed) |prev| releaseHandle(gpa, prev.value);
+        }
     }
 
+    /// Bind `name` in the innermost scope. A binding of an enclosing scope it
+    /// shadows keeps its reference until the scope closes; one of the same
+    /// scope is replaced.
     pub fn put(self: *Locals, gpa: std.mem.Allocator, name: StringId, v: Value, is_mut: bool) !void {
+        if (self.starts.items.len != 0 and !self.boundHere(name)) {
+            try self.log.ensureUnusedCapacity(gpa, 1);
+            const gop = try self.map.getOrPut(gpa, name);
+            retainHandle(v);
+            self.log.appendAssumeCapacity(.{ .name = name, .shadowed = if (gop.found_existing) gop.value_ptr.* else null });
+            gop.value_ptr.* = .{ .value = v, .is_mut = is_mut };
+            return;
+        }
         const gop = try self.map.getOrPut(gpa, name);
         retainHandle(v);
         if (gop.found_existing) releaseHandle(gpa, gop.value_ptr.value);
         gop.value_ptr.* = .{ .value = v, .is_mut = is_mut };
+    }
+
+    fn boundHere(self: *const Locals, name: StringId) bool {
+        for (self.log.items[self.starts.getLast()..]) |e| {
+            if (e.name == name) return true;
+        }
+        return false;
+    }
+
+    pub fn enter(self: *Locals, gpa: std.mem.Allocator) !void {
+        try self.starts.append(gpa, self.log.items.len);
+    }
+
+    /// Close the innermost scope: each of its bindings is released and gives
+    /// back the one it shadowed, or leaves.
+    pub fn leave(self: *Locals, gpa: std.mem.Allocator) void {
+        const start = self.starts.pop().?;
+        var i = self.log.items.len;
+        while (i > start) {
+            i -= 1;
+            const e = self.log.items[i];
+            const slot = self.map.getPtr(e.name).?;
+            releaseHandle(gpa, slot.value);
+            if (e.shadowed) |prev| {
+                slot.* = prev;
+            } else {
+                _ = self.map.remove(e.name);
+            }
+        }
+        self.log.shrinkRetainingCapacity(start);
     }
 
     pub fn get(self: *const Locals, name: StringId) ?Value {
@@ -912,6 +969,10 @@ const RunFrame = struct {
     /// (`null` for a rule body or a value-less block). Statement-position blocks
     /// discard the value, but a side-effecting trailing expr must still run.
     value_expr: ?NodeId = null,
+    /// The scopes this frame opened on the scope it runs in, closed when it
+    /// pops: none for a task root, the block's, and before it a branch's
+    /// pattern binding.
+    scopes: u8 = 0,
 };
 
 /// `loop { body }`: run the body, resetting the cursor to 0 at the end so it
@@ -922,6 +983,8 @@ const LoopFrame = struct {
     block_len: u32,
     cursor: u32 = 0,
     label: StringId = 0,
+    /// Whether the current iteration's scope is open.
+    iter_open: bool = false,
 };
 
 /// `while [let x =] cond { body }`: at the top of each iteration (`in_iter =
@@ -932,6 +995,9 @@ const WhileFrame = struct {
     while_id: NodeId,
     cursor: u32 = 0,
     in_iter: bool = false,
+    /// Whether the current iteration's scope, which holds a `while let`
+    /// payload, is open.
+    iter_open: bool = false,
 };
 
 /// The iterator state of a `for` frame, persisted across a suspension. A `range`
@@ -968,6 +1034,9 @@ const ForFrame = struct {
     iter: ForIter,
     cursor: u32 = 0,
     in_iter: bool = false,
+    /// Whether the current iteration's scope, which holds the loop variables,
+    /// is open.
+    iter_open: bool = false,
 };
 
 /// `try { body } catch e { handler }`: drives the `try` body (`in_catch = false`);
@@ -983,6 +1052,8 @@ const TryFrame = struct {
     catch_name: StringId,
     cursor: u32 = 0,
     in_catch: bool = false,
+    /// Whether the scope of the body being run, try or catch, is open.
+    scope_open: bool = false,
 };
 
 /// Where an `await`'s resolved value is delivered at the caller's await site. Set from
@@ -2423,6 +2494,10 @@ pub const Interpreter = struct {
         self.thrown = false;
         self.returning = false;
         self.pending_error = null;
+        // The body's own bindings end with each firing; the snapshot it runs
+        // on persists.
+        try t.snapshot.enter(self.gpa);
+        defer t.snapshot.leave(self.gpa);
         var s: u32 = 0;
         while (s < t.body_len) : (s += 1) {
             const stmt_id: NodeId = @bitCast(self.ast.extra.items[t.body_start + s]);
@@ -3046,12 +3121,40 @@ pub const Interpreter = struct {
         releaseFrame(self.gpa, frame);
     }
 
-    /// Pop the top frame, freeing its owned resources.
+    /// Pop the top frame, closing the scopes it opened and freeing its owned
+    /// resources.
     fn popFrame(self: *Interpreter, task: *AsyncTask) void {
+        const scope = currentScope(task);
         if (task.frames.pop()) |f| {
             var fr = f;
+            var open = frameScopes(fr);
+            while (open > 0) : (open -= 1) scope.leave(self.gpa);
             self.deinitFrame(&fr);
         }
+    }
+
+    /// Close the scope of the iteration the loop frame at `ti` is running.
+    fn endIteration(self: *Interpreter, task: *AsyncTask, ti: usize) void {
+        const scope = currentScope(task);
+        switch (task.frames.items[ti]) {
+            inline .loop_, .while_, .for_ => |*frame| {
+                if (frame.iter_open) scope.leave(self.gpa);
+                frame.iter_open = false;
+            },
+            else => unreachable,
+        }
+    }
+
+    /// The scopes `frame` holds open on the scope it runs in.
+    fn frameScopes(frame: AsyncFrame) usize {
+        return switch (frame) {
+            .run => |rf| rf.scopes,
+            .loop_ => |lf| @intFromBool(lf.iter_open),
+            .while_ => |wf| @intFromBool(wf.iter_open),
+            .for_ => |ff| @intFromBool(ff.iter_open),
+            .try_ => |tf| @intFromBool(tf.scope_open),
+            .call, .single => 0,
+        };
     }
 
     /// Pop every frame, freeing owned resources — the task-teardown
@@ -3303,12 +3406,12 @@ pub const Interpreter = struct {
                 .run => {
                     const rf = &task.frames.items[ti].run;
                     if (rf.cursor >= rf.block_len) {
-                        const val = rf.value_expr;
-                        self.popFrame(task);
                         // A block's trailing value runs for effect (rare at stmt
-                        // position); it cannot suspend (an `await` there is a
-                        // sub-expression, rejected E0904 / fails loud).
-                        if (val) |v| _ = try self.evalExpr(world, scope, v);
+                        // position), in the block's scope; it cannot suspend (an
+                        // `await` there is a sub-expression, rejected E0904 /
+                        // fails loud).
+                        if (rf.value_expr) |v| _ = try self.evalExpr(world, scope, v);
+                        self.popFrame(task);
                         continue :drive;
                     }
                     const stmt: NodeId = @bitCast(self.ast.extra.items[rf.block_start + rf.cursor]);
@@ -3320,8 +3423,14 @@ pub const Interpreter = struct {
                 },
                 .loop_ => {
                     const lf = &task.frames.items[ti].loop_;
+                    if (!lf.iter_open) {
+                        try scope.enter(self.gpa);
+                        lf.iter_open = true;
+                    }
                     if (lf.cursor >= lf.block_len) {
-                        task.frames.items[ti].loop_.cursor = 0; // `loop` repeats
+                        scope.leave(self.gpa);
+                        lf.iter_open = false;
+                        lf.cursor = 0; // `loop` repeats
                         continue :drive;
                     }
                     const stmt: NodeId = @bitCast(self.ast.extra.items[lf.block_start + lf.cursor]);
@@ -3335,6 +3444,10 @@ pub const Interpreter = struct {
                     const wid = task.frames.items[ti].while_.while_id;
                     const wh = self.ast.while_stmts.items[self.ast.stmtData(wid)];
                     if (!task.frames.items[ti].while_.in_iter) {
+                        if (!task.frames.items[ti].while_.iter_open) {
+                            try scope.enter(self.gpa);
+                            task.frames.items[ti].while_.iter_open = true;
+                        }
                         if (!(try self.whileCondEnter(world, scope, wid))) {
                             self.popFrame(task); // condition false → `while` ends
                             continue :drive;
@@ -3344,6 +3457,8 @@ pub const Interpreter = struct {
                         continue :drive;
                     }
                     if (task.frames.items[ti].while_.cursor >= wh.body_len) {
+                        scope.leave(self.gpa);
+                        task.frames.items[ti].while_.iter_open = false;
                         task.frames.items[ti].while_.in_iter = false; // re-check cond
                         continue :drive;
                     }
@@ -3357,6 +3472,10 @@ pub const Interpreter = struct {
                 .for_ => {
                     const f = self.ast.for_stmts.items[self.ast.stmtData(task.frames.items[ti].for_.for_id)];
                     if (!task.frames.items[ti].for_.in_iter) {
+                        if (!task.frames.items[ti].for_.iter_open) {
+                            try scope.enter(self.gpa);
+                            task.frames.items[ti].for_.iter_open = true;
+                        }
                         if (!(try self.forAdvance(&task.frames.items[ti].for_, scope))) {
                             self.popFrame(task); // iterator exhausted → `for` ends
                             continue :drive;
@@ -3366,6 +3485,8 @@ pub const Interpreter = struct {
                         continue :drive;
                     }
                     if (task.frames.items[ti].for_.cursor >= f.body_len) {
+                        scope.leave(self.gpa);
+                        task.frames.items[ti].for_.iter_open = false;
                         task.frames.items[ti].for_.in_iter = false; // advance to next element
                         continue :drive;
                     }
@@ -3579,12 +3700,15 @@ pub const Interpreter = struct {
         if (sk == .try_catch_stmt) {
             const tc = self.ast.try_catch_stmts.items[self.ast.stmtData(stmt)];
             cursor.* += 1;
+            try scope.enter(self.gpa);
+            errdefer scope.leave(self.gpa);
             try task.frames.append(self.gpa, .{ .try_ = .{
                 .try_start = tc.try_start,
                 .try_len = tc.try_len,
                 .catch_start = tc.catch_start,
                 .catch_len = tc.catch_len,
                 .catch_name = tc.catch_name,
+                .scope_open = true,
             } });
             return .pushed;
         }
@@ -3605,26 +3729,45 @@ pub const Interpreter = struct {
                 },
                 .block_expr => {
                     cursor.* += 1;
-                    try self.pushBlockRun(task, e);
+                    try self.pushBlockRun(task, e, 0);
                     return .pushed;
                 },
                 .if_expr => {
                     // Select the branch synchronously (a condition cannot suspend);
                     // push its block as a run frame (or nothing if no branch taken).
-                    const branch = try self.asyncIfBranch(world, scope, e);
+                    // The branch's scope holds an `if let` payload.
+                    try scope.enter(self.gpa);
+                    const branch = self.asyncIfBranch(world, scope, e) catch |err| {
+                        scope.leave(self.gpa);
+                        return err;
+                    };
                     cursor.* += 1;
-                    if (branch) |b| try self.pushBlockRun(task, b);
+                    if (branch) |b| {
+                        self.pushBlockRun(task, b, 1) catch |err| {
+                            scope.leave(self.gpa);
+                            return err;
+                        };
+                    } else scope.leave(self.gpa);
                     return .pushed;
                 },
                 .match_expr => {
                     // Select the arm synchronously; a block arm becomes a run
                     // frame (so its body can suspend); a bare-expr arm runs for
-                    // effect (a sub-expression `await` there fails loud).
-                    const body = try self.matchArmBody(world, scope, e);
+                    // effect (a sub-expression `await` there fails loud). The
+                    // arm's scope holds its pattern binding.
+                    try scope.enter(self.gpa);
+                    const body = self.matchArmBody(world, scope, e) catch |err| {
+                        scope.leave(self.gpa);
+                        return err;
+                    };
                     cursor.* += 1;
                     if (self.ast.exprKind(body) == .block_expr) {
-                        try self.pushBlockRun(task, body);
+                        self.pushBlockRun(task, body, 1) catch |err| {
+                            scope.leave(self.gpa);
+                            return err;
+                        };
                     } else {
+                        defer scope.leave(self.gpa);
                         _ = try self.evalExpr(world, scope, body);
                     }
                     return .pushed;
@@ -3696,7 +3839,7 @@ pub const Interpreter = struct {
             if (self.ast.stmtKind(br.stmt) == .expr_stmt) {
                 const e: NodeId = @bitCast(self.ast.stmtData(br.stmt));
                 if (self.ast.exprKind(e) == .block_expr) {
-                    try self.pushBlockRun(child, e);
+                    try self.pushBlockRun(child, e, 0);
                     framed = true;
                 }
             }
@@ -3764,12 +3907,19 @@ pub const Interpreter = struct {
 
     /// Push a `block_expr`'s body as a `.run` frame, carrying its
     /// trailing value expression (evaluated for effect on pop).
-    fn pushBlockRun(self: *Interpreter, task: *AsyncTask, block_expr_id: NodeId) StmtError!void {
+    /// Push the block `block_expr_id` in a scope of its own. `branch_scopes` is
+    /// the number of scopes the caller opened for it just before — a branch's
+    /// pattern binding — which the frame closes with its own.
+    fn pushBlockRun(self: *Interpreter, task: *AsyncTask, block_expr_id: NodeId, branch_scopes: u8) StmtError!void {
         const blk = self.ast.block_exprs.items[self.ast.exprData(block_expr_id)];
+        const scope = currentScope(task);
+        try scope.enter(self.gpa);
+        errdefer scope.leave(self.gpa);
         try task.frames.append(self.gpa, .{ .run = .{
             .block_start = blk.body_start,
             .block_len = blk.body_len,
             .value_expr = if (blk.value.isNone()) null else blk.value,
+            .scopes = 1 + branch_scopes,
         } });
     }
 
@@ -3838,7 +3988,14 @@ pub const Interpreter = struct {
                     .try_ => |tfv| {
                         if (!tfv.in_catch) {
                             self.thrown = false;
-                            try currentScope(task).put(self.gpa, tfv.catch_name, self.thrown_value, false);
+                            // The try body's scope closes; the catch body's
+                            // opens with the caught binding.
+                            const scope = currentScope(task);
+                            if (tfv.scope_open) scope.leave(self.gpa);
+                            task.frames.items[ti].try_.scope_open = false;
+                            try scope.enter(self.gpa);
+                            task.frames.items[ti].try_.scope_open = true;
+                            try scope.put(self.gpa, tfv.catch_name, self.thrown_value, false);
                             task.frames.items[ti].try_.in_catch = true;
                             task.frames.items[ti].try_.cursor = 0;
                             return true;
@@ -3867,6 +4024,7 @@ pub const Interpreter = struct {
                         if (was_break) {
                             self.popFrame(task); // the loop exits
                         } else {
+                            self.endIteration(task, ti);
                             task.frames.items[ti].loop_.cursor = 0; // continue → loop again
                         }
                         return true;
@@ -3881,6 +4039,7 @@ pub const Interpreter = struct {
                         if (was_break) {
                             self.popFrame(task);
                         } else {
+                            self.endIteration(task, ti);
                             task.frames.items[ti].while_.in_iter = false; // continue → re-check cond
                         }
                         return true;
@@ -3895,6 +4054,7 @@ pub const Interpreter = struct {
                         if (was_break) {
                             self.popFrame(task);
                         } else {
+                            self.endIteration(task, ti);
                             task.frames.items[ti].for_.in_iter = false; // continue → next element
                         }
                         return true;
@@ -4647,6 +4807,24 @@ pub const Interpreter = struct {
 
     /// Run a contiguous statement run, stopping early if a control signal
     /// fires (left set on `self` for the enclosing loop to interpret).
+    /// One iteration of a `for` body, its loop variables bound in its scope.
+    fn forIteration(self: *Interpreter, world: *World, locals: *Locals, f: ast_mod.ForStmt, v: Value, index: ?Value) StmtError!void {
+        try locals.enter(self.gpa);
+        defer locals.leave(self.gpa);
+        try locals.put(self.gpa, f.var_name, v, false);
+        if (index) |x| {
+            if (f.index_name != 0) try locals.put(self.gpa, f.index_name, x, false);
+        }
+        try self.execStmtRun(world, locals, f.body_start, f.body_len);
+    }
+
+    /// `execStmtRun` in a scope of its own.
+    fn execScopedRun(self: *Interpreter, world: *World, locals: *Locals, start: u32, len: u32) StmtError!void {
+        try locals.enter(self.gpa);
+        defer locals.leave(self.gpa);
+        try self.execStmtRun(world, locals, start, len);
+    }
+
     fn execStmtRun(self: *Interpreter, world: *World, locals: *Locals, start: u32, len: u32) StmtError!void {
         var s: u32 = 0;
         while (s < len) : (s += 1) {
@@ -4754,8 +4932,7 @@ pub const Interpreter = struct {
                     .range => |r| {
                         var i: i64 = r.start;
                         range_loop: while (if (r.inclusive) i <= r.end else i < r.end) {
-                            try locals.put(self.gpa, f.var_name, Value{ .int_ = i }, false);
-                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            try self.forIteration(world, locals, f, Value{ .int_ = i }, null);
                             if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
@@ -4776,9 +4953,7 @@ pub const Interpreter = struct {
                         var k: usize = 0;
                         arr_loop: while (k < len) : (k += 1) {
                             if (k >= self.collections.arrays.items[handle].items.len) return error.RuntimeFailure;
-                            const elem = self.collections.arrays.items[handle].items[k];
-                            try locals.put(self.gpa, f.var_name, elem, false);
-                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            try self.forIteration(world, locals, f, self.collections.arrays.items[handle].items[k], null);
                             if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
@@ -4796,9 +4971,7 @@ pub const Interpreter = struct {
                         var k: usize = 0;
                         parr_loop: while (k < len) : (k += 1) {
                             if (k >= persistentArrayOf(ptr).items.len) return error.RuntimeFailure;
-                            const elem = persistentArrayOf(ptr).items[k];
-                            try locals.put(self.gpa, f.var_name, elem, false);
-                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            try self.forIteration(world, locals, f, persistentArrayOf(ptr).items[k], null);
                             if (self.thrown or self.returning) return;
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
@@ -4817,9 +4990,7 @@ pub const Interpreter = struct {
                         var k: usize = 0;
                         map_loop: while (k < len) : (k += 1) {
                             const pair = self.collections.maps.items[handle].items[k];
-                            try locals.put(self.gpa, f.var_name, pair.key, false);
-                            if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
-                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            try self.forIteration(world, locals, f, pair.key, pair.value);
                             if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
@@ -4835,9 +5006,7 @@ pub const Interpreter = struct {
                         var k: usize = 0;
                         pmap_loop: while (k < len) : (k += 1) {
                             const pair = persistentMapOf(ptr).items[k];
-                            try locals.put(self.gpa, f.var_name, pair.key, false);
-                            if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
-                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            try self.forIteration(world, locals, f, pair.key, pair.value);
                             if (self.thrown or self.returning) return;
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
@@ -4859,17 +5028,22 @@ pub const Interpreter = struct {
                 // runs the body, `none` stops the loop.
                 const wh = self.ast.while_stmts.items[data];
                 while_loop: while (true) {
+                    var payload: ?Value = null;
                     if (wh.let_binding != 0) {
                         const opt = try self.evalExpr(world, locals, wh.cond);
                         if (opt != .optional) return error.RuntimeFailure;
-                        const payload = self.optionals.items[opt.optional] orelse break :while_loop;
-                        try locals.put(self.gpa, wh.let_binding, payload, false);
+                        payload = self.optionals.items[opt.optional] orelse break :while_loop;
                     } else {
                         const cond = try self.evalExpr(world, locals, wh.cond);
                         if (cond != .bool_) return error.RuntimeFailure;
                         if (!cond.bool_) break :while_loop;
                     }
-                    try self.execStmtRun(world, locals, wh.body_start, wh.body_len);
+                    {
+                        try locals.enter(self.gpa);
+                        defer locals.leave(self.gpa);
+                        if (payload) |v| try locals.put(self.gpa, wh.let_binding, v, false);
+                        try self.execStmtRun(world, locals, wh.body_start, wh.body_len);
+                    }
                     if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                     switch (self.handleLoopControl(0)) {
                         .again => {},
@@ -4906,9 +5080,11 @@ pub const Interpreter = struct {
                 // threw, clear the signal, bind the caught value, run the catch
                 // body (which may itself throw → re-propagates).
                 const tc = self.ast.try_catch_stmts.items[data];
-                try self.execStmtRun(world, locals, tc.try_start, tc.try_len);
+                try self.execScopedRun(world, locals, tc.try_start, tc.try_len);
                 if (self.thrown) {
                     self.thrown = false;
+                    try locals.enter(self.gpa);
+                    defer locals.leave(self.gpa);
                     try locals.put(self.gpa, tc.catch_name, self.thrown_value, false);
                     try self.execStmtRun(world, locals, tc.catch_start, tc.catch_len);
                 }
@@ -6536,6 +6712,8 @@ pub const Interpreter = struct {
                     switch (arm.pattern_kind) {
                         .wildcard => return try self.evalExpr(world, locals, arm.body),
                         .binding => {
+                            try locals.enter(self.gpa);
+                            defer locals.leave(self.gpa);
                             try locals.put(self.gpa, arm.pattern_payload, scrut, false);
                             return try self.evalExpr(world, locals, arm.body);
                         },
@@ -6561,6 +6739,8 @@ pub const Interpreter = struct {
                         .optional_some => {
                             if (scrut != .optional) return error.RuntimeFailure;
                             if (self.optionals.items[scrut.optional]) |payload| {
+                                try locals.enter(self.gpa);
+                                defer locals.leave(self.gpa);
                                 try locals.put(self.gpa, arm.pattern_payload, payload, false);
                                 return try self.evalExpr(world, locals, arm.body);
                             }
@@ -6886,7 +7066,7 @@ pub const Interpreter = struct {
                 // outer loop propagates (control left set, unit returned).
                 const lp = self.ast.loop_exprs.items[data];
                 while (true) {
-                    try self.execStmtRun(world, locals, lp.body_start, lp.body_len);
+                    try self.execScopedRun(world, locals, lp.body_start, lp.body_len);
                     if (self.thrown or self.returning) return Value{ .unit = {} }; // throw / return unwinds out
                     switch (self.control) {
                         .none => {}, // body completed → loop again (infinite)
@@ -6917,6 +7097,8 @@ pub const Interpreter = struct {
                 // for the enclosing loop / `try` to interpret, and the block
                 // yields `unit`.
                 const blk = self.ast.block_exprs.items[data];
+                try locals.enter(self.gpa);
+                defer locals.leave(self.gpa);
                 try self.execStmtRun(world, locals, blk.body_start, blk.body_len);
                 if (self.control != .none or self.thrown or self.returning) return Value{ .unit = {} };
                 if (blk.value.isNone()) return Value{ .unit = {} };
@@ -6931,9 +7113,13 @@ pub const Interpreter = struct {
                 const m = self.ast.measure_exprs.items[data];
                 const io = self.io orelse return error.RuntimeFailure;
                 const t0 = std.Io.Clock.now(.awake, io);
-                try self.execStmtRun(world, locals, m.body_start, m.body_len);
-                if (!m.value.isNone() and self.control == .none and !self.thrown and !self.returning) {
-                    _ = try self.evalExpr(world, locals, m.value);
+                {
+                    try locals.enter(self.gpa);
+                    defer locals.leave(self.gpa);
+                    try self.execStmtRun(world, locals, m.body_start, m.body_len);
+                    if (!m.value.isNone() and self.control == .none and !self.thrown and !self.returning) {
+                        _ = try self.evalExpr(world, locals, m.value);
+                    }
                 }
                 const t1 = std.Io.Clock.now(.awake, io);
                 const ns: u64 = @intCast(@max(@as(i96, 0), t0.durationTo(t1).nanoseconds));
@@ -6948,6 +7134,8 @@ pub const Interpreter = struct {
                     const opt = try self.evalExpr(world, locals, ife.cond);
                     if (opt != .optional) return error.RuntimeFailure;
                     if (self.optionals.items[opt.optional]) |payload| {
+                        try locals.enter(self.gpa);
+                        defer locals.leave(self.gpa);
                         try locals.put(self.gpa, ife.let_binding, payload, false);
                         return try self.evalExpr(world, locals, ife.then_block);
                     }
@@ -18285,4 +18473,434 @@ test "a const is read at run time by either spelling" {
         }
     }
     try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const ScopeRun = struct { name: []const u8, out: i64, ticks: u32 = 1, src: []const u8 };
+
+const scope_runs = [_]ScopeRun{
+    .{ .name = "a nested block's shadow ends with the block", .out = 1, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  if true { let x = 2 }
+    \\  get_mut(Out).n = x
+    \\}
+    },
+    .{ .name = "an if-let payload shadows until its block ends", .out = 91, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  if let x = some(9) { get_mut(Out).n = x }
+    \\  get_mut(Out).n = get(Out).n * 10 + x
+    \\}
+    },
+    .{ .name = "a match binding shadows until its arm ends", .out = 41, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let o = some(4)
+    \\  match o { some(x) => { get_mut(Out).n = x }, none => {} }
+    \\  get_mut(Out).n = get(Out).n * 10 + x
+    \\}
+    },
+    .{ .name = "a for variable shadows until the loop ends", .out = 7, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let i = 7
+    \\  for i in 0..3 { }
+    \\  get_mut(Out).n = i
+    \\}
+    },
+    .{ .name = "a loop body's let shadows on each iteration", .out = 35, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 5
+    \\  let mut s = 0
+    \\  for i in 0..3 {
+    \\    let x = i
+    \\    s += x
+    \\  }
+    \\  get_mut(Out).n = s * 10 + x
+    \\}
+    },
+    .{ .name = "a while-let payload shadows until the loop ends", .out = 8, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let v = 8
+    \\  let mut a: int[] = [1, 2]
+    \\  while let v = a.pop() { }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "a catch binding shadows until the catch ends", .out = 3, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let err = 3
+    \\  try {
+    \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+    \\  } catch err { }
+    \\  get_mut(Out).n = err
+    \\}
+    },
+    .{ .name = "a shadowed persistent string keeps its value", .out = 3, .src =
+    \\resource Out { n: int = 0 }
+    \\resource Names { a: string = "abc" }
+    \\rule r() when resource Out and resource Names {
+    \\  let s = get(Names).a
+    \\  if true { let s = "x" }
+    \\  get_mut(Out).n = s.len()
+    \\}
+    },
+    .{ .name = "a for iteration over a range reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for i in 0..2 {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a for iteration over an array reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for v in [1, 2] {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a for iteration over a map reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  let m = [1: 2, 3: 4]
+    \\  for k, v in m {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a for iteration over a resource array reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\resource R { xs: int[] }
+    \\rule r() when resource Out and resource R {
+    \\  get_mut(R).xs.push(1)
+    \\  get_mut(R).xs.push(2)
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for v in get(R).xs {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a for iteration over a resource map reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\resource R { m: [int: int] }
+    \\rule r() when resource Out and resource R {
+    \\  get_mut(R).m.insert(1, 2)
+    \\  get_mut(R).m.insert(3, 4)
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for k, v in get(R).m {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a while iteration reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  let mut c = 0
+    \\  while c < 2 {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    c += 1
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a loop iteration reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  let mut c = 0
+    \\  loop {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    c += 1
+    \\    if c == 2 { break }
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a try body's let ends with the try", .out = 1, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  try {
+    \\    let x = 5
+    \\  } catch err { }
+    \\  get_mut(Out).n = x
+    \\}
+    },
+    .{ .name = "a bare match binding shadows until its arm ends", .out = 41, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let k = 1
+    \\  let r = match 4 { k => k }
+    \\  get_mut(Out).n = r * 10 + k
+    \\}
+    },
+    .{ .name = "a shadow held across an await ends with its iteration", .out = 51, .ticks = 10, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  for i in 0..1 {
+    \\    let x = 5
+    \\    await wait(0.05s)
+    \\    get_mut(Out).n = x
+    \\  }
+    \\  get_mut(Out).n = get(Out).n * 10 + x
+    \\}
+    },
+    .{ .name = "a match arm binding held across an await ends with its arm", .out = 41, .ticks = 10, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  match some(4) {
+    \\    some(x) => {
+    \\      await wait(0.05s)
+    \\      get_mut(Out).n = x
+    \\    },
+    \\    none => {},
+    \\  }
+    \\  get_mut(Out).n = get(Out).n * 10 + x
+    \\}
+    },
+    .{ .name = "an if-let payload held across an await ends with its block", .out = 91, .ticks = 10, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  if let x = some(9) {
+    \\    await wait(0.05s)
+    \\    get_mut(Out).n = x
+    \\  }
+    \\  get_mut(Out).n = get(Out).n * 10 + x
+    \\}
+    },
+    .{ .name = "a continue ends its iteration's scope", .out = 31, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for i in 0..3 {
+    \\    let x = i
+    \\    s += x
+    \\    if i == 1 { continue }
+    \\    await wait(0.05s)
+    \\  }
+    \\  get_mut(Out).n = s * 10 + x
+    \\}
+    },
+    .{ .name = "a block's trailing value is read in the block's scope", .out = 5, .ticks = 10, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  {
+    \\    let y = 5
+    \\    await wait(0.05s)
+    \\    get_mut(Out).n = y
+    \\    y
+    \\  }
+    \\}
+    },
+    .{ .name = "a catch binding reached across an await ends with the catch", .out = 3, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let err = 3
+    \\  try {
+    \\    await wait(0.05s)
+    \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+    \\  } catch err { }
+    \\  get_mut(Out).n = err
+    \\}
+    },
+    .{ .name = "an async for iteration reads the outer name before its let", .out = 11, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for i in 0..2 {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    await wait(0.05s)
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "an async for iteration ended by continue reads the outer name before its let", .out = 11, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for i in 0..2 {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    if i == 0 { continue }
+    \\    await wait(0.05s)
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "an async for left by break ends its iteration's scope", .out = 1, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  for i in 0..3 {
+    \\    let x = 5
+    \\    await wait(0.05s)
+    \\    break
+    \\  }
+    \\  get_mut(Out).n = x
+    \\}
+    },
+    .{ .name = "an async while iteration reads the outer name before its let", .out = 11, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  let mut c = 0
+    \\  while c < 2 {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    c += 1
+    \\    await wait(0.05s)
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "an async loop iteration reads the outer name before its let", .out = 11, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  let mut c = 0
+    \\  loop {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    c += 1
+    \\    if c == 2 { break }
+    \\    await wait(0.05s)
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "an async try body's binding ends when a throw reaches the catch", .out = 1, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  try {
+    \\    let x = 5
+    \\    await wait(0.05s)
+    \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+    \\  } catch err {
+    \\    get_mut(Out).n = x
+    \\  }
+    \\}
+    },
+    .{ .name = "an async try body's binding ends with the try", .out = 1, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  try {
+    \\    let x = 5
+    \\    await wait(0.05s)
+    \\  } catch err { }
+    \\  get_mut(Out).n = x
+    \\}
+    },
+    .{ .name = "an async bare match arm's binding ends with the arm", .out = 1, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let k = 1
+    \\  match 4 { k => 0 }
+    \\  await wait(0.05s)
+    \\  get_mut(Out).n = k
+    \\}
+    },
+    .{ .name = "a timer body's own binding ends with each firing", .out = 11, .ticks = 8, .src =
+    \\resource Out { n: int = 0, armed: int = 0 }
+    \\rule r() when resource Out {
+    \\  if get(Out).armed == 0 {
+    \\    get_mut(Out).armed = 1
+    \\    let x = 1
+    \\    every(0.05s) {
+    \\      get_mut(Out).n = get(Out).n * 10 + x
+    \\      let x = 7
+    \\    }
+    \\  }
+    \\}
+    },
+};
+
+test "a binding ends with its scope at run time, and the one it shadowed returns" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (scope_runs) |c| {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa, c.src);
+        defer pr.deinit(gpa);
+        try std.testing.expect(pr.diagnostics.len == 0);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        if (diags.items.len != 0) {
+            wrong += 1;
+            for (diags.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+            continue;
+        }
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const report = try interp.runFor(&world, c.ticks);
+        const out = readResourceIntNamed(&world, "Out", "n");
+        if (report.runtime_errors != 0 or out != c.out) {
+            wrong += 1;
+            std.debug.print("{s}: {d} runtime errors, Out.n = {d}, expected {d}\n", .{ c.name, report.runtime_errors, out, c.out });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a binding a nested scope shadows keeps its reference until the scope closes" {
+    const gpa = std.testing.allocator;
+    const block = try persistent.alloc(gpa, persistent.type_string, 1);
+    block[0] = 'a';
+    const held: Value = .{ .string_persistent = .{ .ptr = @intFromPtr(block), .len = 1 } };
+    var locals: Locals = .{};
+    defer locals.deinit(gpa);
+    try locals.put(gpa, 1, held, false);
+    persistent.decref(gpa, block);
+    try locals.enter(gpa);
+    try locals.put(gpa, 1, .{ .int_ = 0 }, false);
+    try std.testing.expectEqual(@as(u32, 1), persistent.refcount(block));
+    locals.leave(gpa);
+    try std.testing.expectEqual(@as(u32, 1), persistent.refcount(block));
+    try std.testing.expectEqual(held, locals.get(1).?);
 }

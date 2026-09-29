@@ -282,6 +282,15 @@ pub const ArrayFixedInfo = struct { elem: BuiltinType, len: u64 };
 /// Map carrier for `ResolvedType.map_t`: builtin key + value types.
 pub const MapInfo = struct { key: BuiltinType, value: BuiltinType };
 
+/// A closure value's type. `env` indexes `TypeChecker.closure_envs`, or is
+/// `no_env` for a literal typed where no scope exists.
+pub const ClosureType = struct {
+    literal: NodeId,
+    env: u32,
+
+    pub const no_env = std.math.maxInt(u32);
+};
+
 /// `ResolvedType` is the type-checker's internal type representation.
 pub const ResolvedType = union(enum) {
     builtin: BuiltinType,
@@ -299,10 +308,8 @@ pub const ResolvedType = union(enum) {
     map_t: MapInfo,
     /// `Set<T>` set.
     set_t: BuiltinType,
-    /// A closure value. Payload is the closure-expression
-    /// `NodeId`; the return type is inferred lazily at each call site (params
-    /// bound to the argument types in the caller's scope).
-    closure: NodeId,
+    /// A closure value; its return type is inferred at each call.
+    closure: ClosureType,
     /// A `struct` value. Payload is the struct type name. A
     /// struct is a by-value type (not registered with the world); its fields
     /// and inherent methods resolve by name through the symbol table.
@@ -348,7 +355,7 @@ pub const ResolvedType = union(enum) {
             .array_dyn => |elem| elem == b.array_dyn,
             .map_t => |info| info.key == b.map_t.key and info.value == b.map_t.value,
             .set_t => |elem| elem == b.set_t,
-            .closure => |node| std.meta.eql(node, b.closure),
+            .closure => |c| std.meta.eql(c.literal, b.closure.literal),
             .struct_t => |id| id == b.struct_t,
             .enum_t => |id| id == b.enum_t,
             .event_t => |id| id == b.event_t,
@@ -608,6 +615,9 @@ pub const TypeChecker = struct {
     escape_names: std.ArrayListUnmanaged(StringId) = .empty,
     /// Start of the innermost snapshot body's window in `escape_names`.
     escape_base: usize = 0,
+    /// Where the innermost snapshot body's own bindings begin in the checked
+    /// context's `scope_log`.
+    escape_log_base: usize = 0,
     /// What the innermost snapshot body IS, for the diagnostic's wording. `null`
     /// outside any.
     escape_site: ?EscapeSite = null,
@@ -623,13 +633,16 @@ pub const TypeChecker = struct {
     /// `buildTags` runs. Pass 2 (tag-op when-conditions / `tag_path` operands,
     /// landed in the query-operator commit) resolves paths against it.
     tag_table: ?tags_mod.TagTable = null,
-    /// Names captured by the closure body currently being typed (
-    /// `etch-resolver-types.md` §8.2): the caller-scope bindings
-    /// snapshotted at `synthCall` minus the closure params. An assignment
-    /// targeting one of them is E0221 ClosureCannotMutateCapture; a body-local
-    /// `let` re-declaring a name removes it (it is body-owned from there).
-    /// `null` outside a closure body. Saved/restored around nested typing.
+    /// Names of the scope the closure body being typed was written in
+    /// (`etch-resolver-types.md` §8.2). Assigning one the body did not bind
+    /// itself is E0221 ClosureCannotMutateCapture. `null` outside a closure
+    /// body.
     closure_captures: ?*std.AutoHashMapUnmanaged(StringId, void) = null,
+    /// The scope each closure value was created in, indexed by
+    /// `ClosureType.env`.
+    closure_envs: std.ArrayListUnmanaged(ClosureEnv) = .empty,
+    /// `ClosureEnv.own` of the closure body being typed.
+    closure_own: ?*const std.AutoHashMapUnmanaged(StringId, void) = null,
     /// Cross-file project context. `null` in single-file mode (the
     /// Single-file behaviour: E1782/E1786/E1791 resolve against per-file sets). When
     /// set (via `checkProject`), those three scene/prefab reference + UUID
@@ -768,6 +781,8 @@ pub const TypeChecker = struct {
         self.conc_labels.deinit(self.gpa);
         self.break_frames.deinit(self.gpa);
         self.escape_names.deinit(self.gpa);
+        for (self.closure_envs.items) |*env| env.deinit(self.gpa);
+        self.closure_envs.deinit(self.gpa);
         self.generic_scope.deinit(self.gpa);
         self.imported_symbols.deinit(self.gpa);
         self.imported_aliases.deinit(self.gpa);
@@ -2188,7 +2203,7 @@ pub const TypeChecker = struct {
             }
             // Populate the scope (unknown-resolved params stay `.unknown`, which
             // the §6 machinery tolerates — no spurious undefined-symbol error).
-            try ctx.locals.put(self.gpa, f.name, .{ .type_ = self.namedTypeToResolved(f.type_node), .is_mut = false });
+            _ = try ctx.bind(self.gpa, f.name, .{ .type_ = self.namedTypeToResolved(f.type_node), .is_mut = false });
         }
 
         // E1680 — at least one state.
@@ -3043,7 +3058,7 @@ pub const TypeChecker = struct {
         var names = scope.keyIterator();
         while (names.next()) |id| try ctx.components_in_when.put(self.gpa, id.*, {});
         if (self.arena.strings.find("entity")) |eid| {
-            try ctx.locals.put(self.gpa, eid, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
+            _ = try ctx.bind(self.gpa, eid, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
         }
         const saved_async = self.current_is_async;
         const saved_susp = self.await_suspendable;
@@ -3392,7 +3407,7 @@ pub const TypeChecker = struct {
         var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
         defer ctx.deinit(self.gpa);
         if (self.arena.strings.find("player")) |player_id| {
-            try ctx.locals.put(self.gpa, player_id, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
+            _ = try ctx.bind(self.gpa, player_id, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
         }
         // Properties: `requires` must be bool (E1542); the part2 §15 known
         // properties type-check (E1548); unknown property names are open
@@ -3459,6 +3474,8 @@ pub const TypeChecker = struct {
 
     fn validateQuestStage(self: *TypeChecker, stage_idx: u32, ctx: *RuleCtx, branch_names: *const std.AutoHashMapUnmanaged(StringId, void)) (TypeError || error{OutOfMemory})!void {
         const stage = self.arena.quest_stages.items[stage_idx];
+        try ctx.enter(self.gpa);
+        defer ctx.leave();
         var n_objectives: u32 = 0;
         var has_main = false;
         var e: u32 = 0;
@@ -3571,7 +3588,7 @@ pub const TypeChecker = struct {
         var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
         defer ctx.deinit(self.gpa);
         if (self.arena.strings.find("player")) |player_id| {
-            try ctx.locals.put(self.gpa, player_id, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
+            _ = try ctx.bind(self.gpa, player_id, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
         }
         if (decl.elems_len == 0) {
             const sym = self.symbols.get(decl.name).?;
@@ -3831,8 +3848,8 @@ pub const TypeChecker = struct {
             var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
             defer ctx.deinit(self.gpa);
             const entity_t: ResolvedType = .{ .builtin = .entity };
-            if (self.arena.strings.find("self")) |self_id| try ctx.locals.put(self.gpa, self_id, .{ .type_ = entity_t, .is_mut = false });
-            if (self.arena.strings.find("target")) |target_id| try ctx.locals.put(self.gpa, target_id, .{ .type_ = entity_t, .is_mut = false });
+            if (self.arena.strings.find("self")) |self_id| _ = try ctx.bind(self.gpa, self_id, .{ .type_ = entity_t, .is_mut = false });
+            if (self.arena.strings.find("target")) |target_id| _ = try ctx.bind(self.gpa, target_id, .{ .type_ = entity_t, .is_mut = false });
             const root = self.arena.bt_nodes.items[decl.root];
             if (root.kind != .selector and root.kind != .sequence) {
                 try self.emit(.behavior_root_missing, .error_, root.span, "behavior '{s}' must have a composite root (selector or sequence)", .{self.arena.strings.slice(decl.name)});
@@ -3888,22 +3905,13 @@ pub const TypeChecker = struct {
                     // arm typing below via the dedicated path.
                     try self.collectWhenBehavior(ctx, node.when_root);
                 }
-                // Action `let` bindings scope to the rest of THIS composite:
-                // snapshot the locals and restore at exit.
-                var added: std.ArrayListUnmanaged(StringId) = .empty;
-                defer added.deinit(self.gpa);
+                // An action's `let` binds for the rest of this composite.
+                try ctx.enter(self.gpa);
+                defer ctx.leave();
                 var c: u32 = 0;
                 while (c < node.children_len) : (c += 1) {
-                    const child_idx = self.arena.extra.items[node.children_start + c];
-                    const child = self.arena.bt_nodes.items[child_idx];
-                    try self.validateBTNode(child_idx, behavior_idx, ctx, index_of, edges);
-                    // An action `let` child binds for the following siblings.
-                    if (child.kind == .action and child.payload_is_stmt and self.arena.stmtKind(child.payload) == .let_stmt) {
-                        const let = self.arena.let_stmts.items[self.arena.stmtData(child.payload)];
-                        try added.append(self.gpa, let.name);
-                    }
+                    try self.validateBTNode(self.arena.extra.items[node.children_start + c], behavior_idx, ctx, index_of, edges);
                 }
-                for (added.items) |name| _ = ctx.locals.remove(name);
             },
             .condition => {
                 const t = try self.synthExprE(node.payload, ctx);
@@ -5562,7 +5570,7 @@ pub const TypeChecker = struct {
 
         if (decl.self_kind != .none) {
             const self_id = try self.arena.strings.intern(self.gpa, "self");
-            try ctx.locals.put(self.gpa, self_id, .{ .type_ = self_type, .is_mut = decl.self_kind == .by_mut });
+            _ = try ctx.bind(self.gpa, self_id, .{ .type_ = self_type, .is_mut = decl.self_kind == .by_mut });
         }
         if (when_root != ast_mod.RuleDecl.none_when) try self.collectWhen(&ctx, when_root);
 
@@ -5573,7 +5581,7 @@ pub const TypeChecker = struct {
             if (ptype == .unknown) {
                 try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown or unsupported parameter type on method '{s}'", .{self.arena.strings.slice(decl.name)});
             }
-            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+            try self.bindLocal(&ctx, p.name, .{ .type_ = ptype, .is_mut = false }, self.arena.typeNodeSpan(p.type_node));
         }
 
         const ret_t: ResolvedType = if (decl.return_type.isNone())
@@ -5625,17 +5633,86 @@ pub const TypeChecker = struct {
         /// a when clause there (the construct's Tier-1 runtime owns the
         /// scheduling, no archetype query is derived). Rules keep the gate.
         unrestricted_ecs_access: bool = false,
-        /// Local variables in the rule body, keyed by name.
+        /// The bindings visible at the point being checked, keyed by name.
         locals: std.AutoHashMapUnmanaged(StringId, Local) = .empty,
+        /// Every binding made in the scopes still open, with the one it
+        /// shadows, which `leave` puts back (`etch-reference-part1.md` §4.3).
+        scope_log: std.ArrayListUnmanaged(Shadowed) = .empty,
+        /// Where each open nested scope begins in `scope_log`; the body's own
+        /// scope begins at 0.
+        scope_starts: std.ArrayListUnmanaged(usize) = .empty,
 
         pub const Local = struct { type_: ResolvedType, is_mut: bool };
+        const Shadowed = struct { name: StringId, shadowed: ?Local };
 
         pub fn deinit(self: *RuleCtx, gpa: std.mem.Allocator) void {
             self.components_in_when.deinit(gpa);
             self.resources_in_when.deinit(gpa);
             self.locals.deinit(gpa);
+            self.scope_log.deinit(gpa);
+            self.scope_starts.deinit(gpa);
+        }
+
+        fn scopeStart(self: *const RuleCtx) usize {
+            return if (self.scope_starts.items.len == 0) 0 else self.scope_starts.getLast();
+        }
+
+        /// Whether the innermost scope binds `name`.
+        fn boundHere(self: *const RuleCtx, name: StringId) bool {
+            return self.loggedSince(self.scopeStart(), name);
+        }
+
+        /// Whether an open scope bound `name` at or after `scope_log[base]`.
+        fn loggedSince(self: *const RuleCtx, base: usize, name: StringId) bool {
+            for (self.scope_log.items[base..]) |e| {
+                if (e.name == name) return true;
+            }
+            return false;
+        }
+
+        /// Bind `name` in the innermost scope. False when that scope binds it
+        /// already: the new binding then replaces it there.
+        fn bind(self: *RuleCtx, gpa: std.mem.Allocator, name: StringId, local: Local) !bool {
+            if (self.boundHere(name)) {
+                try self.locals.put(gpa, name, local);
+                return false;
+            }
+            try self.scope_log.ensureUnusedCapacity(gpa, 1);
+            const shadowed = self.locals.get(name);
+            try self.locals.put(gpa, name, local);
+            self.scope_log.appendAssumeCapacity(.{ .name = name, .shadowed = shadowed });
+            return true;
+        }
+
+        fn enter(self: *RuleCtx, gpa: std.mem.Allocator) !void {
+            try self.scope_starts.append(gpa, self.scope_log.items.len);
+        }
+
+        /// Close the innermost scope: each of its bindings gives back the one
+        /// it shadowed, or leaves.
+        fn leave(self: *RuleCtx) void {
+            const start = self.scope_starts.pop().?;
+            var i = self.scope_log.items.len;
+            while (i > start) {
+                i -= 1;
+                const e = self.scope_log.items[i];
+                if (e.shadowed) |prev| {
+                    self.locals.getPtr(e.name).?.* = prev;
+                } else {
+                    _ = self.locals.remove(e.name);
+                }
+            }
+            self.scope_log.shrinkRetainingCapacity(start);
         }
     };
+
+    /// Bind `name` in `ctx`'s innermost scope; a second binding of one name in
+    /// one scope is E0101 (`etch-reference-part1.md` §4.2).
+    fn bindLocal(self: *TypeChecker, ctx: *RuleCtx, name: StringId, local: RuleCtx.Local, span: SourceSpan) !void {
+        if (!try ctx.bind(self.gpa, name, local)) {
+            try self.emit(.duplicate_symbol, .error_, span, "'{s}' is already bound in this scope", .{self.arena.strings.slice(name)});
+        }
+    }
 
     /// Number of structural-observer lifecycle annotations on a rule.
     fn observerAnnotationCount(self: *TypeChecker, rule: ast_mod.RuleDecl) u32 {
@@ -5744,7 +5821,7 @@ pub const TypeChecker = struct {
             } else {
                 try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unsupported parameter type in E1 (rule parameters must be scalar or Entity)", .{});
             }
-            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+            try self.bindLocal(&ctx, p.name, .{ .type_ = ptype, .is_mut = false }, self.arena.typeNodeSpan(p.type_node));
         }
 
         // `@on_event(T)` observer: bind the implicit `event` payload
@@ -5760,7 +5837,7 @@ pub const TypeChecker = struct {
                 // a rule can only observe an event whose type Etch knows.
                 if (self.eventNamed(event_type) != null or self.declaredEvent(event_type) != null) {
                     const event_id = try self.arena.strings.intern(self.gpa, "event");
-                    try ctx.locals.put(self.gpa, event_id, .{ .type_ = .{ .event_t = event_type }, .is_mut = false });
+                    try self.bindLocal(&ctx, event_id, .{ .type_ = .{ .event_t = event_type }, .is_mut = false }, annot.span);
                 } else {
                     try self.emit(.on_event_type_mismatch, .error_, annot.span, "@on_event(...) requires a declared event type; '{s}' is not an event", .{self.arena.strings.slice(event_type)});
                 }
@@ -6126,7 +6203,7 @@ pub const TypeChecker = struct {
             if (ptype == .unknown) {
                 try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown or unsupported parameter type on function '{s}'", .{self.arena.strings.slice(decl.name)});
             }
-            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+            try self.bindLocal(&ctx, p.name, .{ .type_ = ptype, .is_mut = false }, self.arena.typeNodeSpan(p.type_node));
         }
 
         // Declared return type drives `return` / trailing-value checks. A void
@@ -6445,11 +6522,7 @@ pub const TypeChecker = struct {
                 // component reference, so the local inherits mutability
                 // even when written `let h = ...` without `mut`.
                 const value_is_get_mut = self.arena.exprKind(let.value) == .method_get_mut;
-                // A `let` inside a closure body re-declaring a captured name
-                // owns it from there (nested-scope shadowing) — it is no
-                // longer a capture for the E0221 gate.
-                if (self.closure_captures) |caps| _ = caps.remove(let.name);
-                try ctx.locals.put(self.gpa, let.name, .{ .type_ = final, .is_mut = let.is_mut or value_is_get_mut });
+                try self.bindLocal(ctx, let.name, .{ .type_ = final, .is_mut = let.is_mut or value_is_get_mut }, self.arena.stmtSpan(stmt_id));
             },
             .assign_stmt => {
                 const assign = self.arena.assign_stmts.items[data];
@@ -6463,7 +6536,7 @@ pub const TypeChecker = struct {
                         // captures are value snapshots in both backends. The
                         // capture check precedes the mutability check (a
                         // captured `let mut` is still immutable here).
-                        const is_captured = if (self.closure_captures) |caps| caps.contains(name_id) else false;
+                        const is_captured = if (self.closure_captures) |caps| caps.contains(name_id) and !ctx.loggedSince(0, name_id) else false;
                         if (is_captured) {
                             const span = self.arena.exprSpan(assign.target);
                             try self.emit(.closure_cannot_mutate_capture, .error_, span, "closure cannot mutate captured binding '{s}' (pass it as an argument or mutate through entity.get_mut)", .{self.arena.strings.slice(name_id)});
@@ -6533,6 +6606,10 @@ pub const TypeChecker = struct {
                 // body is checked with it in scope.
                 const f = self.arena.for_stmts.items[data];
                 const iter_t = self.synthExpr(f.iterable, ctx);
+                // The loop variables share the body's scope.
+                try ctx.enter(self.gpa);
+                defer ctx.leave();
+                const stmt_span = self.arena.stmtSpan(stmt_id);
                 if (iter_t == .map_t) {
                     // `for k, v in m` — two bindings: key then value. A single-
                     // binding map for-in is rejected.
@@ -6540,9 +6617,9 @@ pub const TypeChecker = struct {
                     if (f.index_name == 0) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "map for-in binds two variables (for k, v in m)", .{});
                     } else {
-                        try ctx.locals.put(self.gpa, f.index_name, .{ .type_ = .{ .builtin = mi.value }, .is_mut = false });
+                        try self.bindLocal(ctx, f.index_name, .{ .type_ = .{ .builtin = mi.value }, .is_mut = false }, stmt_span);
                     }
-                    try ctx.locals.put(self.gpa, f.var_name, .{ .type_ = .{ .builtin = mi.key }, .is_mut = false });
+                    try self.bindLocal(ctx, f.var_name, .{ .type_ = .{ .builtin = mi.key }, .is_mut = false }, stmt_span);
                 } else {
                     var elem_t: ResolvedType = ResolvedType.unknown;
                     if (iter_t == .range) {
@@ -6563,7 +6640,7 @@ pub const TypeChecker = struct {
                     if (f.index_name != 0) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "this for-in binds a single loop variable", .{});
                     }
-                    try ctx.locals.put(self.gpa, f.var_name, .{ .type_ = elem_t, .is_mut = false });
+                    try self.bindLocal(ctx, f.var_name, .{ .type_ = elem_t, .is_mut = false }, stmt_span);
                 }
                 // a loop opened here is INSIDE any enclosing
                 // concurrency branch: its `break`/`continue` are legal (E0907
@@ -6591,9 +6668,12 @@ pub const TypeChecker = struct {
                 // binds the optional's payload in the body scope each iteration.
                 const wh = self.arena.while_stmts.items[data];
                 const cond_t = self.synthExpr(wh.cond, ctx);
+                // The `while let` payload shares the body's scope.
+                try ctx.enter(self.gpa);
+                defer ctx.leave();
                 if (wh.let_binding != 0) {
                     const payload = try self.optionalPayload(cond_t, self.arena.exprSpan(wh.cond), "while let");
-                    try ctx.locals.put(self.gpa, wh.let_binding, .{ .type_ = payload, .is_mut = false });
+                    try self.bindLocal(ctx, wh.let_binding, .{ .type_ = payload, .is_mut = false }, self.arena.stmtSpan(stmt_id));
                 } else if (!builtinWhere(cond_t, isBool)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(wh.cond), "while condition must be a bool expression", .{});
                 }
@@ -6606,7 +6686,6 @@ pub const TypeChecker = struct {
                 while (i < wh.body_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[wh.body_start + i]));
                 }
-                if (wh.let_binding != 0) _ = ctx.locals.remove(wh.let_binding);
             },
             .break_stmt => {
                 // `break [label] [value]`. Loop membership and label validity
@@ -6660,12 +6739,17 @@ pub const TypeChecker = struct {
                 // needs whatever the surrounding context offers, not `true`.
                 const saved_try_throw = self.current_can_throw;
                 self.current_can_throw = true;
+                try ctx.enter(self.gpa);
                 var i: u32 = 0;
                 while (i < tc.try_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[tc.try_start + i]));
                 }
+                ctx.leave();
                 self.current_can_throw = saved_try_throw;
-                try ctx.locals.put(self.gpa, tc.catch_name, .{ .type_ = .{ .struct_t = self.arena.error_type_name }, .is_mut = false });
+                // The caught binding shares the catch body's scope.
+                try ctx.enter(self.gpa);
+                defer ctx.leave();
+                try self.bindLocal(ctx, tc.catch_name, .{ .type_ = .{ .struct_t = self.arena.error_type_name }, .is_mut = false }, self.arena.stmtSpan(stmt_id));
                 i = 0;
                 while (i < tc.catch_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[tc.catch_start + i]));
@@ -6811,7 +6895,7 @@ pub const TypeChecker = struct {
                 const ss = self.arena.spawn_stmts.items[data];
                 try self.checkConcBodyRun(ctx, ss.body_start, ss.body_len, .spawn);
                 if (ss.binding != 0) {
-                    try ctx.locals.put(self.gpa, ss.binding, .{ .type_ = .{ .builtin = .task_handle }, .is_mut = false });
+                    try self.bindLocal(ctx, ss.binding, .{ .type_ = .{ .builtin = .task_handle }, .is_mut = false }, self.arena.stmtSpan(stmt_id));
                 }
             },
             .timer_stmt => {
@@ -6836,7 +6920,7 @@ pub const TypeChecker = struct {
                 // scope snapshot taken at scheduling, before the parent binds
                 // the handle — the handle does not exist inside the body.
                 if (ts.binding != 0) {
-                    try ctx.locals.put(self.gpa, ts.binding, .{ .type_ = .{ .builtin = .timer_handle }, .is_mut = false });
+                    try self.bindLocal(ctx, ts.binding, .{ .type_ = .{ .builtin = .timer_handle }, .is_mut = false }, self.arena.stmtSpan(stmt_id));
                 }
             },
             else => {},
@@ -6869,7 +6953,9 @@ pub const TypeChecker = struct {
         const saved_break_base = self.break_base;
         self.break_base = self.break_frames.items.len;
         const esc = try self.openEscapeWindow(ctx, .timer);
+        try ctx.enter(self.gpa);
         defer {
+            ctx.leave();
             self.closeEscapeWindow(esc);
             self.current_is_async = saved_async;
             self.conc_branch = saved_branch;
@@ -6890,19 +6976,15 @@ pub const TypeChecker = struct {
     /// branch body stays an ORDINARY async context otherwise — E0905 applies
     /// recursively inside it (§9.2 revision 2: the constructs relocate the
     /// `await`, they do not replace it).
-    /// Open an escape window: record every name visible RIGHT NOW, so anything
-    /// the snapshot body references from this set is a capture rather than one
-    /// of its own locals.
-    ///
-    /// Recording the names at ENTRY is what makes the distinction cheap and
-    /// exact: `ctx.locals` only grows while a body is checked, so a name absent
-    /// from the window was declared inside the body and captures nothing. The
-    /// alternative — diffing the map at exit — would answer the same question
-    /// after the references have already been typed.
+    /// Open an escape window: record every name visible now, and where the
+    /// snapshot body's own bindings begin, so that a name the body reads is a
+    /// capture unless the body bound it.
     fn openEscapeWindow(self: *TypeChecker, ctx: *RuleCtx, site: EscapeSite) TypeError!EscapeSave {
-        const save: EscapeSave = .{ .base = self.escape_base, .site = self.escape_site };
+        const save: EscapeSave = .{ .base = self.escape_base, .site = self.escape_site, .log_base = self.escape_log_base, .closure_own = self.closure_own };
         self.escape_base = self.escape_names.items.len;
+        self.escape_log_base = ctx.scope_log.items.len;
         self.escape_site = site;
+        self.closure_own = null;
         var it = ctx.locals.keyIterator();
         while (it.next()) |k| try self.escape_names.append(self.gpa, k.*);
         return save;
@@ -6911,14 +6993,46 @@ pub const TypeChecker = struct {
     fn closeEscapeWindow(self: *TypeChecker, save: EscapeSave) void {
         self.escape_names.shrinkRetainingCapacity(self.escape_base);
         self.escape_base = save.base;
+        self.escape_log_base = save.log_base;
         self.escape_site = save.site;
+        self.closure_own = save.closure_own;
     }
 
-    const EscapeSave = struct { base: usize, site: ?EscapeSite };
+    const EscapeSave = struct { base: usize, site: ?EscapeSite, log_base: usize, closure_own: ?*const std.AutoHashMapUnmanaged(StringId, void) };
 
-    /// True when `name` was visible before the innermost snapshot body opened —
-    /// i.e. referencing it inside that body captures it.
-    fn isCaptured(self: *const TypeChecker, name: StringId) bool {
+    /// The scope a closure literal was written in, which its body sees at
+    /// every call (`etch-resolver-types.md` §8.1), and the names of it that
+    /// the innermost snapshot body enclosing the literal bound itself.
+    const ClosureEnv = struct {
+        locals: std.AutoHashMapUnmanaged(StringId, RuleCtx.Local) = .empty,
+        own: std.AutoHashMapUnmanaged(StringId, void) = .empty,
+
+        fn deinit(self: *ClosureEnv, gpa: std.mem.Allocator) void {
+            self.locals.deinit(gpa);
+            self.own.deinit(gpa);
+        }
+    };
+
+    fn recordClosureEnv(self: *TypeChecker, ctx: *const RuleCtx) !u32 {
+        var env: ClosureEnv = .{};
+        errdefer env.deinit(self.gpa);
+        var it = ctx.locals.iterator();
+        while (it.next()) |e| {
+            try env.locals.put(self.gpa, e.key_ptr.*, e.value_ptr.*);
+            if (self.escape_site != null and !self.isCaptured(ctx, e.key_ptr.*)) try env.own.put(self.gpa, e.key_ptr.*, {});
+        }
+        try self.closure_envs.append(self.gpa, env);
+        return @intCast(self.closure_envs.items.len - 1);
+    }
+
+    /// True when `name` resolves, inside the innermost snapshot body, to a
+    /// binding visible before that body opened — a capture — and not to one
+    /// the body made.
+    fn isCaptured(self: *const TypeChecker, ctx: *const RuleCtx, name: StringId) bool {
+        if (ctx.loggedSince(self.escape_log_base, name)) return false;
+        if (self.closure_own) |own| {
+            if (own.contains(name)) return false;
+        }
         for (self.escape_names.items[self.escape_base..]) |n| {
             if (n == name) return true;
         }
@@ -7024,8 +7138,19 @@ pub const TypeChecker = struct {
         while (it.next()) |kv| {
             if (isRuleArenaType(kv.value_ptr.type_)) try offenders.append(self.gpa, kv.key_ptr.*);
         }
+        // A shadowed binding lives on until its shadow's scope closes, in the
+        // task that suspends: a task body holds only what its nested scopes
+        // shadow, its top scope replacing what it inherits.
+        const held_from = if (self.escape_site != null) taskNestedStart(ctx, self.escape_log_base) else 0;
+        for (ctx.scope_log.items[held_from..]) |e| {
+            const prev = e.shadowed orelse continue;
+            if (isRuleArenaType(prev.type_)) try offenders.append(self.gpa, e.name);
+        }
         std.mem.sort(StringId, offenders.items, {}, std.sort.asc(StringId));
+        var last: ?StringId = null;
         for (offenders.items) |name_id| {
+            if (last == name_id) continue;
+            last = name_id;
             try self.emit(
                 .rule_arena_value_escapes,
                 .error_,
@@ -7034,6 +7159,21 @@ pub const TypeChecker = struct {
                 .{ self.arena.strings.slice(name_id), EscapeSite.async_frame.label() },
             );
         }
+    }
+
+    /// Where the first scope nested in the task body whose own bindings begin
+    /// at `scope_log[base]` begins, or the log's end when none is open.
+    fn taskNestedStart(ctx: *const RuleCtx, base: usize) usize {
+        var body_top: ?usize = null;
+        for (ctx.scope_starts.items) |start| {
+            if (start < base) continue;
+            if (body_top == null) {
+                body_top = start;
+                continue;
+            }
+            return start;
+        }
+        return ctx.scope_log.items.len;
     }
 
     /// Does the `ForFrame` this loop pushes retain a handle into a per-body store
@@ -7121,7 +7261,9 @@ pub const TypeChecker = struct {
             .branch => .branch,
             .spawn => .spawn,
         });
+        try ctx.enter(self.gpa);
         defer {
+            ctx.leave();
             self.closeEscapeWindow(esc);
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
@@ -7156,7 +7298,9 @@ pub const TypeChecker = struct {
             .branch => .branch,
             .spawn => .spawn,
         });
+        try ctx.enter(self.gpa);
         defer {
+            ctx.leave();
             self.closeEscapeWindow(esc);
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
@@ -7290,7 +7434,7 @@ pub const TypeChecker = struct {
                 if (ctx_opt) |ctx| {
                     if (ctx.locals.get(name_id)) |local| {
                         if (self.escape_site) |site| {
-                            if (isRuleArenaType(local.type_) and self.isCaptured(name_id)) {
+                            if (isRuleArenaType(local.type_) and self.isCaptured(ctx, name_id)) {
                                 try self.emit(
                                     .rule_arena_value_escapes,
                                     .error_,
@@ -7493,7 +7637,22 @@ pub const TypeChecker = struct {
             .array_lit => return try self.synthArrayLit(id, data, ctx_opt),
             .map_lit => return try self.synthMapLit(id, data, ctx_opt),
             .index => return try self.synthIndex(id, data, ctx_opt),
-            .closure => return .{ .closure = id },
+            .closure => {
+                const ce = self.arena.closure_exprs.items[data];
+                var i: u32 = 0;
+                while (i < ce.params_len) : (i += 1) {
+                    const name = self.arena.closure_params.items[ce.params_start + i].name;
+                    var j: u32 = 0;
+                    while (j < i) : (j += 1) {
+                        if (self.arena.closure_params.items[ce.params_start + j].name == name) {
+                            try self.emit(.duplicate_symbol, .error_, self.arena.exprSpan(id), "'{s}' is already bound in this scope", .{self.arena.strings.slice(name)});
+                            break;
+                        }
+                    }
+                }
+                const env = if (ctx_opt) |ctx| try self.recordClosureEnv(ctx) else ClosureType.no_env;
+                return .{ .closure = .{ .literal = id, .env = env } };
+            },
             .fn_call => return try self.synthCall(id, data, ctx_opt),
             .struct_lit => return try self.synthStructLit(id, data, ctx_opt),
             .method_call => return try self.synthMethodCall(id, data, ctx_opt),
@@ -7699,6 +7858,8 @@ pub const TypeChecker = struct {
             };
             try self.break_frames.append(self.gpa, .{ .label = lp.label, .yields = true });
             defer _ = self.break_frames.pop();
+            try ctx.enter(self.gpa);
+            defer ctx.leave();
             var i: u32 = 0;
             while (i < lp.body_len) : (i += 1) {
                 const stmt: NodeId = @bitCast(self.arena.extra.items[lp.body_start + i]);
@@ -7717,12 +7878,25 @@ pub const TypeChecker = struct {
         return ResolvedType.unknown;
     }
 
-    /// Type a block expression `{ stmts; value }`. The body
-    /// statements are checked in order, then the block's type is the trailing
-    /// value's type, or unit when value-less. Locals declared in
-    /// the block use the flat per-rule locals map — lexical scoping is a later
-    /// refinement (the interpreter is the reference).
+    /// Type a block expression `{ stmts; value }` in a scope of its own. The
+    /// body statements are checked in order, then the block's type is the
+    /// trailing value's type, or unit when value-less.
     fn synthBlock(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const ctx = ctx_opt orelse return self.blockValue(data, null);
+        try ctx.enter(self.gpa);
+        defer ctx.leave();
+        return self.blockValue(data, ctx);
+    }
+
+    /// Type the body of a construct whose own bindings share the body's scope:
+    /// a block's statements join the scope open now.
+    fn synthBodyIn(self: *TypeChecker, body: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        if (self.arena.exprKind(body) == .block_expr) return self.blockValue(self.arena.exprData(body), ctx_opt);
+        return self.synthExprE(body, ctx_opt);
+    }
+
+    /// The statements and value of the block `data`, in the scope open now.
+    fn blockValue(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const blk = self.arena.block_exprs.items[data];
         if (ctx_opt) |ctx| {
             var i: u32 = 0;
@@ -7758,11 +7932,15 @@ pub const TypeChecker = struct {
         }
         const m = self.arena.measure_exprs.items[data];
         if (ctx_opt) |ctx| {
+            try ctx.enter(self.gpa);
+            defer ctx.leave();
             var i: u32 = 0;
             while (i < m.body_len) : (i += 1) {
                 const stmt: NodeId = @bitCast(self.arena.extra.items[m.body_start + i]);
                 try self.checkStmt(ctx, stmt);
             }
+            if (!m.value.isNone()) _ = try self.synthExprE(m.value, ctx);
+            return .{ .builtin = .duration };
         }
         if (!m.value.isNone()) _ = try self.synthExprE(m.value, ctx_opt);
         return .{ .builtin = .duration };
@@ -7779,9 +7957,13 @@ pub const TypeChecker = struct {
             // `if let x = <optional>`: the cond must be an
             // optional; `x` binds its payload in the then-block scope.
             const payload = try self.optionalPayload(cond_t, self.arena.exprSpan(ife.cond), "if let");
-            if (ctx_opt) |ctx| try ctx.locals.put(self.gpa, ife.let_binding, .{ .type_ = payload, .is_mut = false });
-            const then_t = try self.synthExprE(ife.then_block, ctx_opt);
-            if (ctx_opt) |ctx| _ = ctx.locals.remove(ife.let_binding);
+            // The payload shares the then-block's scope.
+            const then_t = if (ctx_opt) |ctx| blk: {
+                try ctx.enter(self.gpa);
+                defer ctx.leave();
+                try self.bindLocal(ctx, ife.let_binding, .{ .type_ = payload, .is_mut = false }, self.arena.exprSpan(id));
+                break :blk try self.synthBodyIn(ife.then_block, ctx);
+            } else try self.synthExprE(ife.then_block, null);
             if (ife.else_branch.isNone()) return ResolvedType.unit;
             const else_t = try self.synthExprE(ife.else_branch, ctx_opt);
             if (!try self.valueFits(then_t, ife.else_branch, else_t)) {
@@ -7976,7 +8158,7 @@ pub const TypeChecker = struct {
             if (callee_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "call target is not callable in E1 (only closures can be called)", .{});
             return ResolvedType.unknown;
         }
-        const ce = self.arena.closure_exprs.items[self.arena.exprData(callee_t.closure)];
+        const ce = self.arena.closure_exprs.items[self.arena.exprData(callee_t.closure.literal)];
         // Named arguments on a closure call are a bound (item-16
         // scope: declared fns + methods; flagged for the gate) — the
         // binding machinery targets declared signatures.
@@ -7989,33 +8171,63 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
         const ctx = ctx_opt orelse return ResolvedType.unknown;
-        // Snapshot the caller-scope binding names BEFORE the params bind:
-        // those are the body's potential captures (`etch-resolver-types.md`
-        // §8.1 — any body ident resolving to the parent scope). Params are
-        // excluded below; a body-local `let` removes its name at the
-        // `let_stmt` check. The set gates E0221 in the assign-stmt path.
+        // The arguments are read where the closure is called.
+        var arg_types: std.ArrayListUnmanaged(ResolvedType) = .empty;
+        defer arg_types.deinit(self.gpa);
+        var i: u32 = 0;
+        while (i < ce.params_len) : (i += 1) {
+            try arg_types.append(self.gpa, try self.synthExprE(@bitCast(self.arena.extra.items[call.args_start + i]), ctx));
+        }
+        if (callee_t.closure.env == ClosureType.no_env) return ResolvedType.unknown;
+        const env = &self.closure_envs.items[callee_t.closure.env];
+        // The body sees the scope the closure is written in, its params bound
+        // over it. Copied: typing the body can record another closure.
+        var own = try env.own.clone(self.gpa);
+        defer own.deinit(self.gpa);
+        const body_locals = try env.locals.clone(self.gpa);
         var captures: std.AutoHashMapUnmanaged(StringId, void) = .empty;
         defer captures.deinit(self.gpa);
-        var locals_it = ctx.locals.iterator();
-        while (locals_it.next()) |e| try captures.put(self.gpa, e.key_ptr.*, {});
-        var i: u32 = 0;
+        var names = body_locals.keyIterator();
+        while (names.next()) |k| try captures.put(self.gpa, k.*, {});
+        const caller_locals = ctx.locals;
+        const caller_log = ctx.scope_log;
+        const caller_starts = ctx.scope_starts;
+        ctx.locals = body_locals;
+        ctx.scope_log = .empty;
+        ctx.scope_starts = .empty;
+        defer {
+            ctx.locals.deinit(self.gpa);
+            ctx.scope_log.deinit(self.gpa);
+            ctx.scope_starts.deinit(self.gpa);
+            ctx.locals = caller_locals;
+            ctx.scope_log = caller_log;
+            ctx.scope_starts = caller_starts;
+        }
+        i = 0;
         while (i < ce.params_len) : (i += 1) {
             const p = self.arena.closure_params.items[ce.params_start + i];
             const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
-            const arg_t = try self.synthExprE(arg, ctx_opt);
-            var ptype = arg_t;
+            var ptype = arg_types.items[i];
             if (!p.type_node.isNone()) {
                 ptype = self.namedTypeToResolved(p.type_node);
-                if (!try self.valueFits(ptype, arg, arg_t)) {
+                if (!try self.valueFits(ptype, arg, arg_types.items[i])) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "closure argument type does not match the parameter type", .{});
                 }
             }
-            _ = captures.remove(p.name);
-            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+            // A second param of one name is refused once, at the literal.
+            _ = try ctx.bind(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
         }
         const saved_captures = self.closure_captures;
+        const saved_own = self.closure_own;
+        const saved_log_base = self.escape_log_base;
         self.closure_captures = &captures;
-        defer self.closure_captures = saved_captures;
+        self.closure_own = &own;
+        self.escape_log_base = 0;
+        defer {
+            self.closure_captures = saved_captures;
+            self.closure_own = saved_own;
+            self.escape_log_base = saved_log_base;
+        }
         // A `return` in a closure leaves the closure, which declares no type,
         // and no jump leaves it for the caller's loops or task branch.
         const saved_ret = self.current_fn_return;
@@ -8035,15 +8247,7 @@ pub const TypeChecker = struct {
             self.conc_labels_base = saved_labels;
             self.break_base = saved_break_base;
         }
-        const ret = try self.synthExprE(ce.body, ctx_opt);
-        // Remove the parameter bindings (a closure's params do not collide
-        // with outer locals in practice; a save/restore is a later refinement).
-        i = 0;
-        while (i < ce.params_len) : (i += 1) {
-            const p = self.arena.closure_params.items[ce.params_start + i];
-            _ = ctx.locals.remove(p.name);
-        }
-        return ret;
+        return try self.synthBodyIn(ce.body, ctx);
     }
 
     /// Validate a call's argument BINDING against a parameter-name list
@@ -9228,19 +9432,17 @@ pub const TypeChecker = struct {
         var i: u32 = 0;
         while (i < m.arms_len) : (i += 1) {
             const arm = self.arena.match_arms.items[m.arms_start + i];
+            // A pattern's bindings share its arm body's scope.
+            if (ctx_opt) |ctx| try ctx.enter(self.gpa);
+            defer if (ctx_opt) |ctx| ctx.leave();
             switch (arm.pattern_kind) {
                 .wildcard => has_catch_all = true,
                 .binding => {
                     has_catch_all = true;
                     // A bare binding `n => …` binds the scrutinee value for its
-                    // arm body — the SAME flat per-rule local scoping as
-                    // `some(v) =>` above. The
-                    // interpreter (interp.zig match `.binding`) and codegen
-                    // (lower.zig `emitMatch` `.binding`) already bind it; the
-                    // type-checker must too, else the body's use of `n` is
-                    // `E0102 UnknownSymbol`.
+                    // arm body.
                     if (ctx_opt) |ctx| {
-                        try ctx.locals.put(self.gpa, arm.pattern_payload, .{ .type_ = scrut_t, .is_mut = false });
+                        try self.bindLocal(ctx, arm.pattern_payload, .{ .type_ = scrut_t, .is_mut = false }, self.arena.exprSpan(arm.body));
                     }
                 },
                 .literal => {
@@ -9273,13 +9475,12 @@ pub const TypeChecker = struct {
                 },
                 // `some(v)` / `none` optional patterns (part1
                 // §7.6): the scrutinee must be an optional; `some(v)`
-                // binds the payload for its arm body (flat per-rule locals,
-                // the scoping policy).
+                // binds the payload for its arm body.
                 .optional_some => {
                     if (scrut_t == .optional) {
                         saw_some = true;
                         if (ctx_opt) |ctx| {
-                            try ctx.locals.put(self.gpa, arm.pattern_payload, .{ .type_ = .{ .builtin = scrut_t.optional }, .is_mut = false });
+                            try self.bindLocal(ctx, arm.pattern_payload, .{ .type_ = .{ .builtin = scrut_t.optional }, .is_mut = false }, self.arena.exprSpan(arm.body));
                         }
                     } else if (scrut_t != .unknown) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "some(...) pattern used on a non-optional scrutinee", .{});
@@ -9293,7 +9494,7 @@ pub const TypeChecker = struct {
                     }
                 },
             }
-            const body_t = try self.synthExprE(arm.body, ctx_opt);
+            const body_t = try self.synthBodyIn(arm.body, ctx_opt);
             if (result_t == null) {
                 result_t = body_t;
             } else if (!try self.armsAgree(result_t.?, arm.body, body_t)) {
@@ -16171,6 +16372,515 @@ test "a const read by either spelling, and a builtin type name, are accepted" {
         if (r.diagnostics.items.len != 0) {
             wrong += 1;
             for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const scope_rebound = [_]UnitCase{
+    .{ .name = "a let rebinding a let of its scope", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let x = 1
+    \\  let x = 2
+    \\  x
+    \\}
+    },
+    .{ .name = "a let rebinding a param", .code = .duplicate_symbol, .src =
+    \\fn f(x: int) -> int {
+    \\  let x = 2
+    \\  x
+    \\}
+    },
+    .{ .name = "two params of one name", .code = .duplicate_symbol, .src =
+    \\fn f(x: int, x: int) -> int { x }
+    },
+    .{ .name = "a let rebinding the for variable in its body", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let mut s = 0
+    \\  for i in 0..3 {
+    \\    let i = 1
+    \\    s += i
+    \\  }
+    \\  s
+    \\}
+    },
+    .{ .name = "a let rebinding an if-let payload in its block", .code = .duplicate_symbol, .src =
+    \\fn f(o: int?) -> int {
+    \\  if let v = o {
+    \\    let v = 2
+    \\    return v
+    \\  }
+    \\  0
+    \\}
+    },
+    .{ .name = "a let rebinding a while-let payload in its body", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let mut a: int[] = [1]
+    \\  while let v = a.pop() {
+    \\    let v = 2
+    \\  }
+    \\  0
+    \\}
+    },
+    .{ .name = "a let rebinding a match binding in its arm", .code = .duplicate_symbol, .src =
+    \\fn f(o: int?) -> int {
+    \\  match o {
+    \\    some(v) => {
+    \\      let v = 2
+    \\      v
+    \\    },
+    \\    none => 0,
+    \\  }
+    \\}
+    },
+    .{ .name = "a let rebinding the catch binding", .code = .duplicate_symbol, .src =
+    \\rule r() {
+    \\  try {
+    \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+    \\  } catch err {
+    \\    let err = 1
+    \\  }
+    \\}
+    },
+    .{ .name = "a let rebinding a closure param in its body", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let g = |x: int| {
+    \\    let x = 2
+    \\    x
+    \\  }
+    \\  g(1)
+    \\}
+    },
+    .{ .name = "two spawn handles of one name", .code = .duplicate_symbol, .src =
+    \\async rule r() {
+    \\  let h = spawn { }
+    \\  let h = spawn { }
+    \\}
+    },
+    .{ .name = "two timer handles of one name", .code = .duplicate_symbol, .src =
+    \\rule r() {
+    \\  let t = after(1.0s) { }
+    \\  let t = after(1.0s) { }
+    \\}
+    },
+    .{ .name = "two params of one name in a closure never called", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let g = |x: int, x: int| x
+    \\  0
+    \\}
+    },
+    .{ .name = "two params of one name in a closure called twice", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let g = |x: int, x: int| x
+    \\  let a = g(1, 2)
+    \\  let b = g(3, 4)
+    \\  a + b
+    \\}
+    },
+    .{ .name = "two lets of one name in one behavior composite", .code = .duplicate_symbol, .src =
+    \\behavior B {
+    \\  sequence {
+    \\    action: let a = 1
+    \\    action: let a = 2
+    \\  }
+    \\}
+    },
+};
+
+test "a binding naming another of its own scope is refused" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (scope_rebound) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const scope_ended = [_]UnitCase{
+    .{ .name = "a block's let read after the block", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  if true { let y = 1 }
+    \\  y
+    \\}
+    },
+    .{ .name = "a for variable read after the loop", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  for i in 0..3 { }
+    \\  i
+    \\}
+    },
+    .{ .name = "a for body's let read after the loop", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  for i in 0..3 { let t = i }
+    \\  t
+    \\}
+    },
+    .{ .name = "a match binding read after the match", .code = .undefined_symbol, .src =
+    \\fn f(o: int?) -> int {
+    \\  let r = match o { some(v) => v, none => 0 }
+    \\  v
+    \\}
+    },
+    .{ .name = "a match binding read in a later arm", .code = .undefined_symbol, .src =
+    \\fn f(o: int?) -> int {
+    \\  match o { some(v) => v, none => v }
+    \\}
+    },
+    .{ .name = "an if-let payload read in the else", .code = .undefined_symbol, .src =
+    \\fn f(o: int?) -> int {
+    \\  if let v = o { v } else { v }
+    \\}
+    },
+    .{ .name = "a catch binding read after the catch", .code = .undefined_symbol, .src =
+    \\rule r() {
+    \\  try {
+    \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+    \\  } catch err { }
+    \\  let c = err
+    \\}
+    },
+    .{ .name = "a while-let payload read after the loop", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  let mut a: int[] = [1]
+    \\  while let v = a.pop() { }
+    \\  v
+    \\}
+    },
+    .{ .name = "a timer body's let read after it", .code = .undefined_symbol, .src =
+    \\rule r() {
+    \\  after(1.0s) { let t = 1 }
+    \\  let u = t
+    \\}
+    },
+    .{ .name = "a branch body's let read after it", .code = .undefined_symbol, .src =
+    \\async rule r() {
+    \\  branch { let a = 1 }
+    \\  let b = a
+    \\}
+    },
+    .{ .name = "a race branch's let read by a later branch", .code = .undefined_symbol, .src =
+    \\async rule r() {
+    \\  race {
+    \\    { let a = 1 }
+    \\    { let b = a }
+    \\  }
+    \\}
+    },
+    .{ .name = "a try body's let read after the try", .code = .undefined_symbol, .src =
+    \\rule r() {
+    \\  try {
+    \\    let t = 1
+    \\  } catch err { }
+    \\  let u = t
+    \\}
+    },
+    .{ .name = "a bare match binding read after the match", .code = .undefined_symbol, .src =
+    \\fn f(n: int) -> int {
+    \\  let r = match n { k => k }
+    \\  k
+    \\}
+    },
+    .{ .name = "a loop body's let read after the loop", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  let v = loop {
+    \\    let t = 1
+    \\    break t
+    \\  }
+    \\  t
+    \\}
+    },
+    .{ .name = "a bare race branch's let read by a later branch", .code = .undefined_symbol, .src =
+    \\async rule r() {
+    \\  race {
+    \\    let a = 1
+    \\    { let b = a }
+    \\  }
+    \\}
+    },
+    .{ .name = "a behavior composite's let read by a sibling composite", .code = .undefined_symbol, .src =
+    \\behavior B {
+    \\  selector {
+    \\    sequence {
+    \\      action: let a = 1
+    \\    }
+    \\    sequence {
+    \\      action: let b = a
+    \\    }
+    \\  }
+    \\}
+    },
+    .{ .name = "a closure body reading a name bound after the closure", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  let g = || y
+    \\  let y = 1
+    \\  g()
+    \\}
+    },
+    .{ .name = "a closure body reading a name bound only where it is called", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  let g = || k
+    \\  if true {
+    \\    let k = 1
+    \\    let n = g()
+    \\  }
+    \\  0
+    \\}
+    },
+};
+
+test "a binding read outside its scope is refused" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (scope_ended) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const scope_nested = [_]ClosureJumpCase{
+    .{ .name = "a nested block shadows, and the outer binding returns", .src =
+    \\fn f() -> int {
+    \\  let x = 1
+    \\  if true { let x = "s" }
+    \\  x
+    \\}
+    },
+    .{ .name = "a nested block shadows a param", .src =
+    \\fn f(x: int) -> int {
+    \\  if true { let x = true }
+    \\  x
+    \\}
+    },
+    .{ .name = "sibling blocks bind one name", .src =
+    \\fn f() -> int {
+    \\  if true { let a = 1 } else { let a = "s" }
+    \\  0
+    \\}
+    },
+    .{ .name = "a match binding shadows an outer name", .src =
+    \\fn f(o: int?) -> bool {
+    \\  let v = true
+    \\  let r = match o { some(v) => v, none => 0 }
+    \\  v
+    \\}
+    },
+    .{ .name = "an if-let payload shadows an outer name", .src =
+    \\fn f(o: int?) -> bool {
+    \\  let v = true
+    \\  if let v = o { }
+    \\  v
+    \\}
+    },
+    .{ .name = "a for variable shadows an outer name", .src =
+    \\fn f() -> bool {
+    \\  let i = true
+    \\  for i in 0..3 { }
+    \\  i
+    \\}
+    },
+    .{ .name = "a closure param shadows an outer name", .src =
+    \\fn f() -> bool {
+    \\  let x = true
+    \\  let g = |x: int| x + 1
+    \\  let n = g(2)
+    \\  x
+    \\}
+    },
+    .{ .name = "a closure body sees the scope it is written in", .src =
+    \\fn f() -> int {
+    \\  let x = 1
+    \\  let g = || x
+    \\  if true {
+    \\    let x = "s"
+    \\    let n: int = g()
+    \\  }
+    \\  0
+    \\}
+    },
+    .{ .name = "a closure argument is read before the closure's params bind", .src =
+    \\fn f() -> float {
+    \\  let x = 1.5
+    \\  let g = |x: int, y: float| y
+    \\  g(2, x)
+    \\}
+    },
+    .{ .name = "a closure argument is read where the closure is called, not written", .src =
+    \\fn f() -> float {
+    \\  let k = 1
+    \\  let g = |y: float| y
+    \\  if true {
+    \\    let k = 2.5
+    \\    let n: float = g(k)
+    \\  }
+    \\  0.0
+    \\}
+    },
+    .{ .name = "one literal makes closures of different scopes", .src =
+    \\fn f() -> int {
+    \\  let mk = |v| || v
+    \\  let a = mk(1)
+    \\  let b = mk(true)
+    \\  let x: int = a()
+    \\  x
+    \\}
+    },
+    .{ .name = "a closure made from a closure of the same literal", .src =
+    \\fn f() -> int {
+    \\  let mk = |h| || h()
+    \\  let a = mk(|| 0)
+    \\  let b = mk(a)
+    \\  b()
+    \\}
+    },
+    .{ .name = "a branch in a block shadowing an arena local holds none of it", .src =
+    \\async rule r() {
+    \\  let a = [1, 2]
+    \\  if true {
+    \\    let a = 1
+    \\    branch { await wait(1.0s) }
+    \\  }
+    \\}
+    },
+    .{ .name = "a branch body shadowing an inherited arena local holds none of it", .src =
+    \\async rule r() {
+    \\  let a = [1, 2]
+    \\  branch {
+    \\    let a = 1
+    \\    await wait(1.0s)
+    \\  }
+    \\}
+    },
+    .{ .name = "a closure written in a timer body sees the timer's own binding", .src =
+    \\rule r() {
+    \\  let a = [1]
+    \\  after(1.0s) {
+    \\    let a = [2]
+    \\    let g = || a
+    \\    let n = g().len()
+    \\  }
+    \\}
+    },
+    .{ .name = "a loop body binds its let on every iteration", .src =
+    \\fn f() -> int {
+    \\  let mut s = 0
+    \\  for i in 0..3 {
+    \\    let t = i
+    \\    s += t
+    \\  }
+    \\  s
+    \\}
+    },
+    .{ .name = "a timer body shadows a local it inherits", .src =
+    \\rule r() {
+    \\  let x = 1
+    \\  after(1.0s) { let x = true }
+    \\  let y: int = x
+    \\}
+    },
+    .{ .name = "a spawn handle is bound in the enclosing scope", .src =
+    \\async rule r() {
+    \\  let h = spawn { }
+    \\  await h
+    \\}
+    },
+    .{ .name = "a timer body's own binding shadowing an arena local is no capture", .src =
+    \\rule r() {
+    \\  let a = [1, 2]
+    \\  after(1.0s) {
+    \\    let a = [3]
+    \\    let n = a.len()
+    \\  }
+    \\}
+    },
+};
+
+const scope_captured = [_]UnitCase{
+    .{ .name = "a closure assigning a capture once its own shadow has ended", .code = .closure_cannot_mutate_capture, .src =
+    \\fn f() -> int {
+    \\  let mut t = 0
+    \\  let g = || {
+    \\    if true {
+    \\      let mut t = 1
+    \\      t = 2
+    \\    }
+    \\    t = 3
+    \\  }
+    \\  g()
+    \\  t
+    \\}
+    },
+    .{ .name = "a timer in a closure body capturing the enclosing timer's local", .code = .rule_arena_value_escapes, .src =
+    \\rule r() {
+    \\  after(1.0s) {
+    \\    let b = [1]
+    \\    let g = || {
+    \\      after(2.0s) { let c = b }
+    \\    }
+    \\    g()
+    \\  }
+    \\}
+    },
+    .{ .name = "an arena local both visible and shadowed across an await, reported once", .code = .rule_arena_value_escapes, .src =
+    \\async rule r() {
+    \\  let a = [1]
+    \\  for i in 0..1 {
+    \\    let a = [2]
+    \\    await wait(1.0s)
+    \\  }
+    \\}
+    },
+    .{ .name = "an arena local shadowed across an await", .code = .rule_arena_value_escapes, .src =
+    \\async rule r() {
+    \\  let a = [1, 2]
+    \\  for i in 0..1 {
+    \\    let a = 2
+    \\    await wait(1.0s)
+    \\  }
+    \\}
+    },
+};
+
+test "a capture the body did not bind is judged as a capture" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (scope_captured) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a binding shadowing one of an enclosing scope is accepted, and ends with its scope" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (scope_nested) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
         }
     }
     try std.testing.expectEqual(@as(usize, 0), wrong);
