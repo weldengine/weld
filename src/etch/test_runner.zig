@@ -743,3 +743,46 @@ test "== and != follow Eq at run time, and an ordered type orders" {
     }
     try std.testing.expectEqual(@as(usize, 0), wrong);
 }
+
+const shorthand_runs = [_]EqualityRun{
+    .{ .name = "a let with an enum annotation", .src = "enum Dir { north, south }\ntest \"t\" {\n  let e: Dir = .south\n  assert(e == Dir.south)\n}" },
+    .{ .name = "a fn argument", .src = "enum Dir { north, south }\nfn is_south(d: Dir) -> bool { d == Dir.south }\ntest \"t\" {\n  assert(is_south(.south))\n}" },
+    .{ .name = "a return value, trailing and by return", .src = "enum Dir { north, south }\nfn g() -> Dir { .south }\nfn h() -> Dir {\n  return .north\n}\ntest \"t\" {\n  assert(g() == Dir.south)\n  assert(h() == Dir.north)\n}" },
+    .{ .name = "a reassignment", .src = "enum Dir { north, south }\ntest \"t\" {\n  let mut e: Dir = Dir.north\n  e = .south\n  assert(e == Dir.south)\n}" },
+    .{ .name = "some of a shorthand", .src = "enum Dir { north, south }\ntest \"t\" {\n  let d = some(.south)\n  let v = d ?? Dir.north\n  assert(v == Dir.south)\n}" },
+    .{ .name = "a struct field write", .src = "enum Dir { north, south }\nstruct T { d: Dir = .north }\ntest \"t\" {\n  let mut t = T { d: Dir.north }\n  t.d = .south\n  assert(t.d == Dir.south)\n}" },
+    .{ .name = "an equality, either side", .src = "enum Dir { north, south }\ntest \"t\" {\n  let e = Dir.south\n  assert(e == .south)\n  assert(.north != e)\n}" },
+    .{ .name = "the expected type picks among two enums", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let p: Pole = .north\n  assert(p == Pole.north)\n  let q: Pole = if true { .south } else { .north }\n  assert(q == Pole.south)\n  assert(p == .north)\n}" },
+    .{ .name = "the one enum naming the variant, with nothing expected", .src = "enum Dir { north, south }\ntest \"t\" {\n  let d = .south\n  assert(d == Dir.south)\n}" },
+    .{ .name = "a match arm value", .src = "enum Dir { north, south }\ntest \"t\" {\n  let v: Dir = match 1 { 1 => .south, _ => .north }\n  assert(v == Dir.south)\n}" },
+};
+
+test "a .variant shorthand runs as the variant its expected type names" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (shorthand_runs) |c| {
+        var pr = try parser_mod.parse(gpa, c.src);
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        if (diags.items.len != 0) {
+            wrong += 1;
+            for (diags.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+            continue;
+        }
+        var threaded: Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        var report = try run(gpa, threaded.io(), &pr.ast);
+        defer report.deinit();
+        if (report.passed != 1) {
+            wrong += 1;
+            for (report.results) |r| std.debug.print("{s}: {t} {s}\n", .{ c.name, r.status, r.message orelse "" });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}

@@ -559,6 +559,9 @@ pub const TypeChecker = struct {
     /// Literals already reported out of range, so a literal checked in two
     /// contexts is reported once.
     range_reported: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// The `.variant` shorthands synthesized with no expected type that no enum,
+    /// or several, name; reported once the file is checked.
+    unresolved_shorthands: std.AutoArrayHashMapUnmanaged(u32, void) = .empty,
     /// The `await_expr` node that is the statement-head `await` of the statement
     /// currently being checked, or `NodeId.none`. Set at the top of
     /// `checkStmt` for the allowed positions (expr-stmt / `let` init / simple
@@ -806,6 +809,7 @@ pub const TypeChecker = struct {
         self.services.deinit(self.gpa);
         self.foreign_events.deinit(self.gpa);
         self.range_reported.deinit(self.gpa);
+        self.unresolved_shorthands.deinit(self.gpa);
         if (self.tag_table) |*t| t.deinit(self.gpa);
     }
 
@@ -847,6 +851,7 @@ pub const TypeChecker = struct {
         try tc.runDeclarationPasses();
         try tc.validatePrefabDecls();
         try tc.pass2Resolve();
+        try tc.reportUnresolvedShorthands();
     }
 
     /// Every pass `check` runs before the prefab validation: the symbols,
@@ -1091,6 +1096,7 @@ pub const TypeChecker = struct {
         try tc.runDeclarationPasses();
         tc.diagnostics = diagnostics;
         tc.range_reported.clearRetainingCapacity();
+        tc.unresolved_shorthands.clearRetainingCapacity();
         const kinds = arena.items.items(.kind);
         const datas = arena.items.items(.data);
         var i: u28 = 0;
@@ -1101,6 +1107,7 @@ pub const TypeChecker = struct {
             if (decl.has_on_detach) try tc.checkLiteralRangesIn(tc.bodyBytes(decl.on_detach_start, decl.on_detach_len));
             try tc.checkPrefabRequiresAndHooks(decl);
         }
+        try tc.reportUnresolvedShorthands();
     }
 
     /// A statement run already in `arena`: `extra[start .. start + len]`, and the
@@ -1127,11 +1134,13 @@ pub const TypeChecker = struct {
         try tc.runDeclarationPasses();
         tc.diagnostics = diagnostics;
         tc.range_reported.clearRetainingCapacity();
+        tc.unresolved_shorthands.clearRetainingCapacity();
         try tc.checkLiteralRangesIn(.{ .indices = .{ .expr_from = run.expr_from, .expr_to = run.expr_to, .type_from = run.type_from, .type_to = run.type_to } });
         var names: std.AutoHashMapUnmanaged(StringId, void) = .empty;
         defer names.deinit(gpa);
         for (scope) |name| if (arena.strings.find(name)) |id| try names.put(gpa, id, {});
         try tc.checkHookBody(&names, run.start, run.len);
+        try tc.reportUnresolvedShorthands();
     }
 
     /// The source bytes a statement run spans.
@@ -5152,6 +5161,13 @@ pub const TypeChecker = struct {
     /// generic fits anything: a struct's own type parameters resolve against the
     /// caller's.
     fn valueFits(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) !bool {
+        if (declared == .enum_t) try self.fitShorthands(declared.enum_t, value);
+        if (!value.isNone() and self.arena.isEnumShorthand(value) and declared != .enum_t and declared != .unknown and declared != .generic) {
+            _ = self.unresolved_shorthands.swapRemove(value.raw());
+            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "'.{s}' names an enum variant where no enum is expected", .{self.arena.strings.slice(self.arena.exprData(value))});
+            return true;
+        }
+        if (declared == .enum_t and !value.isNone() and self.arena.isEnumShorthand(value)) return true;
         if (declared == .unknown or actual == .unknown or declared == .generic or actual == .generic) return true;
         if (declared == .builtin and actual == .builtin) return self.literalTypeFits(declared.builtin, value, actual.builtin);
         if (declared == .builtin and declared.builtin == .vec3 and actual == .array_fixed)
@@ -7448,7 +7464,7 @@ pub const TypeChecker = struct {
                 }
                 return ResolvedType{ .builtin = .string_ };
             },
-            .tag_path => return ResolvedType.unknown, // enum-variant shorthand; the type is unknown here
+            .tag_path => return self.synthShorthand(id),
             // `none`: an optional with an unknown payload —
             // typed by the binding annotation / context (e.g. `let o: int? = none`).
             .none_lit => return ResolvedType.unknown,
@@ -8538,9 +8554,95 @@ pub const TypeChecker = struct {
     /// parse error there). E0105 when the variant does not exist.
     fn checkEnumShorthand(self: *TypeChecker, value: NodeId, enum_name: StringId) TypeError!ResolvedType {
         const variant: StringId = self.arena.exprData(value);
-        if (self.enumVariantIndex(enum_name, variant) != null) return .{ .enum_t = enum_name };
+        _ = self.unresolved_shorthands.swapRemove(value.raw());
+        if (self.enumVariantIndex(enum_name, variant) != null) {
+            try self.arena.enum_shorthands.put(self.gpa, value.raw(), enum_name);
+            return .{ .enum_t = enum_name };
+        }
+        _ = self.arena.enum_shorthands.remove(value.raw());
         try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(enum_name), self.arena.strings.slice(variant) });
         return ResolvedType.unknown;
+    }
+
+    /// A `.variant` shorthand with no expected type (`etch-resolver-types.md`
+    /// §3.5): the one enum naming the variant. A slot that expects a type
+    /// resolves it again through `fitShorthands`.
+    fn synthShorthand(self: *TypeChecker, id: NodeId) TypeError!ResolvedType {
+        if (!self.arena.isEnumShorthand(id)) return ResolvedType.unknown;
+        if (self.arena.shorthandEnum(id)) |name| return .{ .enum_t = name };
+        const variant: StringId = self.arena.exprData(id);
+        var found: ?StringId = null;
+        var count: u32 = 0;
+        var local = self.symbols.iterator();
+        while (local.next()) |e| {
+            if (e.value_ptr.kind != .enum_ or self.imported_symbols.contains(e.key_ptr.*)) continue;
+            if (self.enumVariantIndex(e.key_ptr.*, variant) != null) {
+                found = e.key_ptr.*;
+                count += 1;
+            }
+        }
+        var imported = self.imported_symbols.iterator();
+        while (imported.next()) |e| {
+            if (e.value_ptr.kind != .enum_) continue;
+            if (self.enumVariantIndex(e.key_ptr.*, variant) != null) {
+                found = e.key_ptr.*;
+                count += 1;
+            }
+        }
+        if (count != 1) {
+            try self.unresolved_shorthands.put(self.gpa, id.raw(), {});
+            return ResolvedType.unknown;
+        }
+        try self.arena.enum_shorthands.put(self.gpa, id.raw(), found.?);
+        return .{ .enum_t = found.? };
+    }
+
+    /// Resolve the shorthands `value` yields — itself, or the trailing values of
+    /// its branches — against the enum a slot expects.
+    fn fitShorthands(self: *TypeChecker, enum_name: StringId, value: NodeId) TypeError!void {
+        if (value.isNone()) return;
+        switch (self.arena.exprKind(value)) {
+            .tag_path => if (self.arena.isEnumShorthand(value)) {
+                _ = try self.checkEnumShorthand(value, enum_name);
+            },
+            .block_expr => try self.fitShorthands(enum_name, self.arena.block_exprs.items[self.arena.exprData(value)].value),
+            .if_expr => {
+                const ife = self.arena.if_exprs.items[self.arena.exprData(value)];
+                try self.fitShorthands(enum_name, ife.then_block);
+                try self.fitShorthands(enum_name, ife.else_branch);
+            },
+            .match_expr => {
+                const m = self.arena.match_exprs.items[self.arena.exprData(value)];
+                var i: u32 = 0;
+                while (i < m.arms_len) : (i += 1) try self.fitShorthands(enum_name, self.arena.match_arms.items[m.arms_start + i].body);
+            },
+            else => {},
+        }
+    }
+
+    /// Every shorthand no slot resolved: E0106 when several enums name its
+    /// variant, E0105 when none does.
+    fn reportUnresolvedShorthands(self: *TypeChecker) TypeError!void {
+        for (self.unresolved_shorthands.keys()) |raw| {
+            const id: NodeId = @bitCast(raw);
+            if (self.arena.shorthandEnum(id) != null) continue;
+            const variant = self.arena.strings.slice(self.arena.exprData(id));
+            var count: u32 = 0;
+            var local = self.symbols.iterator();
+            while (local.next()) |e| {
+                if (e.value_ptr.kind == .enum_ and !self.imported_symbols.contains(e.key_ptr.*) and self.enumVariantIndex(e.key_ptr.*, self.arena.exprData(id)) != null) count += 1;
+            }
+            var imported = self.imported_symbols.iterator();
+            while (imported.next()) |e| {
+                if (e.value_ptr.kind == .enum_ and self.enumVariantIndex(e.key_ptr.*, self.arena.exprData(id)) != null) count += 1;
+            }
+            if (count > 1) {
+                try self.emit(.ambiguous_enum_variant, .error_, self.arena.exprSpan(id), "'.{s}' is a variant of several enums; write it qualified", .{variant});
+            } else {
+                try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(id), "no enum has a variant '{s}'", .{variant});
+            }
+        }
+        self.unresolved_shorthands.clearRetainingCapacity();
     }
 
     fn synthStructLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
@@ -9622,7 +9724,14 @@ pub const TypeChecker = struct {
 
     /// `==` and `!=` (`etch-resolver-types.md` §16.4): two values of one `Eq`
     /// type, or `none` against an optional.
-    fn synthEquality(self: *TypeChecker, lhs: NodeId, rhs: NodeId, lhs_t: ResolvedType, rhs_t: ResolvedType, span: SourceSpan) TypeError!ResolvedType {
+    fn synthEquality(self: *TypeChecker, lhs: NodeId, rhs: NodeId, lhs_synth: ResolvedType, rhs_synth: ResolvedType, span: SourceSpan) TypeError!ResolvedType {
+        var lhs_t = lhs_synth;
+        var rhs_t = rhs_synth;
+        if (self.arena.isEnumShorthand(rhs) and lhs_t == .enum_t) {
+            rhs_t = try self.checkEnumShorthand(rhs, lhs_t.enum_t);
+        } else if (self.arena.isEnumShorthand(lhs) and rhs_t == .enum_t) {
+            lhs_t = try self.checkEnumShorthand(lhs, rhs_t.enum_t);
+        }
         const lhs_none = self.arena.exprKind(lhs) == .none_lit;
         const rhs_none = self.arena.exprKind(rhs) == .none_lit;
         if (lhs_none and rhs_none) {
@@ -14948,6 +15057,7 @@ test "a race branch returning a NON-arena value is still accepted — the green 
         .{ .decls = "", .expr = "true" },
         .{ .decls = "", .expr = "1 + 2" },
         .{ .decls = "", .expr = "entity" },
+        .{ .decls = "enum K { a, b }\n", .expr = ".b" },
     };
     for (forms) |f| {
         const src = try raceReturnProgram(gpa, f.decls, f.expr);
@@ -14972,14 +15082,6 @@ test "a race branch returning a bare string literal is refused — the MEASURED 
     var c = try parseAndCheck(gpa, src);
     defer c.deinit(gpa);
     try expectAnyCode(c.diagnostics.items, .rule_arena_value_escapes);
-
-    // A bare enum shorthand has no expected type here and resolves `.unknown`,
-    // which `isRuleArenaType` refuses though the value is a discriminant.
-    const en = try raceReturnProgram(gpa, "enum K { a, b }\n", ".b");
-    defer gpa.free(en);
-    var e2 = try parseAndCheck(gpa, en);
-    defer e2.deinit(gpa);
-    try expectAnyCode(e2.diagnostics.items, .rule_arena_value_escapes);
 }
 
 test "a scalar event filter is still accepted, and only a string can reach one" {
@@ -16969,6 +17071,34 @@ test "== refuses a type that is not Eq, and an ordering a type that is not Ord" 
     const gpa = std.testing.allocator;
     var wrong: usize = 0;
     for (equality_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const shorthand_refused = [_]UnitCase{
+    .{ .name = "a let annotation's enum has no such variant", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let e: Dir = .west\n}" },
+    .{ .name = "a let annotation is not an enum", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let x: int = .south\n}" },
+    .{ .name = "no enum has the variant", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let d = .west\n}" },
+    .{ .name = "a fn argument", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nfn f(d: Dir) -> int { 1 }\nrule r() {\n  let n = f(.west)\n}" },
+    .{ .name = "a return value", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nfn g() -> Dir {\n  return .west\n}" },
+    .{ .name = "a reassignment", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let mut e: Dir = Dir.north\n  e = .west\n}" },
+    .{ .name = "a struct field write", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nstruct T { d: Dir = .north }\nrule r() {\n  let mut t = T { d: Dir.north }\n  t.d = .west\n}" },
+    .{ .name = "an equality", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let e = Dir.north\n  let b = e == .west\n}" },
+    .{ .name = "two enums share the variant and nothing expects one", .code = .ambiguous_enum_variant, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let v = .north\n}" },
+};
+
+test "a .variant shorthand resolves against the expected type, else against the one enum naming it" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (shorthand_refused) |c| {
         var r = try parseAndCheck(gpa, c.src);
         defer r.deinit(gpa);
         try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);

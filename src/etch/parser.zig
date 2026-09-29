@@ -10586,3 +10586,25 @@ test "service is refused in a standard .etch and recovery resyncs on it" {
     try std.testing.expectEqual(@as(usize, 1), after.ast.component_decls.items.len);
     try std.testing.expectEqualStrings("Health", after.ast.strings.slice(after.ast.component_decls.items[0].name));
 }
+
+test "a tag path literal is no enum shorthand, and a bare .variant is one" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\tags { a { b } }
+        \\ability X { tags_required: [.a.b] }
+        \\rule r() {
+        \\  let v = .b
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    var paths: usize = 0;
+    var shorthands: usize = 0;
+    for (result.ast.exprs.items(.kind), 0..) |k, i| {
+        if (k != .tag_path) continue;
+        paths += 1;
+        if (result.ast.isEnumShorthand(.{ .category = .expr, .index = @intCast(i) })) shorthands += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), paths);
+    try std.testing.expectEqual(@as(usize, 1), shorthands);
+}

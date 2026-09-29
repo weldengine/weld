@@ -2595,6 +2595,11 @@ pub const AstArena = struct {
     tag_leaves: std.ArrayListUnmanaged(TagLeaf) = .empty,
     tag_paths: std.ArrayListUnmanaged(TagPathExpr) = .empty,
     tag_path_segs: std.ArrayListUnmanaged(StringId) = .empty,
+    /// The `tag_path` nodes `addTagPath` built, whose data indexes `tag_paths`;
+    /// every other `tag_path` is a `.variant` shorthand whose data is the name.
+    tag_path_literals: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// Each `.variant` shorthand the checker resolved → the enum it names.
+    enum_shorthands: std.AutoHashMapUnmanaged(u32, StringId) = .empty,
     tag_filters: std.ArrayListUnmanaged(TagFilter) = .empty,
     tag_operands: std.ArrayListUnmanaged(NodeId) = .empty,
     tag_mutation_stmts: std.ArrayListUnmanaged(TagMutationStmt) = .empty,
@@ -2837,6 +2842,8 @@ pub const AstArena = struct {
         self.tag_leaves.deinit(gpa);
         self.tag_paths.deinit(gpa);
         self.tag_path_segs.deinit(gpa);
+        self.tag_path_literals.deinit(gpa);
+        self.enum_shorthands.deinit(gpa);
         self.tag_filters.deinit(gpa);
         self.tag_operands.deinit(gpa);
         self.tag_mutation_stmts.deinit(gpa);
@@ -3762,7 +3769,21 @@ pub const AstArena = struct {
         try self.tag_path_segs.appendSlice(gpa, segs);
         const idx: u32 = @intCast(self.tag_paths.items.len);
         try self.tag_paths.append(gpa, .{ .segs_start = segs_start, .segs_len = @intCast(segs.len) });
-        return try self.addExpr(gpa, .tag_path, idx, span);
+        try self.tag_path_literals.ensureUnusedCapacity(gpa, 1);
+        const node = try self.addExpr(gpa, .tag_path, idx, span);
+        self.tag_path_literals.putAssumeCapacity(node.raw(), {});
+        return node;
+    }
+
+    /// Whether `id` is a `.variant` shorthand, a `tag_path` whose data is the
+    /// variant's name.
+    pub fn isEnumShorthand(self: *const AstArena, id: NodeId) bool {
+        return self.exprKind(id) == .tag_path and !self.tag_path_literals.contains(id.raw());
+    }
+
+    /// The enum the checker resolved the shorthand `id` to.
+    pub fn shorthandEnum(self: *const AstArena, id: NodeId) ?StringId {
+        return self.enum_shorthands.get(id.raw());
     }
 
     pub fn addTryCatchStmt(self: *AstArena, gpa: std.mem.Allocator, tc: TryCatchStmt, span: SourceSpan) !NodeId {

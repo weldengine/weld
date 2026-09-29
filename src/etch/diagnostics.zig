@@ -34,6 +34,7 @@ pub const DiagnosticCode = enum {
     not_a_module, // E0103 NotAModule (import path resolves to no module)
     unknown_export, // E0104 UnknownExport (item absent from target's exports)
     enum_variant_not_found, // E0105 EnumVariantNotFound
+    ambiguous_enum_variant, // E0106 AmbiguousEnumVariant (a `.variant` shorthand no expected type resolves, several enums naming it)
     import_private_item, // E0107 ImportPrivateItem (buildExports sets .private from Item.visibility)
     import_cycle, // E0108 ImportCycle (D-B: NOT E0101; E0101 is DuplicateSymbol)
     private_type_in_public_impl, // W0902 PrivateTypeInPublicImpl (visibility §10.2, warning)
@@ -426,6 +427,7 @@ pub const DiagnosticCode = enum {
             .import_cycle => "E0108",
             .private_type_in_public_impl => "W0902",
             .enum_variant_not_found => "E0105",
+            .ambiguous_enum_variant => "E0106",
             .type_mismatch => "E0200",
             .arg_count_mismatch => "E0203",
             .return_type_mismatch => "E0204",
@@ -641,6 +643,7 @@ pub const DiagnosticCode = enum {
             .import_cycle => "ImportCycle",
             .private_type_in_public_impl => "PrivateTypeInPublicImpl",
             .enum_variant_not_found => "EnumVariantNotFound",
+            .ambiguous_enum_variant => "AmbiguousEnumVariant",
             .type_mismatch => "TypeMismatch",
             .arg_count_mismatch => "ArgCountMismatch",
             .return_type_mismatch => "ReturnTypeMismatch",

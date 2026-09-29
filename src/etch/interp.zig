@@ -14,7 +14,8 @@
 //!   at the tick boundary via `applyWithObservers` (firing observers per op),
 //!   never mid-`iterateArchetype`.
 //! - No job system use; rules run sequentially on the calling thread.
-//! - `ExprKind.path` and `ExprKind.tag_path` produce `RuntimeError.UnsupportedExpr`.
+//! - A `.variant` shorthand runs as the variant the type-checker resolved it to
+//!   (`AstArena.enum_shorthands`), so a program nothing checked cannot run one.
 
 const std = @import("std");
 const ast_mod = @import("ast.zig");
@@ -7213,7 +7214,11 @@ pub const Interpreter = struct {
                 return Value{ .unit = {} };
             },
             .path => return (try self.constValue(data)) orelse error.RuntimeFailure,
-            else => return error.RuntimeFailure, // tag_path / unsupported variants
+            .tag_path => {
+                const enum_name = self.ast.shorthandEnum(id) orelse return error.RuntimeFailure;
+                return self.evalEnumShorthandFor(world, locals, id, enum_name);
+            },
+            else => return error.RuntimeFailure, // unsupported variants
         }
     }
 };
