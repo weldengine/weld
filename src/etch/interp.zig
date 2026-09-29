@@ -1135,6 +1135,8 @@ pub const Interpreter = struct {
     /// Top-level `fn` declarations keyed by name, for
     /// resolving a free-function call `f(args)` whose callee names a `fn`.
     fns: std.AutoHashMapUnmanaged(StringId, ast_mod.FnDecl) = .empty,
+    /// Top-level `const` declarations by name, read where a name is no local.
+    consts: std.AutoHashMapUnmanaged(StringId, ast_mod.ConstDecl) = .empty,
     /// Inherent `impl` methods keyed by `methodKey(type_name, method_name)`, for
     /// `recv.method()` / `Type.assoc()` dispatch.
     methods: std.AutoHashMapUnmanaged(u64, ast_mod.FnDecl) = .empty,
@@ -1414,6 +1416,7 @@ pub const Interpreter = struct {
         for (self.run_strings.items) |s| self.gpa.free(s);
         self.run_strings.deinit(self.gpa);
         self.fns.deinit(self.gpa);
+        self.consts.deinit(self.gpa);
         self.methods.deinit(self.gpa);
         self.struct_decls.deinit(self.gpa);
         self.enum_decls.deinit(self.gpa);
@@ -1588,13 +1591,17 @@ pub const Interpreter = struct {
         // resolution.
         var fns: std.AutoHashMapUnmanaged(StringId, ast_mod.FnDecl) = .empty;
         errdefer fns.deinit(gpa);
+        var consts: std.AutoHashMapUnmanaged(StringId, ast_mod.ConstDecl) = .empty;
+        errdefer consts.deinit(gpa);
         i = 0;
         while (i < ast.items.len) : (i += 1) {
             const kind = ast.items.items(.kind)[i];
             const data = ast.items.items(.data)[i];
-            if (kind != .fn_decl) continue;
-            const decl = ast.fn_decls.items[data];
-            try fns.put(gpa, decl.name, decl);
+            switch (kind) {
+                .fn_decl => try fns.put(gpa, ast.fn_decls.items[data].name, ast.fn_decls.items[data]),
+                .const_decl => try consts.put(gpa, ast.const_decls.items[data].name, ast.const_decls.items[data]),
+                else => {},
+            }
         }
 
         // Pass D — index inherent `impl` methods by `(type_name, method_name)`
@@ -1727,6 +1734,7 @@ pub const Interpreter = struct {
             .bridge = bridge,
             .rule_descs = slice,
             .fns = fns,
+            .consts = consts,
             .methods = methods,
             .struct_decls = struct_decls,
             .enum_decls = enum_decls,
@@ -5159,13 +5167,30 @@ pub const Interpreter = struct {
     /// `null` when the field is not enum-typed or the variant is unknown
     /// (the resolver has already rejected those programs).
     fn enumFieldShorthand(self: *Interpreter, f: ast_mod.Field, value: NodeId) ?Value {
-        const ename = self.ast.resolveTypeAliasName(self.ast.namedTypeName(f.type_node) orelse return null);
+        return self.enumShorthandOf(f.type_node, value);
+    }
+
+    fn enumShorthandOf(self: *Interpreter, type_node: NodeId, value: NodeId) ?Value {
+        const ename = self.ast.resolveTypeAliasName(self.ast.namedTypeName(type_node) orelse return null);
         const edecl = self.enum_decls.get(ename) orelse return null;
         // Expression-position `tag_path` data IS the variant ident (the
         // parser interns it directly; multi-segment is a parse error there).
         const variant: StringId = self.ast.exprData(value);
         const vidx = self.enumVariantIndexOf(edecl, variant) orelse return null;
         return Value{ .enum_value = .{ .type_name = ename, .variant = vidx } };
+    }
+
+    /// The value of the top-level `const` `name` names, `null` when none does.
+    fn constValue(self: *Interpreter, name: StringId) StmtError!?Value {
+        const decl = self.consts.get(name) orelse return null;
+        return switch (self.ast.exprKind(decl.value)) {
+            .string_lit => Value{ .string_id = self.ast.exprData(decl.value) },
+            .tag_path => self.enumShorthandOf(decl.type_node, decl.value) orelse error.RuntimeFailure,
+            else => evalConst(self.gpa, self.ast, decl.value) catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.RuntimeFailure,
+            },
+        };
     }
 
     /// Resolve an enum assignment RHS against a known enum type id. A bare
@@ -6371,7 +6396,7 @@ pub const Interpreter = struct {
             .ident => {
                 const name_id: StringId = data;
                 if (locals.get(name_id)) |v| return v;
-                return error.RuntimeFailure;
+                return (try self.constValue(data)) orelse error.RuntimeFailure;
             },
             .field_access => {
                 const fa = self.ast.field_accesses.items[data];
@@ -6963,7 +6988,8 @@ pub const Interpreter = struct {
                 try dbuf.commands.append(dbuf.gpa, .{ .spawn = .{ .component_ids = ids, .payloads = payloads } });
                 return Value{ .unit = {} };
             },
-            else => return error.RuntimeFailure, // path / tag_path / unsupported variants
+            .path => return (try self.constValue(data)) orelse error.RuntimeFailure,
+            else => return error.RuntimeFailure, // tag_path / unsupported variants
         }
     }
 };
@@ -18189,4 +18215,74 @@ test "a continue that leaves its closure fails the rule and does not continue th
     const le = report.last_error orelse return error.TestExpectedTypedError;
     try std.testing.expectEqual(RuntimeErrorKind.ControlFlowEscapesClosure, le.kind);
     try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "Out", "n"));
+}
+
+const ConstRun = struct { name: []const u8, src: []const u8, out: i64 };
+
+const const_runs = [_]ConstRun{
+    .{ .name = "a lowercase const", .out = 7, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = limit
+    \\}
+    },
+    .{ .name = "an uppercase const", .out = 9, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = MAX
+    \\}
+    },
+    .{ .name = "two consts in arithmetic", .out = 16, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = limit + MAX
+    \\}
+    },
+    .{ .name = "an enum const", .out = 3, .src =
+    \\resource Out { n: int = 0 }
+    \\enum Tag { a, b }
+    \\const START: Tag = .b
+    \\rule r() when resource Out {
+    \\  let t: Tag = START
+    \\  get_mut(Out).n = match t { .a => 1, .b => 3 }
+    \\}
+    },
+    .{ .name = "a string const", .out = 2, .src =
+    \\resource Out { n: int = 0 }
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  let s = label
+    \\  get_mut(Out).n = s.len()
+    \\}
+    },
+};
+
+test "a const is read at run time by either spelling" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (const_runs) |c| {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa, c.src);
+        defer pr.deinit(gpa);
+        try std.testing.expect(pr.diagnostics.len == 0);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const report = try interp.runFor(&world, 1);
+        const out = readResourceIntNamed(&world, "Out", "n");
+        if (report.runtime_errors != 0 or out != c.out) {
+            wrong += 1;
+            std.debug.print("{s}: {d} runtime errors, Out.n = {d}, expected {d}\n", .{ c.name, report.runtime_errors, out, c.out });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
 }

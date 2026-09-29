@@ -406,6 +406,15 @@ fn foreignBuiltinFieldType(decl_arena: *const AstArena, type_node: NodeId) ?Buil
 /// `true` if `s` contains an ASCII uppercase letter — an `E1768
 /// IdInvalidFormat` data-entry id check (ids are snake_case IDENTs,
 /// `etch-validation-ecs.md` §22.2).
+/// A type the engine provides, which a value position may name as a receiver.
+fn isBuiltinTypeName(name: []const u8) bool {
+    if (BuiltinType.fromName(name) != null) return true;
+    for (builtin_resources) |r| {
+        if (std.mem.eql(u8, r.name, name)) return true;
+    }
+    return std.mem.eql(u8, name, "Set");
+}
+
 fn containsUppercase(s: []const u8) bool {
     for (s) |c| {
         if (c >= 'A' and c <= 'Z') return true;
@@ -2357,6 +2366,19 @@ pub const TypeChecker = struct {
 
     /// A resource declaration and the arena it lives in.
     const ResourceRef = struct { arena: *const AstArena, decl: ast_mod.ResourceDecl };
+
+    /// The declared type of the `const` `name` names, the file's own or an
+    /// imported one.
+    fn constType(self: *TypeChecker, name: StringId) ?ResolvedType {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .const_) return null;
+            const a = &self.project.?.arenas[entry.arena_index];
+            return self.foreignFieldType(a, a.const_decls.items[a.itemData(entry.item_id)].type_node);
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .const_) return null;
+        return self.namedTypeToResolved(self.arena.const_decls.items[self.arena.itemData(sym.item_id)].type_node);
+    }
 
     /// The resource `name` names; a symbol that is no resource names none.
     fn resourceNamed(self: *TypeChecker, name: StringId) ?ResourceRef {
@@ -7040,6 +7062,16 @@ pub const TypeChecker = struct {
                         return local.type_;
                     }
                 }
+                if (self.constType(name_id)) |t| return t;
+                try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown identifier '{s}'", .{self.arena.strings.slice(name_id)});
+                return ResolvedType.unknown;
+            },
+            .path => {
+                // An uppercase name in value position is a const read; a type
+                // name there is typed by the construct that reads it.
+                const name_id: StringId = data;
+                if (self.constType(name_id)) |t| return t;
+                if (self.symbols.contains(name_id) or self.importedBinding(name_id) != null or isBuiltinTypeName(self.arena.strings.slice(name_id))) return ResolvedType.unknown;
                 try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown identifier '{s}'", .{self.arena.strings.slice(name_id)});
                 return ResolvedType.unknown;
             },
@@ -15725,6 +15757,161 @@ test "a service argument of its parameter's type and label is accepted" {
         if (out.diagnostics.items.len != 0) {
             wrong += 1;
             for (out.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const const_refused = [_]UnitCase{
+    .{ .name = "an undefined uppercase name", .code = .undefined_symbol, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = NOPE
+    \\}
+    },
+    .{ .name = "an undefined lowercase name", .code = .undefined_symbol, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = nope
+    \\}
+    },
+    .{ .name = "a string const into an int", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  let s: int = label
+    \\}
+    },
+    .{ .name = "an int const into a bool", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  let s: bool = MAX
+    \\}
+    },
+    .{ .name = "an undefined uppercase receiver", .code = .undefined_symbol, .src =
+    \\rule r() {
+    \\  let v = Nope.x
+    \\}
+    },
+};
+
+const const_accepted = [_]ClosureJumpCase{
+    .{ .name = "a lowercase const", .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = limit
+    \\}
+    },
+    .{ .name = "an uppercase const", .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = MAX
+    \\}
+    },
+    .{ .name = "an uppercase const into its type", .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  let s: int = MAX
+    \\}
+    },
+    .{ .name = "two consts in arithmetic", .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = limit + MAX
+    \\}
+    },
+    .{ .name = "an enum const", .src =
+    \\resource Out { n: int = 0 }
+    \\enum Tag { a, b }
+    \\const START: Tag = .b
+    \\rule r() when resource Out {
+    \\  let t: Tag = START
+    \\  get_mut(Out).n = match t { .a => 1, .b => 3 }
+    \\}
+    },
+    .{ .name = "a string const", .src =
+    \\resource Out { n: int = 0 }
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  let s = label
+    \\  get_mut(Out).n = s.len()
+    \\}
+    },
+    .{ .name = "a builtin type as a receiver", .src =
+    \\rule r() {
+    \\  let v = Vec3.x
+    \\}
+    },
+    .{ .name = "a builtin resource as a receiver", .src =
+    \\rule r() {
+    \\  let v = GameTime.dt
+    \\}
+    },
+    .{ .name = "Entity as a receiver", .src =
+    \\rule r() {
+    \\  let v = Entity.null
+    \\}
+    },
+    .{ .name = "Error as a receiver", .src =
+    \\rule r() {
+    \\  let v = Error.message
+    \\}
+    },
+    .{ .name = "Set as a receiver", .src =
+    \\rule r() {
+    \\  let v = Set.x
+    \\}
+    },
+};
+
+test "a const read of the wrong type, or a name that names nothing, is refused" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (const_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (countMessage(r.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "a const read by either spelling, and a builtin type name, are accepted" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (const_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
         }
     }
     try std.testing.expectEqual(@as(usize, 0), wrong);

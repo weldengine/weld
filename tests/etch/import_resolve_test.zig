@@ -224,6 +224,7 @@ const positions_lib =
     \\resource R { v: int = 0 }
     \\event P { v: int = 0 }
     \\event Hit { who: Entity }
+    \\const CAP: int = 8
     \\
 ;
 
@@ -269,6 +270,8 @@ const position_cases = [_]Case{
     .{ .name = "malformed when has resource", .body = "rule r(entity: Entity) when entity has R { }" },
     .{ .name = "malformed when resource comp", .body = "rule r() when resource C { }" },
     .{ .name = "malformed emit component", .body = "rule r() { emit C { v: 1 } }" },
+    .{ .name = "const read", .body = "rule r() { let x: int = CAP }" },
+    .{ .name = "malformed const read type", .body = "rule r() { let x: bool = CAP }" },
     .{ .name = "scene resource", .body = "scene \"S\" {\n  resources { R { v: 1 } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
     .{ .name = "malformed scene resource field type", .body = "scene \"S\" {\n  resources { R { v: true } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
 };
@@ -287,7 +290,7 @@ test "a name an import binds is judged as its declaration is, position by positi
     for (position_cases) |c| {
         const declared_src = try std.mem.concat(gpa, u8, &.{ positions_lib, c.body });
         defer gpa.free(declared_src);
-        const imported_src = try std.mem.concat(gpa, u8, &.{ "import lib { C, D, R, P, Hit }\n", c.body });
+        const imported_src = try std.mem.concat(gpa, u8, &.{ "import lib { C, D, R, P, Hit, CAP }\n", c.body });
         defer gpa.free(imported_src);
         var declared: std.ArrayListUnmanaged(DiagnosticCode) = .empty;
         defer declared.deinit(gpa);
