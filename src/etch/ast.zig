@@ -95,27 +95,10 @@ pub const ParseMode = enum {
     declaration_file,
 };
 
-/// The extension of the file an arena stands for, for `E0858` and
-/// `E0840` (`etch-grammar.md` §21). `unknown` when the parse had no path,
-/// which neither judges.
-pub const TypedExtension = enum {
-    unknown,
-    plain,
-    scene,
-    prefab,
-    layer,
-    manifest,
-
-    /// The construct a file of this extension holds, when the parser does not
-    /// implement it (`E0840`).
-    pub fn unimplementedConstruct(self: TypedExtension) ?[]const u8 {
-        return switch (self) {
-            .layer => "layer",
-            .manifest => "world",
-            .unknown, .plain, .scene, .prefab => null,
-        };
-    }
-};
+/// The extension of the file an arena was parsed from, for `E0858`
+/// (`etch-grammar.md` §21). `unknown` when the parse had no path, which
+/// `E0858` does not judge.
+pub const TypedExtension = enum { unknown, plain, scene, prefab, layer, manifest };
 
 /// Compact 32-bit handle into the `AstArena`: 4-bit `NodeCategory` +
 /// 28-bit index. Used as the universal pointer between AST nodes.

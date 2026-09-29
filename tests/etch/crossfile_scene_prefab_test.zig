@@ -214,27 +214,106 @@ test "no E0858 on a scene file holding one scene and its imports" {
     }));
 }
 
-/// Check `files`, requiring exactly one diagnostic: E0840.
-fn expectOnlyE0840(files: []const etch.ProjectFile) !void {
+test "no E0858 on a layer file holding one scene and its imports" {
+    try std.testing.expectEqual(@as(usize, 0), try e0858Count(&.{
+        .{ .name = "src/marker.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "src/gameplay.layer.etch", .source =
+        \\import marker { Marker }
+        \\scene "Gameplay" { entity "e" { Marker { id: 1 } } }
+        },
+    }));
+}
+
+test "no E0858 on a manifest file holding one scene and its imports" {
+    try std.testing.expectEqual(@as(usize, 0), try e0858Count(&.{
+        .{ .name = "src/settings.etch", .source = "resource Clock { hz: int = 60 }\ncomponent Marker { id: int = 0 }" },
+        .{ .name = "src/village.manifest.etch", .source =
+        \\import settings { Clock, Marker }
+        \\scene "Village" { resources { Clock { hz: 30 } } entity "e" { Marker { id: 1 } } }
+        },
+    }));
+}
+
+test "E0858 on a type declared in a layer file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/gameplay.layer.etch", .source =
+        \\component Marker { id: int = 0 }
+        \\scene "Gameplay" { entity "e" { Marker { id: 1 } } }
+        },
+    }));
+}
+
+test "E0858 twice on a layer file holding a component and no scene" {
+    try std.testing.expectEqual(@as(usize, 2), try e0858Count(&.{
+        .{ .name = "src/gameplay.layer.etch", .source = "component Marker { id: int = 0 }" },
+    }));
+}
+
+test "E0858 on an empty manifest file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/village.manifest.etch", .source = "" },
+    }));
+}
+
+const MessageCase = struct { name: []const u8, file: etch.ProjectFile, message: []const u8 };
+const e0858_messages = [_]MessageCase{
+    .{ .name = "no scene", .file = .{ .name = "src/village.manifest.etch", .source = "" }, .message = "a .manifest.etch file holds exactly one scene" },
+    .{ .name = "a second scene", .file = .{ .name = "src/gameplay.layer.etch", .source = "scene \"A\" { entity \"a\" { } }\nscene \"B\" { entity \"b\" { } }" }, .message = "a .layer.etch file holds exactly one scene" },
+    .{ .name = "another construct", .file = .{ .name = "src/gameplay.layer.etch", .source = "component Marker { id: int = 0 }\nscene \"A\" { entity \"a\" { } }" }, .message = "'component_decl' is not allowed in a .layer.etch file, which holds one scene and its imports" },
+};
+
+test "E0858 on a layer or manifest file names the scene it holds" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (e0858_messages) |c| {
+        var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+        defer deinitDiags(gpa, &diags);
+        try validate(gpa, &.{c.file}, &diags);
+        var found = false;
+        for (diags.items) |d| {
+            if (d.code == .typed_extension_mismatch) {
+                if (found or !std.mem.eql(u8, d.primary_message, c.message)) {
+                    wrong += 1;
+                    std.debug.print("{s}: '{s}'\n", .{ c.name, d.primary_message });
+                }
+                found = true;
+            }
+        }
+        if (!found) {
+            wrong += 1;
+            std.debug.print("{s}: no E0858\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "E0858 on two scenes in one layer file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/marker.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "src/gameplay.layer.etch", .source =
+        \\import marker { Marker }
+        \\scene "A" { entity "a" { Marker { id: 1 } } }
+        \\scene "B" { entity "b" { Marker { id: 2 } } }
+        },
+    }));
+}
+
+/// Check `files`, requiring exactly two diagnostics: the parse error of a
+/// construct that does not exist, and E0858 for the scene the file lacks.
+fn expectNoSuchConstruct(files: []const etch.ProjectFile) !void {
     const gpa = std.testing.allocator;
     var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
     defer deinitDiags(gpa, &diags);
     try validate(gpa, files, &diags);
-    try expectOnly(diags.items, .construct_not_implemented, 1);
+    try std.testing.expectEqual(@as(usize, 2), diags.items.len);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .parse_error));
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .typed_extension_mismatch));
 }
 
-test "E0840 on a layer file holding its layer" {
-    try expectOnlyE0840(&.{.{ .name = "src/gameplay.layer.etch", .source = "layer \"Gameplay\" { }" }});
+test "a layer construct in a layer file is a parse error" {
+    try expectNoSuchConstruct(&.{.{ .name = "src/gameplay.layer.etch", .source = "layer \"Gameplay\" { }" }});
 }
 
-test "E0840 on a manifest file holding its world" {
-    try expectOnlyE0840(&.{.{ .name = "src/village.manifest.etch", .source = "world \"Village\" { }" }});
-}
-
-test "E0840 on a layer file holding a component" {
-    try expectOnlyE0840(&.{.{ .name = "src/gameplay.layer.etch", .source = "component Marker { id: int = 0 }" }});
-}
-
-test "E0840 on an empty manifest file" {
-    try expectOnlyE0840(&.{.{ .name = "src/village.manifest.etch", .source = "" }});
+test "a world construct in a manifest file is a parse error" {
+    try expectNoSuchConstruct(&.{.{ .name = "src/village.manifest.etch", .source = "world \"Village\" { }" }});
 }

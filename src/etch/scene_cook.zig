@@ -132,9 +132,6 @@ pub const CookError = error{
     ImportRefused,
     /// The file holds what its typed extension refuses (E0858).
     TypedExtensionMismatch,
-    /// The file's typed extension holds a construct the parser does not
-    /// implement (E0840).
-    ConstructNotImplemented,
     /// `prefab "Y" of "X"` but the base `X.prefab.bin` could not be resolved
     /// (no resolver, or the resolver returned null for the base name).
     BasePrefabMissing,
@@ -324,9 +321,8 @@ pub const BaseResolver = struct {
     }
 };
 
-/// Refuse a file E0858 or E0840 refuses.
+/// Refuse a file E0858 refuses.
 fn checkTypedExtension(gpa: std.mem.Allocator, ast: *AstArena, diag_out: ?*[]const u8) CookError!void {
-    if (ast.typed_extension.unimplementedConstruct() != null) return fail(diag_out, error.ConstructNotImplemented, "the file holds a construct the parser does not implement");
     var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
     defer {
         for (diags.items) |*d| d.deinit(gpa);

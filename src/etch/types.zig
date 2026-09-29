@@ -1221,12 +1221,14 @@ pub const TypeChecker = struct {
     /// typed file.
     fn checkTypedExtension(self: *TypeChecker) !void {
         const ext = self.arena.typed_extension;
-        if (ext == .unknown or ext.unimplementedConstruct() != null) return;
+        if (ext == .unknown) return;
+        // A data layer and a world manifest each hold a scene (§21.1).
         const main: ?ast_mod.ItemKind = switch (ext) {
-            .scene => .scene_decl,
+            .scene, .layer, .manifest => .scene_decl,
             .prefab => .prefab_decl,
-            .layer, .manifest, .plain, .unknown => null,
+            .plain, .unknown => null,
         };
+        const main_name: []const u8 = if (ext == .prefab) "prefab" else "scene";
         const kinds = self.arena.items.items(.kind);
         var mains: u32 = 0;
         for (kinds, 0..) |k, i| {
@@ -1245,13 +1247,13 @@ pub const TypeChecker = struct {
             if (k == .import_decl) continue;
             if (main != null and k == main.?) {
                 mains += 1;
-                if (mains > 1) try self.emit(.typed_extension_mismatch, .error_, span, "a .{s}.etch file holds exactly one {s}", .{ @tagName(ext), @tagName(ext) });
+                if (mains > 1) try self.emit(.typed_extension_mismatch, .error_, span, "a .{s}.etch file holds exactly one {s}", .{ @tagName(ext), main_name });
                 continue;
             }
-            try self.emit(.typed_extension_mismatch, .error_, span, "'{s}' is not allowed in a .{s}.etch file, which holds one {s} and its imports", .{ @tagName(k), @tagName(ext), @tagName(ext) });
+            try self.emit(.typed_extension_mismatch, .error_, span, "'{s}' is not allowed in a .{s}.etch file, which holds one {s} and its imports", .{ @tagName(k), @tagName(ext), main_name });
         }
         if (ext != .plain and mains == 0)
-            try self.emit(.typed_extension_mismatch, .error_, .{ .byte_start = 0, .byte_end = 0 }, "a .{s}.etch file holds exactly one {s}", .{ @tagName(ext), @tagName(ext) });
+            try self.emit(.typed_extension_mismatch, .error_, .{ .byte_start = 0, .byte_end = 0 }, "a .{s}.etch file holds exactly one {s}", .{ @tagName(ext), main_name });
     }
 
     /// Index every `service` this check can see. With a

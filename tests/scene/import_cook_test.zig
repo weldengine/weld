@@ -644,17 +644,62 @@ test "a prefab variant cooks without naming its base's components, as etch check
     try std.testing.expectEqualSlices(u8, reference_bytes, bytes);
 }
 
-test "a layer file refuses the cook, as E0840 refuses it" {
-    const files = [_]ProjectFile{.{ .name = "src/gameplay.layer.etch", .source = "layer \"Gameplay\" { }" }};
-    try expectCheckReports(&files, .construct_not_implemented);
-    try std.testing.expectError(error.ConstructNotImplemented, scene_cook.cookSceneInProject(std.testing.allocator, &files, 0, null, null));
+test "a layer file holding a component refuses the cook, as E0858 refuses it" {
+    const files = [_]ProjectFile{.{ .name = "src/gameplay.layer.etch", .source = "component Marker { id: int = 0 }" }};
+    try expectCheckReports(&files, .typed_extension_mismatch);
+    try std.testing.expectError(error.TypedExtensionMismatch, scene_cook.cookSceneInProject(std.testing.allocator, &files, 0, null, null));
+}
+
+/// The bytes `source` cooks to, as the file `name` beside `game.etch`.
+fn sceneBytesAs(name: []const u8, source: []const u8) ![]u8 {
+    const gpa = std.testing.allocator;
+    const files = [_]ProjectFile{
+        .{ .name = "src/game.etch", .source = game },
+        .{ .name = name, .source = source },
+    };
+    var cooked = try scene_cook.cookSceneInProject(gpa, &files, 1, null, null);
+    defer cooked.deinit(gpa);
+    return written(&cooked);
+}
+
+test "a layer file holding a scene cooks as a scene file does" {
+    const gpa = std.testing.allocator;
+    const source =
+        \\import game { Health }
+        \\scene "Gameplay" {
+        \\  entity "npc" { uuid: "00000000-0000-0000-0000-000000000002" Health { max: 40 } }
+        \\}
+    ;
+    const layer = try sceneBytesAs("src/gameplay.layer.etch", source);
+    defer gpa.free(layer);
+    const reference = try sceneBytesAs("src/gameplay.scene.etch", source);
+    defer gpa.free(reference);
+    try std.testing.expectEqualSlices(u8, reference, layer);
+}
+
+test "a manifest file holding a scene of resources cooks as a scene file does" {
+    const gpa = std.testing.allocator;
+    const source =
+        \\import game { GameMode }
+        \\scene "Village" { resources { GameMode { max_players: 8, title: "village" } } }
+    ;
+    const manifest = try sceneBytesAs("src/village.manifest.etch", source);
+    defer gpa.free(manifest);
+    const reference = try sceneBytesAs("src/village.scene.etch", source);
+    defer gpa.free(reference);
+    try std.testing.expectEqualSlices(u8, reference, manifest);
 }
 
 test "a layer file beside a scene does not refuse the scene's cook" {
     const gpa = std.testing.allocator;
     const files = [_]ProjectFile{
         .{ .name = "src/combat.etch", .source = combat },
-        .{ .name = "src/gameplay.layer.etch", .source = "layer \"Gameplay\" { }" },
+        .{ .name = "src/gameplay.layer.etch", .source =
+        \\import combat { Health }
+        \\scene "Gameplay" {
+        \\  entity "guard" { uuid: "00000000-0000-0000-0000-000000000003" Health { max: 60 } }
+        \\}
+        },
         .{ .name = "src/level.scene.etch", .source =
         \\import combat { Health }
         \\scene "Level" {
