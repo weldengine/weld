@@ -4836,8 +4836,7 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Whether a value of type `actual` fits a slot of type `declared`. Two
-    /// composites of one kind are left to the checks of their own construct. A
+    /// Whether a value of type `actual` fits a slot of type `declared`. A
     /// generic fits anything: a struct's own type parameters resolve against the
     /// caller's.
     fn valueFits(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) !bool {
@@ -4846,9 +4845,83 @@ pub const TypeChecker = struct {
         if (declared == .builtin and declared.builtin == .vec3 and actual == .array_fixed)
             return actual.array_fixed.len == 3 and actual.array_fixed.elem.isNumeric();
         if ((declared == .builtin) != (actual == .builtin)) return false;
-        if (std.meta.activeTag(declared) != std.meta.activeTag(actual)) return isArray(declared) and isArray(actual);
+        if (std.meta.activeTag(declared) != std.meta.activeTag(actual) and !(isArray(declared) and isArray(actual))) return false;
         if (isNominal(declared)) return self.sameDeclaration(declared, actual);
+        return self.elementsFit(declared, value, actual);
+    }
+
+    /// Two collections, optionals or ranges of one kind: the elements of a
+    /// literal each by the literal rule, any other value by equal element types.
+    fn elementsFit(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) !bool {
+        const kind: ?ast_mod.ExprKind = if (value.isNone()) null else self.arena.exprKind(value);
+        switch (declared) {
+            .array_fixed, .array_dyn => {
+                const want = arrayElem(declared);
+                const have = arrayElem(actual);
+                if (declared == .array_fixed and actual == .array_fixed and declared.array_fixed.len != actual.array_fixed.len) return false;
+                if (kind == .array_lit) return self.runFits(want, self.arena.array_lits.items[self.arena.exprData(value)], have);
+                return want == have;
+            },
+            .set_t => |want| {
+                if (kind == .method_call) {
+                    const mc = self.arena.method_calls.items[self.arena.exprData(value)];
+                    if (mc.args_len == 1) {
+                        const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+                        if (self.arena.exprKind(arg) == .array_lit) return self.runFits(want, self.arena.array_lits.items[self.arena.exprData(arg)], actual.set_t);
+                    }
+                }
+                return want == actual.set_t;
+            },
+            .map_t => |want| {
+                if (kind == .map_lit) {
+                    const ml = self.arena.map_lits.items[self.arena.exprData(value)];
+                    var i: u32 = 0;
+                    while (i < ml.entries_len) : (i += 1) {
+                        const entry = self.arena.map_entries.items[ml.entries_start + i];
+                        if (!try self.elementFits(want.key, entry.key, actual.map_t.key)) return false;
+                        if (!try self.elementFits(want.value, entry.value, actual.map_t.value)) return false;
+                    }
+                    return true;
+                }
+                return want.key == actual.map_t.key and want.value == actual.map_t.value;
+            },
+            .optional => |want| {
+                if (kind == .some_lit) return self.elementFits(want, @bitCast(self.arena.exprData(value)), actual.optional);
+                return want == actual.optional;
+            },
+            .range => |want| return want == actual.range,
+            else => return true,
+        }
+    }
+
+    fn arrayElem(t: ResolvedType) BuiltinType {
+        return switch (t) {
+            .array_fixed => |info| info.elem,
+            .array_dyn => |elem| elem,
+            else => unreachable,
+        };
+    }
+
+    fn runFits(self: *TypeChecker, want: BuiltinType, al: ast_mod.ArrayLitExpr, have: BuiltinType) !bool {
+        var i: u32 = 0;
+        while (i < al.elements_len) : (i += 1) {
+            if (!try self.elementFits(want, @bitCast(self.arena.extra.items[al.elements_start + i]), have)) return false;
+        }
         return true;
+    }
+
+    /// One element of a collection literal: a numeric literal by the literal
+    /// rule, anything else by the literal's own element type.
+    fn elementFits(self: *TypeChecker, want: BuiltinType, e: NodeId, have: BuiltinType) !bool {
+        var lit = e;
+        if (self.arena.exprKind(lit) == .unary and self.arena.unary_exprs.items[self.arena.exprData(lit)].op == .neg) {
+            lit = self.arena.unary_exprs.items[self.arena.exprData(lit)].operand;
+        }
+        return switch (self.arena.exprKind(lit)) {
+            .int_lit => self.literalTypeFits(want, e, .int_),
+            .float_lit => self.literalTypeFits(want, e, .float_),
+            else => want == have,
+        };
     }
 
     fn isArray(t: ResolvedType) bool {
@@ -6082,10 +6155,11 @@ pub const TypeChecker = struct {
                     break :blk self.synthHeadValue(let.value, ctx);
                 };
                 const final = if (declared) |d| blk: {
-                    if (!try self.valueFits(d, let.value, inferred)) {
+                    const reported = self.diagnostics.items.len;
+                    try self.checkCollectionLitAgainst(let.value, d, inferred);
+                    if (self.diagnostics.items.len == reported and !try self.valueFits(d, let.value, inferred)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(let.value), "let initializer type does not match declared type", .{});
                     }
-                    try self.checkCollectionLitAgainst(let.value, d, inferred);
                     break :blk d;
                 } else inferred;
                 // A binding to `entity.get_mut(T)` aliases the mutable
@@ -15268,4 +15342,223 @@ test "a block that never completes, and a fn call, are not unit" {
         }
     }
     try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const collection_refused = [_]UnitCase{
+    .{ .name = "int[] variable into string[]", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[] = [1]
+    \\  let a: string[] = b
+    \\}
+    },
+    .{ .name = "int[2] variable into int[3]", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[2] = [1, 2]
+    \\  let a: int[3] = b
+    \\}
+    },
+    .{ .name = "int[2] variable into string[]", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[2] = [1, 2]
+    \\  let a: string[] = b
+    \\}
+    },
+    .{ .name = "map variable of another key type", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let mut m: [int: int] = [1: 2]
+    \\  let n: [string: int] = m
+    \\}
+    },
+    .{ .name = "set variable of another element type", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let mut s = Set.from([1, 2])
+    \\  let t: Set<string> = s
+    \\}
+    },
+    .{ .name = "int? variable into bool?", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let o: int? = some(1)
+    \\  let p: bool? = o
+    \\}
+    },
+    .{ .name = "int[] variable as a string[] argument", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[] = [1]
+    \\  let z = take_s(b)
+    \\}
+    },
+    .{ .name = "literal of the wrong length", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let a: int[3] = [1, 2]
+    \\}
+    },
+    .{ .name = "int literal array as a string[] argument", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0, ys: string[] }
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() when resource Out {
+    \\  let z = take_s([1, 2])
+    \\}
+    },
+    .{ .name = "int literal array assigned to a string[] local", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0, ys: string[] }
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() when resource Out {
+    \\  let mut a: string[] = ["x"]
+    \\  a = [1, 2]
+    \\}
+    },
+    .{ .name = "int literal array assigned to a string[] field", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0, ys: string[] }
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).ys = [1]
+    \\}
+    },
+    .{ .name = "Set.from of int literals into Set<string>", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0, ys: string[] }
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() when resource Out {
+    \\  let t: Set<string> = Set.from([1, 2])
+    \\}
+    },
+    .{ .name = "int literal array as a string[] fn value", .code = .return_type_mismatch, .src =
+    \\fn give() -> string[] { [1, 2] }
+    \\rule r() { }
+    },
+    .{ .name = "some(1) into bool?", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let o: bool? = some(1)
+    \\}
+    },
+};
+
+const collection_accepted = [_]ClosureJumpCase{
+    .{ .name = "f32[] from float literals", .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let a: f32[] = [1.0, 2.0]
+    \\}
+    },
+    .{ .name = "f32? from some(float literal)", .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let o: f32? = some(1.0)
+    \\}
+    },
+    .{ .name = "int[] variable into int[]", .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[] = [1]
+    \\  let a: int[] = b
+    \\}
+    },
+    .{ .name = "int[2] variable into int[]", .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[2] = [1, 2]
+    \\  let a: int[] = b
+    \\}
+    },
+    .{ .name = "int[] from int literals", .src =
+    \\rule r() {
+    \\  let a: int[] = [1, 2]
+    \\}
+    },
+    .{ .name = "string[] argument from string literals", .src =
+    \\resource Out { n: int = 0, ys: string[] }
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() when resource Out {
+    \\  let z = take_s(["a"])
+    \\}
+    },
+    .{ .name = "f32? from some(1.5)", .src =
+    \\rule r() {
+    \\  let o: f32? = some(1.5)
+    \\}
+    },
+    .{ .name = "Set<i32> from Set.from(int literals)", .src =
+    \\rule r() {
+    \\  let t: Set<i32> = Set.from([1, 2])
+    \\}
+    },
+    .{ .name = "[i32: f32] from a literal", .src =
+    \\rule r() {
+    \\  let m: [i32: f32] = [1: 2.0]
+    \\}
+    },
+    .{ .name = "i32[] from negative literals", .src =
+    \\rule r() {
+    \\  let a: i32[] = [-1, 2]
+    \\}
+    },
+    .{ .name = "i32[] argument from negative literals", .src =
+    \\fn take(a: i32[]) -> int { 0 }
+    \\rule r() {
+    \\  let z = take([-1, 2])
+    \\}
+    },
+    .{ .name = "[i32: f32] argument from a literal", .src =
+    \\fn take(m: [i32: f32]) -> int { 0 }
+    \\rule r() {
+    \\  let z = take([1: 2.0])
+    \\}
+    },
+    .{ .name = "f32? argument from some(float literal)", .src =
+    \\fn take(o: f32?) -> int { 0 }
+    \\rule r() {
+    \\  let z = take(some(1.0))
+    \\}
+    },
+    .{ .name = "Set<i32> argument from Set.from(int literals)", .src =
+    \\fn take(t: Set<i32>) -> int { 0 }
+    \\rule r() {
+    \\  let z = take(Set.from([1, 2]))
+    \\}
+    },
+};
+
+test "a collection or optional of another element type is refused at every gate" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (collection_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (countMessage(r.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "collection and optional literals fit element by element under the literal rule" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (collection_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a mistyped collection literal in a let is reported once per element" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa, "rule r() {\n  let a: string[] = [1, 2]\n}");
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 2), r.diagnostics.items.len);
+    try std.testing.expectEqual(@as(usize, 2), countMessage(r.diagnostics.items, .type_mismatch, "collection element type"));
 }
