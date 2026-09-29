@@ -2750,8 +2750,9 @@ pub const TypeChecker = struct {
     fn validateScene(self: *TypeChecker, decl: ast_mod.SceneDecl, prefab_names: *const std.AutoHashMapUnmanaged(StringId, void)) !void {
         try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .scene);
 
-        // E1780 — a scene needs at least one entity or instance.
-        if (decl.children_len == 0) {
+        // E1780 — a scene needs at least one entity or instance, except a
+        // world manifest's, which holds its resources alone (§21.1).
+        if (decl.children_len == 0 and self.arena.typed_extension != .manifest) {
             try self.emit(.scene_empty_entities, .error_, decl.name_span, "scene '{s}' has no entity or instance (at least one required)", .{self.arena.strings.slice(decl.name)});
         }
 

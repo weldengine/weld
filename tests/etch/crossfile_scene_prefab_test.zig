@@ -234,6 +234,28 @@ test "no E0858 on a manifest file holding one scene and its imports" {
     }));
 }
 
+test "no E1780 on a manifest file whose scene holds resources alone" {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try validate(gpa, &.{
+        .{ .name = "src/settings.etch", .source = "resource Clock { hz: int = 60 }" },
+        .{ .name = "src/village.manifest.etch", .source =
+        \\import settings { Clock }
+        \\scene "Village" { resources { Clock { hz: 30 } } }
+        },
+    }, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+test "E1780 on a layer file whose scene holds no entity" {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try validate(gpa, &.{.{ .name = "src/gameplay.layer.etch", .source = "scene \"Gameplay\" { }" }}, &diags);
+    try expectOnly(diags.items, .scene_empty_entities, 1);
+}
+
 test "E0858 on a type declared in a layer file" {
     try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
         .{ .name = "src/gameplay.layer.etch", .source =
