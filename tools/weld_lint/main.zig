@@ -29,6 +29,7 @@ const conventional_commit = @import("rules/conventional_commit.zig");
 const no_device_dispatch_outside_gal = @import("rules/no_device_dispatch_outside_gal.zig");
 const no_float_reduce = @import("rules/no_float_reduce.zig");
 const no_precision_crossing = @import("rules/no_precision_crossing.zig");
+const no_raw_named_type_read = @import("rules/no_raw_named_type_read.zig");
 const dead_tests = @import("dead_tests.zig");
 const census = @import("census.zig");
 const comment_identifiers = @import("rules/comment_identifiers.zig");
@@ -36,6 +37,10 @@ const comment_tags = @import("rules/comment_tags.zig");
 const comment_scan = @import("comment_scan.zig");
 
 const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools", "build.zig" };
+
+/// Where `dead-tests` looks for test blocks: the lint paths and `examples/`, whose
+/// sources a test root can reach without the lint rules applying to them.
+const dead_test_paths = default_lint_paths ++ [_][]const u8{"examples"};
 
 /// Default subtrees for `census` and `fingerprint`.
 ///
@@ -148,6 +153,7 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try c_module_isolation.check(arena, file, source, &diags);
         try no_device_dispatch_outside_gal.check(arena, file, source, &diags);
         try no_float_reduce.check(arena, file, source, &diags);
+        try no_raw_named_type_read.check(arena, file, source, &diags);
         try no_precision_crossing.check(arena, file, source, &diags, &crossing_tally);
         try comment_identifiers.check(arena, file, source, &diags);
         try comment_tags.check(arena, file, source, &diags);
@@ -396,7 +402,7 @@ fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, argv_
 
     var files: std.ArrayList([]const u8) = .empty;
     defer files.deinit(arena);
-    for (default_lint_paths) |p| try scan.collectZigFiles(arena, io, p, &files);
+    for (dead_test_paths) |p| try scan.collectZigFiles(arena, io, p, &files);
 
     // The reader closes over an arena and the io handle through a file-scope
     // slot: `analyze` takes a plain function pointer so its fixtures can drive
@@ -584,11 +590,9 @@ fn readForAnalysis(path: []const u8) ?[]const u8 {
 const usage_text =
     \\usage:
     \\  weld_lint lint [path]...
-    \\      Walk the given paths (default `src bench tests tools`) and
-    \\      apply rules: no_cimport, no_usingnamespace, doc_comments,
-    \\      c_module_isolation, no_device_dispatch_outside_gal,
-    \\      no_float_reduce, no_precision_crossing. Exits 0
-    \\      if clean, 1 if any rule fires.
+    \\      Walk the given paths (default `src bench tests tools build.zig`)
+    \\      and apply every rule in `rules/`. Exits 0 if clean, 1 if any
+    \\      rule fires.
     \\
     \\  weld_lint dead-tests [--list] [--per-root]
     \\      Check that every file holding a `test` block belongs to the

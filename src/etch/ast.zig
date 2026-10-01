@@ -12,8 +12,9 @@
 //!   component declaration). Each reference is a `(start, len)` pair on
 //!   the side slab.
 //! - `StringPool` interns identifier names and string literal contents.
-//! - `AnnotationMap`: hash table keyed by `NodeId` → `AnnotationSpan`
-//!   (range in `annot_pool`).
+//! - `annot_pool` holds every parsed annotation. A declaration carries its
+//!   own `(annotations_extra, annotations_len)` range into it, and each
+//!   annotation its `(args_start, args_len)` range into `annot_args`.
 //! - `comment_spans` is a parallel slab — not attached to NodeIds,
 //!   kept for a future trivia attachment.
 //! - `StableId` is absent (left at zero). It is owed by the editor, which
@@ -94,6 +95,11 @@ pub const ParseMode = enum {
     declaration_file,
 };
 
+/// The extension of the file an arena was parsed from, for `E0858`
+/// (`etch-grammar.md` §21). `unknown` when the parse had no path, which
+/// `E0858` does not judge.
+pub const TypedExtension = enum { unknown, plain, scene, prefab, layer, manifest };
+
 /// Compact 32-bit handle into the `AstArena`: 4-bit `NodeCategory` +
 /// 28-bit index. Used as the universal pointer between AST nodes.
 pub const NodeId = packed struct(u32) {
@@ -164,6 +170,21 @@ pub const StringPool = struct {
     pub fn slice(self: *const StringPool, id: StringId) []const u8 {
         if (id >= self.slices.items.len) return &[_]u8{};
         return self.slices.items[id];
+    }
+
+    /// A copy owning its own bytes, every id unchanged. The map keys point at
+    /// the copy's slices, never at the source's.
+    pub fn clone(self: *const StringPool, gpa: std.mem.Allocator) !StringPool {
+        var out: StringPool = .{};
+        errdefer out.deinit(gpa);
+        try out.slices.ensureTotalCapacity(gpa, self.slices.items.len);
+        try out.map.ensureTotalCapacity(gpa, @intCast(self.slices.items.len));
+        for (self.slices.items, 0..) |s, id| {
+            const owned = try gpa.dupe(u8, s);
+            out.slices.appendAssumeCapacity(owned);
+            out.map.putAssumeCapacityNoClobber(owned, @intCast(id));
+        }
+        return out;
     }
 
     /// Look up an already-interned string's id without inserting. Returns
@@ -421,6 +442,8 @@ pub const ImportDecl = struct {
     module_alias: StringId, // `as m` alias (0 if absent or selective form)
     items_start: u32, // index into `arena.import_items`
     items_len: u32, // 0 for the whole-module forms (1 and 3)
+    annotations_extra: u32 = 0,
+    annotations_len: u32 = 0,
 };
 
 /// Side-slab entry for a `component` declaration: name + range into
@@ -702,6 +725,8 @@ const RuleParam = struct {
 pub const TypeAliasDecl = struct {
     name: StringId,
     target: NodeId,
+    annotations_extra: u32 = 0,
+    annotations_len: u32 = 0,
 };
 
 /// Side-slab entry for a top-level `const` declaration (`etch-grammar.md` §4.1:
@@ -714,6 +739,8 @@ pub const ConstDecl = struct {
     name: StringId,
     type_node: NodeId,
     value: NodeId,
+    annotations_extra: u32 = 0,
+    annotations_len: u32 = 0,
 };
 
 /// Side-slab entry for a top-level `test` block (`etch-grammar.md` §17:
@@ -858,8 +885,7 @@ pub const FieldAccessExpr = struct {
     receiver: NodeId,
     field_name: StringId,
     /// `recv?.field`: short-circuits to `none` when the
-    /// receiver is `none`. Out of the accepted subset (scalar optional payloads
-    /// have no fields) — parsed so the resolver rejects it with a pointer.
+    /// receiver is `none`.
     opt_chain: bool = false,
 };
 
@@ -1329,6 +1355,8 @@ pub const ImplDecl = struct {
     /// `arena.generic_params`. In scope for every method body.
     generics_start: u32 = 0,
     generics_len: u32 = 0,
+    annotations_extra: u32 = 0,
+    annotations_len: u32 = 0,
 };
 
 /// Shape of an enum variant (`etch-grammar.md` §5.8).
@@ -2539,6 +2567,7 @@ pub const AstArena = struct {
     /// The type-checker reads it to decide `E1901`, which is a question about
     /// the file's IDENTITY and cannot be answered from the node columns alone.
     mode: ParseMode = .standard,
+    typed_extension: TypedExtension = .unknown,
 
     items: std.MultiArrayList(Item) = .empty,
     stmts: std.MultiArrayList(Stmt) = .empty,
@@ -2565,6 +2594,14 @@ pub const AstArena = struct {
     tag_leaves: std.ArrayListUnmanaged(TagLeaf) = .empty,
     tag_paths: std.ArrayListUnmanaged(TagPathExpr) = .empty,
     tag_path_segs: std.ArrayListUnmanaged(StringId) = .empty,
+    /// The `tag_path` nodes `addTagPath` built, whose data indexes `tag_paths`;
+    /// every other `tag_path` is a `.variant` shorthand whose data is the name.
+    tag_path_literals: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// Each `.variant` shorthand the checker resolved → the enum it names.
+    enum_shorthands: std.AutoHashMapUnmanaged(u32, StringId) = .empty,
+    /// The expressions whose value the checker found wrapped into an optional
+    /// (`etch-reference-part1.md` §3.6) → how many times.
+    implicit_wraps: std.AutoHashMapUnmanaged(u32, u8) = .empty,
     tag_filters: std.ArrayListUnmanaged(TagFilter) = .empty,
     tag_operands: std.ArrayListUnmanaged(NodeId) = .empty,
     tag_mutation_stmts: std.ArrayListUnmanaged(TagMutationStmt) = .empty,
@@ -2709,6 +2746,9 @@ pub const AstArena = struct {
     measure_exprs: std.ArrayListUnmanaged(MeasureExpr) = .empty,
     if_exprs: std.ArrayListUnmanaged(IfExpr) = .empty,
     break_stmts: std.ArrayListUnmanaged(BreakStmt) = .empty,
+    /// The `break` and `continue` statements that target a loop outside their
+    /// closure body (`etch-reference-part1.md` §7.7).
+    closure_escapes: std.ArrayListUnmanaged(NodeId) = .empty,
     throw_stmts: std.ArrayListUnmanaged(ThrowStmt) = .empty,
     try_catch_stmts: std.ArrayListUnmanaged(TryCatchStmt) = .empty,
     emit_stmts: std.ArrayListUnmanaged(EmitStmt) = .empty,
@@ -2734,8 +2774,6 @@ pub const AstArena = struct {
     generic_params: std.ArrayListUnmanaged(GenericParam) = .empty,
     generic_bounds: std.ArrayListUnmanaged(GenericBound) = .empty,
 
-    // Annotation storage.
-    annotations: std.AutoHashMapUnmanaged(NodeId, AnnotationSpan) = .empty,
     annot_pool: std.ArrayListUnmanaged(Annotation) = .empty,
     annot_args: std.ArrayListUnmanaged(AnnotationArg) = .empty,
 
@@ -2774,11 +2812,6 @@ pub const AstArena = struct {
     /// the prelude into every program. `maxInt(u32)` = none injected.
     builtin_fields_from: u32 = std.math.maxInt(u32),
 
-    pub const AnnotationSpan = struct {
-        start: u32,
-        len: u32,
-    };
-
     /// `(start, len)` slice into a span pool (`comment_spans` for
     /// `leading_comments`, `doc_comment_spans` for `doc_comments`).
     pub const SpanRange = struct {
@@ -2811,6 +2844,9 @@ pub const AstArena = struct {
         self.tag_leaves.deinit(gpa);
         self.tag_paths.deinit(gpa);
         self.tag_path_segs.deinit(gpa);
+        self.tag_path_literals.deinit(gpa);
+        self.enum_shorthands.deinit(gpa);
+        self.implicit_wraps.deinit(gpa);
         self.tag_filters.deinit(gpa);
         self.tag_operands.deinit(gpa);
         self.tag_mutation_stmts.deinit(gpa);
@@ -2937,6 +2973,7 @@ pub const AstArena = struct {
         self.measure_exprs.deinit(gpa);
         self.if_exprs.deinit(gpa);
         self.break_stmts.deinit(gpa);
+        self.closure_escapes.deinit(gpa);
         self.throw_stmts.deinit(gpa);
         self.try_catch_stmts.deinit(gpa);
         self.emit_stmts.deinit(gpa);
@@ -2955,13 +2992,28 @@ pub const AstArena = struct {
         self.generic_type_nodes.deinit(gpa);
         self.generic_params.deinit(gpa);
         self.generic_bounds.deinit(gpa);
-        self.annotations.deinit(gpa);
         self.annot_pool.deinit(gpa);
         self.annot_args.deinit(gpa);
         self.comment_spans.deinit(gpa);
         self.doc_comment_spans.deinit(gpa);
         self.leading_comments.deinit(gpa);
         self.doc_comments.deinit(gpa);
+    }
+
+    /// A deep copy owning every buffer, with every `NodeId`, `StringId` and
+    /// `(start, len)` run unchanged. A field of a type with no copy rule is a
+    /// compile error, so no field is copied by reference or left out.
+    pub fn clone(self: *const AstArena, gpa: std.mem.Allocator) !AstArena {
+        var out: AstArena = .{};
+        errdefer out.deinit(gpa);
+        inline for (@typeInfo(AstArena).@"struct".fields) |f| {
+            switch (@typeInfo(f.type)) {
+                .int, .@"enum" => @field(out, f.name) = @field(self, f.name),
+                .@"struct" => @field(out, f.name) = try @field(self, f.name).clone(gpa),
+                else => @compileError("AstArena.clone has no copy rule for field " ++ f.name),
+            }
+        }
+        return out;
     }
 
     pub fn addItem(self: *AstArena, gpa: std.mem.Allocator, kind: ItemKind, data: u32, span: SourceSpan) !NodeId {
@@ -3045,9 +3097,9 @@ pub const AstArena = struct {
         _ = try self.addItem(gpa, .struct_decl, struct_idx, zero_span);
     }
 
-    pub fn addTypeAlias(self: *AstArena, gpa: std.mem.Allocator, name: StringId, target: NodeId, span: SourceSpan) !NodeId {
+    pub fn addTypeAlias(self: *AstArena, gpa: std.mem.Allocator, decl: TypeAliasDecl, span: SourceSpan) !NodeId {
         const idx: u32 = @intCast(self.type_alias_decls.items.len);
-        try self.type_alias_decls.append(gpa, .{ .name = name, .target = target });
+        try self.type_alias_decls.append(gpa, decl);
         return try self.addItem(gpa, .type_alias, idx, span);
     }
 
@@ -3089,15 +3141,11 @@ pub const AstArena = struct {
         outer: while (guard <= max) : (guard += 1) {
             for (self.type_alias_decls.items) |alias| {
                 if (alias.name == current) {
-                    // A `.path` alias target (`type HA = m.Member`)
-                    // has no single ultimate name in this arena — stop the
-                    // by-name chain here (returning `current`) rather than
-                    // mis-indexing `named_types`. The qualified target is
-                    // resolved by node kind at the consult sites (a `.path`
-                    // TypeNode → `resolvePathTypeNode`), not by this walk.
-                    if (self.typeNodeKind(alias.target) != .named) break :outer;
-                    const named = self.named_types.items[self.typeNodeData(alias.target)];
-                    current = named.name;
+                    // A `.path` alias target (`type HA = m.Member`) has no
+                    // single ultimate name in this arena: the chain stops at
+                    // `current`, and the consult sites resolve the qualified
+                    // target by node kind (`resolvePathTypeNode`).
+                    current = self.namedTypeName(alias.target) orelse break :outer;
                     continue :outer;
                 }
             }
@@ -3120,9 +3168,8 @@ pub const AstArena = struct {
     /// shape is NOT `Entity` — the `await entity_event` target must be a bare
     /// `Entity` (§9.4).
     pub fn fieldTypeIsEntity(self: *const AstArena, field: Field) bool {
-        if (self.typeNodeKind(field.type_node) != .named) return false;
-        const named = self.named_types.items[self.typeNodeData(field.type_node)];
-        return std.mem.eql(u8, self.strings.slice(self.resolveTypeAliasName(named.name)), "Entity");
+        const name = self.namedTypeName(field.type_node) orelse return false;
+        return std.mem.eql(u8, self.strings.slice(self.resolveTypeAliasName(name)), "Entity");
     }
 
     /// Resolve the event's designated `Entity` field for `await entity_event`
@@ -3725,7 +3772,43 @@ pub const AstArena = struct {
         try self.tag_path_segs.appendSlice(gpa, segs);
         const idx: u32 = @intCast(self.tag_paths.items.len);
         try self.tag_paths.append(gpa, .{ .segs_start = segs_start, .segs_len = @intCast(segs.len) });
-        return try self.addExpr(gpa, .tag_path, idx, span);
+        try self.tag_path_literals.ensureUnusedCapacity(gpa, 1);
+        const node = try self.addExpr(gpa, .tag_path, idx, span);
+        self.tag_path_literals.putAssumeCapacity(node.raw(), {});
+        return node;
+    }
+
+    /// Whether `id` is a `.variant` shorthand, a `tag_path` whose data is the
+    /// variant's name.
+    pub fn isEnumShorthand(self: *const AstArena, id: NodeId) bool {
+        return self.exprKind(id) == .tag_path and !self.tag_path_literals.contains(id.raw());
+    }
+
+    /// The enum the checker resolved the shorthand `id` to.
+    pub fn shorthandEnum(self: *const AstArena, id: NodeId) ?StringId {
+        return self.enum_shorthands.get(id.raw());
+    }
+
+    /// Whether `id` is an access of an optional chain: a `?.` link, or a `.`
+    /// read after one, which the chain's `none` skips too
+    /// (`etch-reference-part1.md` §6.6).
+    pub fn inOptionalChain(self: *const AstArena, id: NodeId) bool {
+        var cur = id;
+        while (true) {
+            switch (self.exprKind(cur)) {
+                .field_access => {
+                    const fa = self.field_accesses.items[self.exprData(cur)];
+                    if (fa.opt_chain) return true;
+                    cur = fa.receiver;
+                },
+                .method_call => {
+                    const mc = self.method_calls.items[self.exprData(cur)];
+                    if (mc.opt_chain) return true;
+                    cur = mc.receiver;
+                },
+                else => return false,
+            }
+        }
     }
 
     pub fn addTryCatchStmt(self: *AstArena, gpa: std.mem.Allocator, tc: TryCatchStmt, span: SourceSpan) !NodeId {
@@ -3958,6 +4041,7 @@ pub const AstArena = struct {
     pub fn onEventTypeName(self: *const AstArena, annot: Annotation) ?StringId {
         if (annot.args_len == 0) return null;
         const arg = self.annot_args.items[annot.args_start];
+        if (arg.name != 0) return null; // a named argument is not the event type
         if (self.exprKind(arg.value) != .path) return null;
         return self.exprData(arg.value);
     }
@@ -3984,6 +4068,7 @@ pub const AstArena = struct {
     pub fn observerComponentName(self: *const AstArena, annot: Annotation) ?StringId {
         if (annot.args_len == 0) return null;
         const arg = self.annot_args.items[annot.args_start];
+        if (arg.name != 0) return null; // a named argument is not the component
         if (self.exprKind(arg.value) != .path) return null;
         return self.exprData(arg.value);
     }
@@ -4001,6 +4086,14 @@ pub const AstArena = struct {
     pub fn typeNodeData(self: *const AstArena, id: NodeId) u32 {
         std.debug.assert(id.category == .type_node);
         return self.type_nodes.items(.data)[id.index];
+    }
+
+    /// The name a `.named` type node carries, or null for any other kind. Every
+    /// kind's `data` indexes its own slab, so reading `named_types` through the
+    /// data of a non-`.named` node selects an unrelated name.
+    pub fn namedTypeName(self: *const AstArena, id: NodeId) ?StringId {
+        if (self.typeNodeKind(id) != .named) return null;
+        return self.named_types.items[self.typeNodeData(id)].name;
     }
 
     pub fn isEmpty(self: *const AstArena) bool {
@@ -4115,4 +4208,95 @@ test "AnnotationKind.fromName recognises builtin names" {
     try std.testing.expectEqual(AnnotationKind.range, AnnotationKind.fromName("range"));
     try std.testing.expectEqual(AnnotationKind.entity_target, AnnotationKind.fromName("entity_target"));
     try std.testing.expectEqual(AnnotationKind.custom, AnnotationKind.fromName("totally_unknown"));
+}
+
+/// Every field of `a` holds the same contents as the same field of `b`.
+fn expectArenasEqual(a: *const AstArena, b: *const AstArena) !void {
+    inline for (@typeInfo(AstArena).@"struct".fields) |f| {
+        const x = @field(a, f.name);
+        const y = @field(b, f.name);
+        if (comptime f.type == StringPool) {
+            try std.testing.expectEqual(x.slices.items.len, y.slices.items.len);
+            for (x.slices.items, y.slices.items) |p, q| try std.testing.expectEqualStrings(p, q);
+            try std.testing.expectEqual(x.map.count(), y.map.count());
+            for (x.slices.items, 0..) |p, id| try std.testing.expectEqual(@as(?StringId, @intCast(id)), y.map.get(p));
+        } else switch (@typeInfo(f.type)) {
+            .int, .@"enum" => try std.testing.expectEqual(x, y),
+            .@"struct" => if (comptime @hasField(f.type, "items")) {
+                try std.testing.expectEqualDeep(x.items, y.items);
+            } else if (comptime @hasField(f.type, "bytes")) {
+                try std.testing.expectEqual(x.len, y.len);
+                for (0..x.len) |i| try std.testing.expectEqual(x.get(i), y.get(i));
+            } else {
+                try std.testing.expectEqual(x.count(), y.count());
+                var it = x.iterator();
+                while (it.next()) |e| try std.testing.expectEqual(e.value_ptr.*, y.get(e.key_ptr.*).?);
+            },
+            else => comptime unreachable,
+        }
+    }
+}
+
+const clone_fixture =
+    \\/// A doc comment.
+    \\component Health { current: i32 = 100, max: i32 = 100 }
+    \\event Hit { amount: int, who: string }
+    \\// A plain comment.
+    \\@phase(.update)
+    \\rule regen(entity: Entity) when entity has Health {
+    \\  entity.get_mut(Health).current += 1
+    \\  emit Hit { amount: 1, who: "regen" }
+    \\}
+;
+
+test "a cloned arena equals its source and outlives it" {
+    const parser = @import("parser.zig");
+    const gpa = std.testing.allocator;
+    var reference = try parser.parse(gpa, clone_fixture);
+    defer reference.deinit(gpa);
+    var source = try parser.parse(gpa, clone_fixture);
+    try source.ast.ensureErrorBuiltins(gpa);
+    try reference.ast.ensureErrorBuiltins(gpa);
+    var copy = copy: {
+        defer source.deinit(gpa);
+        break :copy try source.ast.clone(gpa);
+    };
+    defer copy.deinit(gpa);
+    try std.testing.expect(reference.ast.doc_comments.count() > 0);
+    try std.testing.expect(reference.ast.leading_comments.count() > 0);
+    try std.testing.expect(reference.ast.error_type_name != 0);
+    try expectArenasEqual(&reference.ast, &copy);
+}
+
+test "a cloned arena is independent of its source" {
+    const parser = @import("parser.zig");
+    const gpa = std.testing.allocator;
+    var source = try parser.parse(gpa, clone_fixture);
+    defer source.deinit(gpa);
+    var copy = try source.ast.clone(gpa);
+    defer copy.deinit(gpa);
+    const strings_before = source.ast.strings.slices.items.len;
+    const extra_before = source.ast.extra.items.len;
+    _ = try copy.strings.intern(gpa, "only_in_the_copy");
+    try copy.extra.append(gpa, 7);
+    try std.testing.expectEqual(strings_before, source.ast.strings.slices.items.len);
+    try std.testing.expectEqual(extra_before, source.ast.extra.items.len);
+    try std.testing.expect(source.ast.strings.find("only_in_the_copy") == null);
+}
+
+test "a clone that fails to allocate frees what it took" {
+    const parser = @import("parser.zig");
+    const gpa = std.testing.allocator;
+    var source = try parser.parse(gpa, clone_fixture);
+    defer source.deinit(gpa);
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = index });
+        if (source.ast.clone(failing.allocator())) |copy| {
+            var c = copy;
+            c.deinit(failing.allocator());
+            try std.testing.expect(index > 0);
+            break;
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+    }
 }

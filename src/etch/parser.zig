@@ -56,6 +56,16 @@ pub fn modeForPath(path: []const u8) ParseMode {
     return .standard;
 }
 
+/// The typed extension `path` names; `unknown` for a path that is no `.etch`.
+pub fn typedExtensionForPath(path: []const u8) ast_mod.TypedExtension {
+    if (std.mem.endsWith(u8, path, ".scene.etch")) return .scene;
+    if (std.mem.endsWith(u8, path, ".prefab.etch")) return .prefab;
+    if (std.mem.endsWith(u8, path, ".layer.etch")) return .layer;
+    if (std.mem.endsWith(u8, path, ".manifest.etch")) return .manifest;
+    if (std.mem.endsWith(u8, path, ".etch")) return .plain;
+    return .unknown;
+}
+
 /// Container returned by `parse` — the populated arena plus the list of
 /// diagnostics collected during the parse. With the top-level
 /// recovery sync-point the parser no longer stops at the first error:
@@ -110,12 +120,6 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
 /// Callers that know the file's path pass `modeForPath(path)`; callers
 /// that hold only a buffer keep using `parse`, which is this function at
 /// `.standard`.
-///
-/// The mode is a parameter here rather than on `parse` for a measured reason:
-/// `parse` has about twenty call sites across `src/`, `tools/` and `tests/`,
-/// and only two of them — `root.zig`'s `validateProject` and `scene_cook.zig` —
-/// hold a filename at all. Threading a parameter through the other eighteen
-/// would buy nothing.
 pub fn parseWithMode(gpa: std.mem.Allocator, source: []const u8, mode: ParseMode) !ParseResult {
     var lexer = Lexer.init(source);
     // Without this `errdefer`, an OOM coming from `lexer.next` or
@@ -185,10 +189,37 @@ pub fn parseWithMode(gpa: std.mem.Allocator, source: []const u8, mode: ParseMode
 /// between statements. An empty fragment yields a zero-statement block with no
 /// diagnostics. Caller owns the arena + diagnostics (`StmtBlockResult.deinit`).
 pub fn parseStmtBlock(gpa: std.mem.Allocator, source: []const u8) !StmtBlockResult {
-    var lexer = Lexer.init(source);
-    errdefer lexer.deinit(gpa);
     var arena = try AstArena.init(gpa);
     errdefer arena.deinit(gpa);
+    const run = try parseStmtBlockInto(gpa, &arena, source);
+    return .{
+        .ast = arena,
+        .body_start = run.start,
+        .body_len = run.len,
+        .diagnostics = run.diagnostics,
+    };
+}
+
+/// A statement run parsed into an existing arena: `extra[start .. start + len]`
+/// and the parse diagnostics, which the caller owns.
+pub const StmtRunResult = struct {
+    start: u32,
+    len: u32,
+    diagnostics: []Diagnostic,
+
+    pub fn deinit(self: *StmtRunResult, gpa: std.mem.Allocator) void {
+        for (self.diagnostics) |*d| d.deinit(gpa);
+        gpa.free(self.diagnostics);
+    }
+};
+
+/// `parseStmtBlock` appending into `arena`: every name is interned into
+/// `arena.strings`, so a name the arena already holds keeps its id. On an
+/// error or a diagnostic the nodes already appended stay in the arena,
+/// unreferenced.
+pub fn parseStmtBlockInto(gpa: std.mem.Allocator, arena: *AstArena, source: []const u8) !StmtRunResult {
+    var lexer = Lexer.init(source);
+    defer lexer.deinit(gpa);
 
     const c0 = try lexer.next(gpa);
     const c1 = try lexer.next(gpa);
@@ -197,7 +228,7 @@ pub fn parseStmtBlock(gpa: std.mem.Allocator, source: []const u8) !StmtBlockResu
         .gpa = gpa,
         .source = source,
         .lexer = &lexer,
-        .arena = &arena,
+        .arena = arena,
         .current = c0,
         .next_tok = c1,
         .next2_tok = c2,
@@ -209,14 +240,10 @@ pub fn parseStmtBlock(gpa: std.mem.Allocator, source: []const u8) !StmtBlockResu
     defer parser.active_labels.deinit(gpa);
 
     const body = try parser.parseStmtFragment();
-
-    const diags = try parser.diagnostics.toOwnedSlice(gpa);
-    lexer.deinit(gpa);
     return .{
-        .ast = arena,
-        .body_start = body.start,
-        .body_len = body.len,
-        .diagnostics = diags,
+        .start = body.start,
+        .len = body.len,
+        .diagnostics = try parser.diagnostics.toOwnedSlice(gpa),
     };
 }
 
@@ -288,6 +315,12 @@ pub const Parser = struct {
     /// resolves the `break [IDENT] [expression]` ambiguity without a statement
     /// separator (an IDENT that is not an active label starts the break value).
     active_labels: std.ArrayListUnmanaged(StringId) = .empty,
+    /// Loops open since the innermost closure body began, of any kind.
+    loop_depth: u32 = 0,
+    closure_depth: u32 = 0,
+    /// Start, in `active_labels`, of the labels the innermost closure body
+    /// opened itself.
+    closure_label_base: usize = 0,
     /// When true, a bare `TYPE_IDENT {` is NOT parsed as a struct literal. Set
     /// while parsing the head expression of `if` / `while` /
     /// `for` / `match` (where the `{` opens the body / arms, not a struct
@@ -311,6 +344,19 @@ pub const Parser = struct {
     fn isActiveLabel(self: *const Parser, name: StringId) bool {
         for (self.active_labels.items) |l| {
             if (l == name) return true;
+        }
+        return false;
+    }
+
+    /// Whether a jump to `label`, `0` for the innermost loop, leaves the closure
+    /// body it is written in.
+    fn jumpLeavesClosure(self: *const Parser, label: StringId) bool {
+        if (self.closure_depth == 0) return false;
+        if (label == 0) return self.loop_depth == 0;
+        var i = self.active_labels.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.active_labels.items[i] == label) return i < self.closure_label_base;
         }
         return false;
     }
@@ -853,14 +899,18 @@ pub const Parser = struct {
     /// `Name` is a PascalCase type identifier; `Type` is any type node. The
     /// `kw_type` starter is mirrored in `recoverToTopLevel`'s stop-set.
     fn parseTypeAliasDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
-        _ = annotations; // type aliases carry no annotations in the v0.6 subset
         const kw_span = (try self.advance()).span; // 'type'
         const name_tok = try self.expect(.type_ident, "expected PascalCase alias name after 'type'");
         const name_id = try self.internSlice(name_tok.span);
         _ = try self.expect(.eq, "expected '=' in type alias declaration");
         const target = try self.parseType();
         const target_span = self.arena.typeNodeSpan(target);
-        _ = try self.arena.addTypeAlias(self.gpa, name_id, target, .{
+        _ = try self.arena.addTypeAlias(self.gpa, .{
+            .name = name_id,
+            .target = target,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{
             .byte_start = kw_span.byte_start,
             .byte_end = target_span.byte_end,
         });
@@ -876,10 +926,8 @@ pub const Parser = struct {
     /// checked at resolve. Top-level ONLY — `parseStmt` does not handle
     /// `kw_const`, so a `const` inside a block falls through to a parse error
     /// (part1 §4.5). The `kw_const` starter is mirrored in `recoverToTopLevel`'s
-    /// stop-set + the `parseTopLevel` error enumeration. Like `import` / `type`,
-    /// the v0.6 subset attaches no annotations to a const (range discarded).
+    /// stop-set + the `parseTopLevel` error enumeration.
     fn parseConstDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
-        _ = annotations; // const carries no annotations in the v0.6 subset
         const kw_span = (try self.advance()).span; // 'const'
         const name_tok = if (self.peek() == .ident or self.peek() == .type_ident)
             try self.advance()
@@ -894,6 +942,8 @@ pub const Parser = struct {
             .name = name_id,
             .type_node = type_node,
             .value = value,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = self.arena.exprSpan(value).byte_end });
     }
 
@@ -929,10 +979,11 @@ pub const Parser = struct {
         const start: u32 = @intCast(self.arena.annot_pool.items.len);
         while (self.peek() == .at) {
             const at_tok = try self.advance();
-            const name_tok = if (self.peek() == .ident or self.peek() == .type_ident)
+            // `annotation = "@" , IDENT` (`etch-grammar.md` §1.5).
+            const name_tok = if (self.peek() == .ident)
                 try self.advance()
             else
-                return self.parseErr(self.peekSpan(), "expected annotation name after '@'");
+                return self.parseErr(self.peekSpan(), "expected a lowercase annotation name after '@'");
 
             const name_slice = self.sliceOf(name_tok.span);
             const name_id = try self.internSlice(name_tok.span);
@@ -948,6 +999,8 @@ pub const Parser = struct {
                         try self.arena.annot_args.append(self.gpa, arg);
                         args_len += 1;
                         if (!try self.match(.comma)) break;
+                        // `annotation_args` (`etch-grammar.md` §1.5) admits a trailing comma.
+                        if (self.peek() == .rparen) break;
                     }
                 }
                 _ = try self.expect(.rparen, "expected ')' to close annotation args");
@@ -970,35 +1023,16 @@ pub const Parser = struct {
         return .{ .start = start, .len = len };
     }
 
+    /// `annotation_arg = expression | IDENT ":" expression | IDENT`
+    /// (`etch-grammar.md` §1.5). A name followed by `:` is a named argument;
+    /// anything else is a positional expression.
     fn parseAnnotationArg(self: *Parser) ParseError!ast_mod.AnnotationArg {
-        // Named arg if `ident ':' expr`.
-        if (self.peek() == .ident) {
-            // Lookahead: if next non-ident token is `:`, treat as named.
-            // The lexer's one-token lookahead is `self.current`; we have
-            // to commit to the ident and check the following token.
-            const saved = self.current;
+        if ((self.peek() == .ident or self.peek() == .type_ident) and self.peekNext() == .colon) {
+            const name = try self.advance();
             _ = try self.advance();
-            if (self.peek() == .colon) {
-                _ = try self.advance();
-                const name_id = try self.internSlice(saved.span);
-                const value = try self.parseExpr(0);
-                return .{ .name = name_id, .value = value };
-            }
-            // Not named: this was the start of a positional expression
-            // beginning with an ident. Build the expr starting from here
-            // by emitting an ident expr and continuing through Pratt.
-            const ident_id = try self.internSlice(saved.span);
-            const lhs = try self.arena.addExpr(self.gpa, .ident, ident_id, saved.span);
-            // Route through the postfix chain first so `@requires(self.health)`
-            // (ident + `.field`) parses; then the binary continuation
-            // (the annotation field-access rule).
-            const after_postfix = try self.continuePostfix(lhs);
-            const continued = try self.continuePostfixAndBinary(after_postfix, 0);
-            return .{ .name = 0, .value = continued };
+            return .{ .name = try self.internSlice(name.span), .value = try self.parseExpr(0) };
         }
-        // Positional: bare expression.
-        const expr = try self.parseExpr(0);
-        return .{ .name = 0, .value = expr };
+        return .{ .name = 0, .value = try self.parseExpr(0) };
     }
 
     // ─── Component / Resource ───────────────────────────────────────────
@@ -1204,7 +1238,7 @@ pub const Parser = struct {
         // type beginning with `[` is always a map type — array / slice are the
         // postfix `T[...]` form handled below.
         if (self.peek() == .lbracket) {
-            return try self.parseMapTypeSugar();
+            return try self.parseOptionalSuffix(try self.parseMapTypeSugar());
         }
         var base = try self.parseBaseType();
         // Postfix `T[N]` (fixed) / `T[]` (dynamic slice) array types
@@ -1222,16 +1256,18 @@ pub const Parser = struct {
                 .byte_end = closing.span.byte_end,
             });
         }
-        // Optional suffix `T?` (`etch-grammar.md` §267).
-        if (self.peek() == .question) {
-            const q = try self.advance();
-            const base_span = self.arena.typeNodeSpan(base);
-            base = try self.arena.addOptionalType(self.gpa, base, .{
-                .byte_start = base_span.byte_start,
-                .byte_end = q.span.byte_end,
-            });
-        }
-        return base;
+        return try self.parseOptionalSuffix(base);
+    }
+
+    /// `base`, or `base?` (`etch-grammar.md` §267).
+    fn parseOptionalSuffix(self: *Parser, base: NodeId) ParseError!NodeId {
+        if (self.peek() != .question) return base;
+        const q = try self.advance();
+        const base_span = self.arena.typeNodeSpan(base);
+        return try self.arena.addOptionalType(self.gpa, base, .{
+            .byte_start = base_span.byte_start,
+            .byte_end = q.span.byte_end,
+        });
     }
 
     /// Parse a base type: a primitive / engine / user type identifier, with
@@ -1795,16 +1831,19 @@ pub const Parser = struct {
                     // as a run of type-`NodeId`s in `arena.extra`.
                     _ = try self.advance(); // '('
                     shape = .tuple_like;
-                    data_start = @intCast(self.arena.extra.items.len);
+                    var types: std.ArrayListUnmanaged(u32) = .empty;
+                    defer types.deinit(self.gpa);
                     if (self.peek() != .rparen) {
                         while (true) {
                             const t = try self.parseType();
-                            try self.arena.extra.append(self.gpa, t.raw());
+                            try types.append(self.gpa, t.raw());
                             if (!try self.match(.comma)) break;
                         }
                     }
                     _ = try self.expect(.rparen, "expected ')' to close tuple-like enum variant");
-                    data_len = @as(u32, @intCast(self.arena.extra.items.len)) - data_start;
+                    data_start = @intCast(self.arena.extra.items.len);
+                    try self.arena.extra.appendSlice(self.gpa, types.items);
+                    data_len = @intCast(types.items.len);
                 },
                 else => {},
             }
@@ -2638,17 +2677,20 @@ pub const Parser = struct {
             else => return self.parseErr(self.peekSpan(), "expected emitter name (identifier) after 'emitter'"),
         };
         _ = try self.expect(.lbrace, "expected '{' to start the emitter body");
-        const props_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        var props: std.ArrayListUnmanaged(ast_mod.StructLitField) = .empty;
+        defer props.deinit(self.gpa);
         while (self.peek() != .rbrace and self.peek() != .eof) {
             try self.surfaceTokenErrors();
             const pname = try self.expect(.ident, "expected an emitter property name (identifier)");
             _ = try self.expect(.colon, "expected ':' after the emitter property name");
             const value = try self.parseExpr(0);
-            try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(pname.span), .value = value });
+            try props.append(self.gpa, .{ .name = try self.internSlice(pname.span), .value = value });
             _ = try self.match(.comma); // properties are newline-separated; tolerate an optional comma
         }
         const closing = try self.expect(.rbrace, "expected '}' to close the emitter body");
-        const props_len: u32 = @as(u32, @intCast(self.arena.struct_lit_fields.items.len)) - props_start;
+        const props_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        try self.arena.struct_lit_fields.appendSlice(self.gpa, props.items);
+        const props_len: u32 = @intCast(props.items.len);
         try self.arena.effect_emitters.append(self.gpa, .{
             .name = try self.internSlice(name_tok.span),
             .props_start = props_start,
@@ -2817,7 +2859,8 @@ pub const Parser = struct {
             else => return self.parseErr(self.peekSpan(), "expected a section name (identifier) after 'section'"),
         };
         _ = try self.expect(.lbrace, "expected '{' to start the section body");
-        const props_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        var props: std.ArrayListUnmanaged(ast_mod.StructLitField) = .empty;
+        defer props.deinit(self.gpa);
         const targets_start: u32 = @intCast(self.arena.audio_score_targets.items.len);
         var on_finish: StringId = 0;
         var has_on_finish = false;
@@ -2827,7 +2870,7 @@ pub const Parser = struct {
                 const loop_tok = try self.advance(); // 'loop' (kw_loop token kind)
                 _ = try self.expect(.colon, "expected ':' after 'loop'");
                 const value = try self.parseExpr(0);
-                try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(loop_tok.span), .value = value });
+                try props.append(self.gpa, .{ .name = try self.internSlice(loop_tok.span), .value = value });
             } else {
                 const key_tok = try self.expect(.ident, "expected a section property name");
                 const key = self.sliceOf(key_tok.span);
@@ -2855,16 +2898,18 @@ pub const Parser = struct {
                 } else {
                     _ = try self.expect(.colon, "expected ':' after the section property name");
                     const value = try self.parseExpr(0);
-                    try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(key_tok.span), .value = value });
+                    try props.append(self.gpa, .{ .name = try self.internSlice(key_tok.span), .value = value });
                 }
             }
             _ = try self.match(.comma);
         }
         const closing = try self.expect(.rbrace, "expected '}' to close the section body");
+        const props_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        try self.arena.struct_lit_fields.appendSlice(self.gpa, props.items);
         try self.arena.audio_score_sections.append(self.gpa, .{
             .name = try self.internSlice(name_tok.span),
             .props_start = props_start,
-            .props_len = @as(u32, @intCast(self.arena.struct_lit_fields.items.len)) - props_start,
+            .props_len = @intCast(props.items.len),
             .can_transition_start = targets_start,
             .can_transition_len = @as(u32, @intCast(self.arena.audio_score_targets.items.len)) - targets_start,
             .on_finish = on_finish,
@@ -3093,17 +3138,20 @@ pub const Parser = struct {
     /// warping / distance_matching bodies) into a `struct_lit_fields` run.
     fn parseAnimKeyExprBlock(self: *Parser) ParseError!struct { start: u32, len: u32 } {
         _ = try self.expect(.lbrace, "expected '{' to start the body sub-block");
-        const start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        var props: std.ArrayListUnmanaged(ast_mod.StructLitField) = .empty;
+        defer props.deinit(self.gpa);
         while (self.peek() != .rbrace and self.peek() != .eof) {
             try self.surfaceTokenErrors();
             const pk = try self.expect(.ident, "expected a property name in the body sub-block");
             _ = try self.expect(.colon, "expected ':' after the property name");
             const val = try self.parseExpr(0);
-            try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(pk.span), .value = val });
+            try props.append(self.gpa, .{ .name = try self.internSlice(pk.span), .value = val });
             _ = try self.match(.comma);
         }
         _ = try self.expect(.rbrace, "expected '}' to close the body sub-block");
-        return .{ .start = start, .len = @as(u32, @intCast(self.arena.struct_lit_fields.items.len)) - start };
+        const start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        try self.arena.struct_lit_fields.appendSlice(self.gpa, props.items);
+        return .{ .start = start, .len = @intCast(props.items.len) };
     }
 
     /// `anim_state = "state" IDENT "{" {anim_state_prop} "}"` (§11). Exactly one
@@ -3622,7 +3670,6 @@ pub const Parser = struct {
     /// `parseTypeAliasDecl` precedent). The `kw_import` starter is mirrored in
     /// `recoverToTopLevel`'s stop-set.
     fn parseImportDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
-        _ = annotations; // imports carry no annotations in the v0.6 subset
         const kw_span = (try self.advance()).span; // 'import'
 
         // module_path = IDENT { "." IDENT }  (≥1 segment)
@@ -3669,6 +3716,8 @@ pub const Parser = struct {
             .module_alias = module_alias,
             .items_start = items_start,
             .items_len = items_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = end_span.byte_end });
     }
 
@@ -4926,7 +4975,6 @@ pub const Parser = struct {
     /// name is rejected with a clear pointer. Methods reuse `parseFnLike` with
     /// `allow_self = true` and are stored in `arena.impl_methods`.
     fn parseImplDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
-        _ = annotations; // inherent impl carries no annotations in this subset
         const kw_span = self.current.span;
         _ = try self.advance(); // 'impl'
         // Optional impl-level generic params `impl<T> …`; in
@@ -4988,6 +5036,8 @@ pub const Parser = struct {
             .methods_len = methods_len,
             .generics_start = impl_generics.start,
             .generics_len = impl_generics.len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
@@ -5574,6 +5624,8 @@ pub const Parser = struct {
         _ = try self.expect(.kw_in, "expected 'in' in for loop");
         const iterable = try self.parseExprNoStruct(0);
         _ = try self.expect(.lbrace, "expected '{' to open for body");
+        self.loop_depth += 1;
+        defer self.loop_depth -= 1;
         const body = try self.parseStmtRun();
         const closing = try self.expect(.rbrace, "expected '}' to close for body");
         return try self.arena.addForStmt(self.gpa, .{
@@ -5604,6 +5656,8 @@ pub const Parser = struct {
         }
         const cond = try self.parseExprNoStruct(0);
         _ = try self.expect(.lbrace, "expected '{' to start the while body");
+        self.loop_depth += 1;
+        defer self.loop_depth -= 1;
         const body = try self.parseStmtRun();
         const closing = try self.expect(.rbrace, "expected '}' to close the while body");
         return try self.arena.addWhileStmt(self.gpa, .{
@@ -5621,6 +5675,8 @@ pub const Parser = struct {
         const kw_span = (try self.advance()).span; // 'loop'
         _ = try self.expect(.lbrace, "expected '{' to start loop body");
         if (label != 0) try self.active_labels.append(self.gpa, label);
+        self.loop_depth += 1;
+        defer self.loop_depth -= 1;
         const body = try self.parseStmtRun();
         if (label != 0) _ = self.active_labels.pop();
         const closing = try self.expect(.rbrace, "expected '}' to close loop body");
@@ -5666,7 +5722,9 @@ pub const Parser = struct {
             value = try self.parseExpr(0);
             end_byte = self.arena.exprSpan(value).byte_end;
         }
-        return try self.arena.addBreakStmt(self.gpa, label, value, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
+        const stmt = try self.arena.addBreakStmt(self.gpa, label, value, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
+        if (self.jumpLeavesClosure(label)) try self.arena.closure_escapes.append(self.gpa, stmt);
+        return stmt;
     }
 
     /// Parse `continue [label]` (loop/break, `etch-grammar.md` §633).
@@ -5682,7 +5740,9 @@ pub const Parser = struct {
                 end_byte = lt.span.byte_end;
             }
         }
-        return try self.arena.addContinueStmt(self.gpa, label, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
+        const stmt = try self.arena.addContinueStmt(self.gpa, label, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
+        if (self.jumpLeavesClosure(label)) try self.arena.closure_escapes.append(self.gpa, stmt);
+        return stmt;
     }
 
     /// Parse `throw expression` (error handling, `etch-grammar.md` §641).
@@ -5747,7 +5807,8 @@ pub const Parser = struct {
         const saved = self.no_struct_lit;
         self.no_struct_lit = false;
         defer self.no_struct_lit = saved;
-        const fields_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        var fields: std.ArrayListUnmanaged(ast_mod.StructLitField) = .empty;
+        defer fields.deinit(self.gpa);
         while (self.peek() != .rbrace and self.peek() != .eof) {
             if (self.peek() == .dotdot) {
                 return self.parseErr(self.peekSpan(), "emit-body spread '..base' is not supported in M0.8 (data-table feature, E4)");
@@ -5755,11 +5816,13 @@ pub const Parser = struct {
             const fname = try self.expect(.ident, "expected field name in emit body");
             _ = try self.expect(.colon, "expected ':' after emit-body field name");
             const value = try self.parseExpr(0);
-            try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(fname.span), .value = value });
+            try fields.append(self.gpa, .{ .name = try self.internSlice(fname.span), .value = value });
             if (!try self.match(.comma)) break;
         }
         const closing = try self.expect(.rbrace, "expected '}' to close the emitted event body");
-        const fields_len: u32 = @as(u32, @intCast(self.arena.struct_lit_fields.items.len)) - fields_start;
+        const fields_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        try self.arena.struct_lit_fields.appendSlice(self.gpa, fields.items);
+        const fields_len: u32 = @intCast(fields.items.len);
         return try self.arena.addEmitStmt(self.gpa, .{
             .event_type = event_type,
             .fields_start = fields_start,
@@ -6201,12 +6264,7 @@ pub const Parser = struct {
     }
 
     /// Continue a postfix `.field` / `.get(T)` / `.get_mut(T)` chain on an
-    /// already-parsed receiver. Extracted from `parsePostfix` so annotation
-    /// arguments that begin with an identifier (`@requires(self.health)`)
-    /// also pick up the postfix chain (the annotation field-access rule): the
-    /// named-arg lookahead in `parseAnnotationArg` consumes the leading
-    /// ident before the normal `parsePrimary` postfix path can run, so the
-    /// ident must be threaded back through this helper.
+    /// already-parsed receiver.
     fn continuePostfix(self: *Parser, expr_in: NodeId) ParseError!NodeId {
         var expr = expr_in;
         while (true) {
@@ -6425,6 +6483,9 @@ pub const Parser = struct {
             try out.args.append(self.gpa, a.raw());
             try out.names.append(self.gpa, name);
             if (!try self.match(.comma)) break;
+            // `arg_list = arg , { "," , arg } , [ "," ]`: the trailing comma is grammar.
+            // Precondition: every caller closes the list with `)`.
+            if (self.peek() == .rparen) break;
         }
     }
 
@@ -6663,6 +6724,16 @@ pub const Parser = struct {
             }
         }
         _ = try self.expect(.pipe, "expected '|' to close closure parameters");
+        const saved_depth = self.loop_depth;
+        const saved_base = self.closure_label_base;
+        self.loop_depth = 0;
+        self.closure_label_base = self.active_labels.items.len;
+        self.closure_depth += 1;
+        defer {
+            self.loop_depth = saved_depth;
+            self.closure_label_base = saved_base;
+            self.closure_depth -= 1;
+        }
         const body = try self.parseExpr(0);
         const body_span = self.arena.exprSpan(body);
         return try self.arena.addClosure(self.gpa, params.items, body, .{
@@ -6714,7 +6785,8 @@ pub const Parser = struct {
         const saved = self.no_struct_lit;
         self.no_struct_lit = false;
         defer self.no_struct_lit = saved;
-        const start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        var fields: std.ArrayListUnmanaged(ast_mod.StructLitField) = .empty;
+        defer fields.deinit(self.gpa);
         while (self.peek() != .rbrace and self.peek() != .eof) {
             if (self.peek() == .dotdot) {
                 return self.parseErr(self.peekSpan(), "event payload-filter spread '..base' is not supported (the filter is field-equality only)");
@@ -6722,12 +6794,13 @@ pub const Parser = struct {
             const fname = try self.expect(.ident, "expected field name in event payload filter");
             _ = try self.expect(.colon, "expected ':' after payload-filter field name");
             const value = try self.parseExpr(0);
-            try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(fname.span), .value = value });
+            try fields.append(self.gpa, .{ .name = try self.internSlice(fname.span), .value = value });
             if (!try self.match(.comma)) break;
         }
         _ = try self.expect(.rbrace, "expected '}' to close the event payload filter");
-        const len: u32 = @as(u32, @intCast(self.arena.struct_lit_fields.items.len)) - start;
-        return .{ .start = start, .len = len };
+        const start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        try self.arena.struct_lit_fields.appendSlice(self.gpa, fields.items);
+        return .{ .start = start, .len = @intCast(fields.items.len) };
     }
 
     /// Parse `await <target>` (`etch-grammar.md` §4.2
@@ -7396,10 +7469,6 @@ test "doc comments and leading comments attach to top-level items" {
 
 test "annotation arg accepts a field access expression" {
     const gpa = std.testing.allocator;
-    // `@requires(self.health)` — annotation positional arg that is a field
-    // access. Pre-fix, the annotation-arg path built the ident then called
-    // the binary-only continuation, leaving `.health` unconsumed and
-    // surfacing "expected ')'". Postfix routing now parses it cleanly.
     var result = try parse(gpa,
         \\@requires(self.health)
         \\component Inventory { gold: int = 0 }
@@ -7416,6 +7485,69 @@ test "annotation arg accepts a field access expression" {
     try std.testing.expectEqual(@as(u32, 1), annot.args_len);
     const arg = result.ast.annot_args.items[annot.args_start];
     try std.testing.expectEqual(ast_mod.ExprKind.field_access, result.ast.exprKind(arg.value));
+}
+
+/// The single argument of `@tag(<arg>)` on a component, parsed: its name and
+/// the kind of its value. The caller owns `result`.
+fn parseTagArg(gpa: std.mem.Allocator, arg_src: []const u8, result: *ParseResult) !ast_mod.AnnotationArg {
+    const src = try std.fmt.allocPrint(gpa, "@tag({s})\ncomponent C {{ x: int = 0 }}\n", .{arg_src});
+    defer gpa.free(src);
+    result.* = try parse(gpa, src);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    const cd = result.ast.component_decls.items[0];
+    const annot = result.ast.annot_pool.items[cd.annotations_extra];
+    try std.testing.expectEqual(@as(u32, 1), annot.args_len);
+    return result.ast.annot_args.items[annot.args_start];
+}
+
+test "an annotation argument may be a cast" {
+    const gpa = std.testing.allocator;
+    var result: ParseResult = undefined;
+    const arg = try parseTagArg(gpa, "v as f32", &result);
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(ast_mod.ExprKind.cast, result.ast.exprKind(arg.value));
+}
+
+test "an annotation argument may be none" {
+    const gpa = std.testing.allocator;
+    var result: ParseResult = undefined;
+    const arg = try parseTagArg(gpa, "none", &result);
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(ast_mod.ExprKind.none_lit, result.ast.exprKind(arg.value));
+}
+
+test "an annotation argument may be some(value)" {
+    const gpa = std.testing.allocator;
+    var result: ParseResult = undefined;
+    const arg = try parseTagArg(gpa, "some(1)", &result);
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(ast_mod.ExprKind.some_lit, result.ast.exprKind(arg.value));
+}
+
+test "an annotation argument may be named by a capitalised name" {
+    const gpa = std.testing.allocator;
+    var result: ParseResult = undefined;
+    const arg = try parseTagArg(gpa, "Name: 1", &result);
+    defer result.deinit(gpa);
+    try std.testing.expectEqualStrings("Name", result.ast.strings.slice(arg.name));
+    try std.testing.expectEqual(ast_mod.ExprKind.int_lit, result.ast.exprKind(arg.value));
+}
+
+test "an annotation argument named by a lowercase name keeps its name" {
+    const gpa = std.testing.allocator;
+    var result: ParseResult = undefined;
+    const arg = try parseTagArg(gpa, "reason: \"x\"", &result);
+    defer result.deinit(gpa);
+    try std.testing.expectEqualStrings("reason", result.ast.strings.slice(arg.name));
+    try std.testing.expectEqual(ast_mod.ExprKind.string_lit, result.ast.exprKind(arg.value));
+}
+
+test "an annotation name is an IDENT, never a TYPE_IDENT" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa, "@Unit(.meters)\ncomponent C { x: int = 0 }\n");
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, result.diagnostics[0].primary_message, "lowercase annotation name") != null);
 }
 
 test "parser builds array literals, fill, and index/slice access (collections)" {
@@ -8917,6 +9049,112 @@ test "parser keeps data entry field runs contiguous around nested struct literal
     try std.testing.expectEqualStrings("hp", result.ast.strings.slice(f1.name));
 }
 
+fn expectFieldRun(ast: *const ast_mod.AstArena, start: u32, len: u32, names: []const []const u8) !void {
+    try std.testing.expectEqual(@as(u32, @intCast(names.len)), len);
+    for (names, 0..) |name, i| {
+        try std.testing.expectEqualStrings(name, ast.strings.slice(ast.struct_lit_fields.items[start + i].name));
+    }
+}
+
+fn parseClean(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
+    var result = try parse(gpa, source);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        result.deinit(gpa);
+        return error.TestUnexpectedResult;
+    }
+    return result;
+}
+
+test "an emit keeps its field run contiguous around a nested struct literal" {
+    const gpa = std.testing.allocator;
+    var result = try parseClean(gpa,
+        \\rule r(entity: Entity) when entity has Health {
+        \\  emit Hit { a: 1, p: Payload { v: 5 }, b: 2 }
+        \\}
+    );
+    defer result.deinit(gpa);
+    const em = result.ast.emit_stmts.items[0];
+    try expectFieldRun(&result.ast, em.fields_start, em.fields_len, &.{ "a", "p", "b" });
+}
+
+test "an event payload filter keeps its field run contiguous around a nested struct literal" {
+    const gpa = std.testing.allocator;
+    var result = try parseClean(gpa,
+        \\async rule r(entity: Entity) when entity has Health {
+        \\  await global_event(Hit { a: 1, p: Payload { v: 5 }, b: 2 })
+        \\  await entity_event(entity, Hit { a: 1, p: Payload { v: 5 }, b: 2 })
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 2), result.ast.await_exprs.items.len);
+    for (result.ast.await_exprs.items) |aw| {
+        try expectFieldRun(&result.ast, aw.filter_start, aw.filter_len, &.{ "a", "p", "b" });
+    }
+}
+
+test "an effect emitter keeps its property run contiguous around a nested struct literal" {
+    const gpa = std.testing.allocator;
+    var result = try parseClean(gpa,
+        \\effect Burst {
+        \\  emitter Flash {
+        \\    burst: 1
+        \\    shape: Shape { r: 2.0 }
+        \\    lifetime: 0.1
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    const em = result.ast.effect_emitters.items[0];
+    try expectFieldRun(&result.ast, em.props_start, em.props_len, &.{ "burst", "shape", "lifetime" });
+}
+
+test "an audio score section keeps its property run contiguous around a nested struct literal" {
+    const gpa = std.testing.allocator;
+    var result = try parseClean(gpa,
+        \\audio_score "s" {
+        \\  section Calm {
+        \\    intro: Clip { path: "a.ogg" }
+        \\    loop: true
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    const section = result.ast.audio_score_sections.items[0];
+    try expectFieldRun(&result.ast, section.props_start, section.props_len, &.{ "intro", "loop" });
+}
+
+test "an anim body sub-block keeps its property run contiguous around a nested struct literal" {
+    const gpa = std.testing.allocator;
+    var result = try parseClean(gpa,
+        \\anim_graph G {
+        \\  state S {
+        \\    motion_matching {
+        \\      database: Db { name: "x" }
+        \\      blend_time: 0.2s
+        \\    }
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    const state = result.ast.anim_states.items[0];
+    try expectFieldRun(&result.ast, state.body_props_start, state.body_props_len, &.{ "database", "blend_time" });
+}
+
+test "a tuple-like enum variant keeps its type run contiguous around a generic type" {
+    const gpa = std.testing.allocator;
+    var result = try parseClean(gpa,
+        \\enum E { v(Box<int>, int) }
+    );
+    defer result.deinit(gpa);
+    const variant = result.ast.enum_variants.items[0];
+    try std.testing.expectEqual(@as(u32, 2), variant.data_len);
+    const first: NodeId = @bitCast(result.ast.extra.items[variant.data_start]);
+    const second: NodeId = @bitCast(result.ast.extra.items[variant.data_start + 1]);
+    try std.testing.expectEqual(ast_mod.TypeNodeKind.generic, result.ast.typeNodeKind(first));
+    try std.testing.expectEqualStrings("int", result.ast.strings.slice(result.ast.namedTypeName(second).?));
+}
+
 test "parser accepts a PascalCase data entry id, recorded for E1768" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
@@ -9290,6 +9528,31 @@ test "parser rejects a positional argument after a named one (§3.3)" {
     var result = try parse(gpa,
         \\rule r(entity: Entity) when entity has C {
         \\  f(a: 1, 2)
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+}
+
+test "parser accepts a trailing comma in call and annotation arguments" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@tag(.a,)
+        \\rule r(entity: Entity) when entity has C {
+        \\  f(1, 2,)
+        \\  entity.m(1,)
+        \\  g(a: 1, b: 2,)
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+}
+
+test "parser still rejects a positional argument after a named one, trailing comma or not" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r(entity: Entity) when entity has C {
+        \\  f(a: 1, 2,)
         \\}
     );
     defer result.deinit(gpa);
@@ -10324,4 +10587,26 @@ test "service is refused in a standard .etch and recovery resyncs on it" {
     defer after.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 1), after.ast.component_decls.items.len);
     try std.testing.expectEqualStrings("Health", after.ast.strings.slice(after.ast.component_decls.items[0].name));
+}
+
+test "a tag path literal is no enum shorthand, and a bare .variant is one" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\tags { a { b } }
+        \\ability X { tags_required: [.a.b] }
+        \\rule r() {
+        \\  let v = .b
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    var paths: usize = 0;
+    var shorthands: usize = 0;
+    for (result.ast.exprs.items(.kind), 0..) |k, i| {
+        if (k != .tag_path) continue;
+        paths += 1;
+        if (result.ast.isEnumShorthand(.{ .category = .expr, .index = @intCast(i) })) shorthands += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), paths);
+    try std.testing.expectEqual(@as(usize, 1), shorthands);
 }

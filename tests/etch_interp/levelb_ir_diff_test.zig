@@ -92,3 +92,47 @@ test "level-b serialized IR: interpreter build == cooked emit, byte-identical" {
         try std.testing.expectEqualStrings(interp_dump.items, cooked_dump.items);
     }
 }
+
+const OneShotFailing = weld_core.testing.alloc_counting.OneShotFailing;
+
+test "every level-b program: a compile failing at any allocation surfaces OutOfMemory" {
+    const gpa = std.testing.allocator;
+    for (programs) |p| {
+        var pr = try weld_etch.parseSource(gpa, p.source);
+        defer pr.deinit(gpa);
+        var diags: std.ArrayListUnmanaged(weld_etch.Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try weld_etch.typeCheck(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+        const committed = blk: {
+            var world = World.init();
+            defer world.deinit(gpa);
+            var it = try weld_etch.Interpreter.compile(gpa, &pr.ast, &world);
+            it.deinit();
+            break :blk world.registry.componentCount();
+        };
+
+        var k: usize = 0;
+        while (true) : (k += 1) {
+            errdefer std.debug.print("level-b program '{s}', allocation {d}\n", .{ p.name, k });
+            var world = World.init();
+            defer world.deinit(gpa);
+            var failing: OneShotFailing = .{ .backing = gpa, .fail_at = k };
+            if (weld_etch.Interpreter.compile(failing.allocator(), &pr.ast, &world)) |compiled| {
+                var it = compiled;
+                it.deinit();
+                // Success after an injected failure means an OutOfMemory was swallowed.
+                try std.testing.expect(!failing.failed);
+                break;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                const n = world.registry.componentCount();
+                try std.testing.expect(n == 0 or n == committed);
+            }
+        }
+    }
+}

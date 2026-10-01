@@ -14,12 +14,15 @@
 //!   at the tick boundary via `applyWithObservers` (firing observers per op),
 //!   never mid-`iterateArchetype`.
 //! - No job system use; rules run sequentially on the calling thread.
-//! - `ExprKind.path` and `ExprKind.tag_path` produce `RuntimeError.UnsupportedExpr`.
+//! - A `.variant` shorthand runs as the variant the type-checker resolved it to
+//!   (`AstArena.enum_shorthands`), so a program nothing checked cannot run one.
 
 const std = @import("std");
 const ast_mod = @import("ast.zig");
 const types_mod = @import("types.zig");
+const tagset_name = types_mod.tagset_component_name;
 const parser_mod = @import("parser.zig");
+const const_eval = @import("const_eval.zig");
 const diag_mod = @import("diagnostics.zig");
 const value_mod = @import("value.zig");
 const bridge_mod = @import("ecs_bridge.zig");
@@ -40,12 +43,17 @@ const ComponentId = weld_core.ecs.registry.ComponentId;
 /// Storage backend recorded per component at registration — `table | sparse`,
 /// default `table` (`engine-ecs-internals.md` §2).
 const StorageKind = weld_core.ecs.registry.StorageKind;
+const TypeKind = weld_core.ecs.registry.TypeKind;
+const ResourceStore = weld_core.ecs.resources.ResourceStore;
+const PreparedEntry = weld_core.ecs.registry.PreparedEntry;
+const StagedClosures = weld_core.ecs.registry.StagedClosures;
 const FieldDesc = weld_core.ecs.registry.FieldDesc;
 const FieldKind = weld_core.ecs.registry.FieldKind;
 const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
 const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 const World = weld_core.ecs.world.World;
 const DynamicQuery = weld_core.ecs.world.DynamicQuery;
+const ExtensionHooks = weld_core.ecs.world.ExtensionHooks;
 const CoreEntityId = weld_core.ecs.entity.EntityId;
 const Tick = weld_core.ecs.tick.Tick;
 const initial_tick = weld_core.ecs.tick.initial_tick;
@@ -124,6 +132,7 @@ const BoundField = struct {
     name: StringId,
     offset: u16,
     kind: FieldKind,
+    enum_type_name_id: u32,
 };
 
 /// One `has T { expression }` general filter.
@@ -177,6 +186,25 @@ const PendingTag = struct {
 /// direct-programmatic paths, which run outside any query iteration.
 const ExtOp = enum { activate, deactivate };
 
+const HookRun = types_mod.TypeChecker.HookRun;
+
+/// `text` and each scope name, each behind its `u32` length: one key per
+/// (text, scope) pair, whatever bytes they hold.
+fn hookVerdictKey(gpa: std.mem.Allocator, text: []const u8, scope: []const []const u8) ![]u8 {
+    var len: usize = 4 + text.len;
+    for (scope) |name| len += 4 + name.len;
+    const key = try gpa.alloc(u8, len);
+    var at = putPart(key, 0, text);
+    for (scope) |name| at = putPart(key, at, name);
+    return key;
+}
+
+fn putPart(key: []u8, at: usize, part: []const u8) usize {
+    std.mem.writeInt(u32, key[at..][0..4], @intCast(part.len), .little);
+    @memcpy(key[at + 4 ..][0..part.len], part);
+    return at + 4 + part.len;
+}
+
 const PendingExtension = struct {
     entity: CoreEntityId,
     /// Owned copy of the extension name (the AST / run-string source may not
@@ -186,6 +214,10 @@ const PendingExtension = struct {
     /// resolver's backing outlives the tick.
     bytes: []const u8,
     op: ExtOp,
+    /// The extension name at the call, where a refusal at the flush is
+    /// reported; empty for a call a cooked hook made, its text being no program
+    /// source.
+    span: SourceSpan,
 };
 
 /// Resolved view of a `when` clause node. The pool of these is a LOCAL of
@@ -319,20 +351,118 @@ fn freeSelection(gpa: std.mem.Allocator, selection: []QueryPlan) void {
     gpa.free(selection);
 }
 
+/// The persistent block a value holds a reference to, if any (§4.4). A
+/// `.string_view` has no block and is never counted.
+fn handleBlock(v: Value) ?[*]u8 {
+    return switch (v) {
+        .string_persistent => |s| if (s.ptr == 0) null else @ptrFromInt(s.ptr),
+        .array_persistent, .map_persistent, .set_persistent => |p| @ptrFromInt(p),
+        else => null,
+    };
+}
+
+fn retainHandle(v: Value) void {
+    if (handleBlock(v)) |b| persistent.incref(b);
+}
+
+fn releaseHandle(gpa: std.mem.Allocator, v: Value) void {
+    if (handleBlock(v)) |b| persistent.decref(gpa, b);
+}
+
+/// Store `v` in a slot that already holds a counted value.
+fn replaceHeld(gpa: std.mem.Allocator, slot: *Value, v: Value) void {
+    retainHandle(v);
+    releaseHandle(gpa, slot.*);
+    slot.* = v;
+}
+
 const Local = struct {
     value: Value,
     is_mut: bool,
 };
 
+/// A body's locals. Each local holding a persistent handle owns one reference,
+/// and so does each binding a nested scope shadows, until that scope closes
+/// (`etch-reference-part1.md` §4.3).
 const Locals = struct {
+    /// The bindings visible now.
     map: std.AutoHashMapUnmanaged(StringId, Local) = .empty,
+    /// Every binding made in an open nested scope, with the one it shadows.
+    log: std.ArrayListUnmanaged(Shadowed) = .empty,
+    /// Where each open nested scope begins in `log`.
+    starts: std.ArrayListUnmanaged(usize) = .empty,
+
+    const Shadowed = struct { name: StringId, shadowed: ?Local };
 
     pub fn deinit(self: *Locals, gpa: std.mem.Allocator) void {
+        self.releaseAll(gpa);
         self.map.deinit(gpa);
+        self.log.deinit(gpa);
+        self.starts.deinit(gpa);
     }
 
+    /// Drop every local, keeping the capacity.
+    pub fn clear(self: *Locals, gpa: std.mem.Allocator) void {
+        self.releaseAll(gpa);
+        self.map.clearRetainingCapacity();
+        self.log.clearRetainingCapacity();
+        self.starts.clearRetainingCapacity();
+    }
+
+    fn releaseAll(self: *Locals, gpa: std.mem.Allocator) void {
+        var it = self.map.valueIterator();
+        while (it.next()) |l| releaseHandle(gpa, l.value);
+        for (self.log.items) |e| {
+            if (e.shadowed) |prev| releaseHandle(gpa, prev.value);
+        }
+    }
+
+    /// Bind `name` in the innermost scope. A binding of an enclosing scope it
+    /// shadows keeps its reference until the scope closes; one of the same
+    /// scope is replaced.
     pub fn put(self: *Locals, gpa: std.mem.Allocator, name: StringId, v: Value, is_mut: bool) !void {
-        try self.map.put(gpa, name, .{ .value = v, .is_mut = is_mut });
+        if (self.starts.items.len != 0 and !self.boundHere(name)) {
+            try self.log.ensureUnusedCapacity(gpa, 1);
+            const gop = try self.map.getOrPut(gpa, name);
+            retainHandle(v);
+            self.log.appendAssumeCapacity(.{ .name = name, .shadowed = if (gop.found_existing) gop.value_ptr.* else null });
+            gop.value_ptr.* = .{ .value = v, .is_mut = is_mut };
+            return;
+        }
+        const gop = try self.map.getOrPut(gpa, name);
+        retainHandle(v);
+        if (gop.found_existing) releaseHandle(gpa, gop.value_ptr.value);
+        gop.value_ptr.* = .{ .value = v, .is_mut = is_mut };
+    }
+
+    fn boundHere(self: *const Locals, name: StringId) bool {
+        for (self.log.items[self.starts.getLast()..]) |e| {
+            if (e.name == name) return true;
+        }
+        return false;
+    }
+
+    pub fn enter(self: *Locals, gpa: std.mem.Allocator) !void {
+        try self.starts.append(gpa, self.log.items.len);
+    }
+
+    /// Close the innermost scope: each of its bindings is released and gives
+    /// back the one it shadowed, or leaves.
+    pub fn leave(self: *Locals, gpa: std.mem.Allocator) void {
+        const start = self.starts.pop().?;
+        var i = self.log.items.len;
+        while (i > start) {
+            i -= 1;
+            const e = self.log.items[i];
+            const slot = self.map.getPtr(e.name).?;
+            releaseHandle(gpa, slot.value);
+            if (e.shadowed) |prev| {
+                slot.* = prev;
+            } else {
+                _ = self.map.remove(e.name);
+            }
+        }
+        self.log.shrinkRetainingCapacity(start);
     }
 
     pub fn get(self: *const Locals, name: StringId) ?Value {
@@ -512,8 +642,10 @@ const EventVal = struct {
 /// cannot be driven by the dynamic tree-walker, so `emit` accumulates events
 /// here, each tagged by its type name; `@on_event` observers drain them. The
 /// observer/drain side is the observer path (resolver-types §12,
-/// deferred). Cleared at the start of each tick (`stepOnce`), matching the
-/// `Lifetime.tick` drain cadence (`src/core/events/lifetime.zig`).
+/// deferred). An event lives for one tick of rules, matching the
+/// `Lifetime.tick` drain cadence (`src/core/events/lifetime.zig`): one emitted
+/// at a boundary, after a tick's last rule or outside any tick, lives for the
+/// next tick's.
 const EventStore = struct {
     list: std.ArrayListUnmanaged(EventVal) = .empty,
     /// Store-owned deep copies of NON-AST string event field bytes:
@@ -522,11 +654,15 @@ const EventStore = struct {
     /// storage, released when the resource string field is reassigned).
     /// Neither survives an event that outlives the emitter's body (an `@on_event`
     /// observer or an awaiter's cross-tick poll), nor a mutation of its source,
-    /// so such a field value is deep-copied here at emit and re-tagged
-    /// `.string_persistent` over the copy; the copies are freed with the event
+    /// so such a field value is deep-copied here at emit and tagged
+    /// `.string_view` over the copy; the copies are freed with the event
     /// queue at the per-tick `clear`. (`.string_id` — the immortal AST table — is
     /// stable and never copied.)
     owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
+    /// The prefixes of `list` and `owned_strings` emitted before the last
+    /// `endRules`, which the next `startTick` drops.
+    ruled_events: usize = 0,
+    ruled_strings: usize = 0,
 
     fn deinit(self: *EventStore, gpa: std.mem.Allocator) void {
         for (self.list.items) |*e| e.fields.deinit(gpa);
@@ -540,6 +676,29 @@ const EventStore = struct {
         self.list.clearRetainingCapacity();
         for (self.owned_strings.items) |s| gpa.free(s);
         self.owned_strings.clearRetainingCapacity();
+        self.ruled_events = 0;
+        self.ruled_strings = 0;
+    }
+
+    /// Mark the end of a tick's rules.
+    fn endRules(self: *EventStore) void {
+        self.ruled_events = self.list.items.len;
+        self.ruled_strings = self.owned_strings.items.len;
+    }
+
+    /// Drop what the previous tick's rules could observe, keeping what was
+    /// emitted after them.
+    fn startTick(self: *EventStore, gpa: std.mem.Allocator) void {
+        for (self.list.items[0..self.ruled_events]) |*e| e.fields.deinit(gpa);
+        const kept = self.list.items.len - self.ruled_events;
+        std.mem.copyForwards(EventVal, self.list.items[0..kept], self.list.items[self.ruled_events..]);
+        self.list.shrinkRetainingCapacity(kept);
+        for (self.owned_strings.items[0..self.ruled_strings]) |s| gpa.free(s);
+        const kept_strings = self.owned_strings.items.len - self.ruled_strings;
+        std.mem.copyForwards([]u8, self.owned_strings.items[0..kept_strings], self.owned_strings.items[self.ruled_strings..]);
+        self.owned_strings.shrinkRetainingCapacity(kept_strings);
+        self.ruled_events = 0;
+        self.ruled_strings = 0;
     }
 
     /// Enqueue an event of `type_name`, taking ownership of `fields`.
@@ -548,7 +707,7 @@ const EventStore = struct {
     }
 
     /// Deep-copy `bytes` into store-owned memory and return a stable
-    /// `.string_persistent` view over the copy (freed at `clear`). Stabilizes a
+    /// `.string_view` over the copy (freed at `clear`). Stabilizes a
     /// non-AST string event field value (a per-body `.string_run` or a borrowed
     /// `.string_persistent`) that would otherwise dangle when the emitter's body
     /// ends or the source resource string is reassigned.
@@ -556,7 +715,7 @@ const EventStore = struct {
         const dup = try gpa.dupe(u8, bytes);
         errdefer gpa.free(dup);
         try self.owned_strings.append(gpa, dup);
-        return Value{ .string_persistent = .{ .ptr = @intFromPtr(dup.ptr), .len = @intCast(dup.len) } };
+        return Value{ .string_view = .{ .ptr = @intFromPtr(dup.ptr), .len = @intCast(dup.len) } };
     }
 
     /// Number of queued events of `type_name` (test / inspection helper).
@@ -681,9 +840,9 @@ fn writeI64At(bytes: []u8, off: u16, v: i64) void {
 /// Parse the seconds of a `Duration` literal lexeme (`"1.5s"` → 1.5) — the
 /// minimal Duration→seconds path `await wait` needs. `null` if the
 /// lexeme is malformed. General `Duration` arithmetic stays out of scope.
-fn durationLiteralSeconds(text: []const u8) ?f64 {
+fn durationLiteralSeconds(gpa: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error!?f64 {
     if (text.len < 2 or text[text.len - 1] != 's') return null;
-    return std.fmt.parseFloat(f64, text[0 .. text.len - 1]) catch null;
+    return const_eval.floatLiteralValue(gpa, text[0 .. text.len - 1]);
 }
 
 // ─── Async suspension core (`etch-reference-part1.md §9.12`) ─────────
@@ -811,6 +970,10 @@ const RunFrame = struct {
     /// (`null` for a rule body or a value-less block). Statement-position blocks
     /// discard the value, but a side-effecting trailing expr must still run.
     value_expr: ?NodeId = null,
+    /// The scopes this frame opened on the scope it runs in, closed when it
+    /// pops: none for a task root, the block's, and before it a branch's
+    /// pattern binding.
+    scopes: u8 = 0,
 };
 
 /// `loop { body }`: run the body, resetting the cursor to 0 at the end so it
@@ -821,6 +984,8 @@ const LoopFrame = struct {
     block_len: u32,
     cursor: u32 = 0,
     label: StringId = 0,
+    /// Whether the current iteration's scope is open.
+    iter_open: bool = false,
 };
 
 /// `while [let x =] cond { body }`: at the top of each iteration (`in_iter =
@@ -831,6 +996,9 @@ const WhileFrame = struct {
     while_id: NodeId,
     cursor: u32 = 0,
     in_iter: bool = false,
+    /// Whether the current iteration's scope, which holds a `while let`
+    /// payload, is open.
+    iter_open: bool = false,
 };
 
 /// The iterator state of a `for` frame, persisted across a suspension. A `range`
@@ -847,9 +1015,9 @@ const ForIter = union(enum) {
     array: struct { handle: u32, len: usize, idx: usize },
     map: struct { handle: u32, len: usize, idx: usize },
     /// A resource `T[]` iterated in an async body. Carries the
-    /// `type_array` block pointer (stable across suspend, unlike a rule-arena
-    /// handle) + a snapshotted length + cursor — same index-based semantics as
-    /// the `.array` variant.
+    /// `type_array` block pointer, on which the frame holds a reference, + a
+    /// snapshotted length + cursor — same index-based semantics as the `.array`
+    /// variant.
     array_persistent: struct { ptr: u64, len: usize, idx: usize },
     /// A resource `[K: V]` iterated in an async body, mirror of
     /// `.map` on a `type_map` block pointer.
@@ -867,6 +1035,9 @@ const ForFrame = struct {
     iter: ForIter,
     cursor: u32 = 0,
     in_iter: bool = false,
+    /// Whether the current iteration's scope, which holds the loop variables,
+    /// is open.
+    iter_open: bool = false,
 };
 
 /// `try { body } catch e { handler }`: drives the `try` body (`in_catch = false`);
@@ -882,6 +1053,8 @@ const TryFrame = struct {
     catch_name: StringId,
     cursor: u32 = 0,
     in_catch: bool = false,
+    /// Whether the scope of the body being run, try or catch, is open.
+    scope_open: bool = false,
 };
 
 /// Where an `await`'s resolved value is delivered at the caller's await site. Set from
@@ -908,6 +1081,8 @@ const CallFrame = struct {
     scope: *Locals,
     value_expr: ?NodeId = null,
     ret: RetTarget,
+    /// How many times the await site wraps `f`'s value into an optional.
+    wraps: u8 = 0,
 };
 
 /// A suspendable task — the dynamic-pool replacement for the per-rule
@@ -965,17 +1140,29 @@ const AsyncTask = struct {
     returned: bool = false,
 
     fn deinit(self: *AsyncTask, gpa: std.mem.Allocator) void {
-        for (self.frames.items) |*f| switch (f.*) {
-            .call => |cf| {
-                cf.scope.deinit(gpa);
-                gpa.destroy(cf.scope);
-            },
-            else => {},
-        };
+        for (self.frames.items) |*f| releaseFrame(gpa, f);
         self.frames.deinit(gpa);
         self.locals.deinit(gpa);
+        releaseHandle(gpa, self.result);
     }
 };
+
+/// Release what a frame owns: a `call` frame's scope, and the reference a `for`
+/// frame holds on the persistent collection it iterates.
+fn releaseFrame(gpa: std.mem.Allocator, frame: *AsyncFrame) void {
+    switch (frame.*) {
+        .call => |cf| {
+            cf.scope.deinit(gpa);
+            gpa.destroy(cf.scope);
+        },
+        .for_ => |ff| switch (ff.iter) {
+            .array_persistent => |a| releaseHandle(gpa, .{ .array_persistent = a.ptr }),
+            .map_persistent => |m| releaseHandle(gpa, .{ .map_persistent = m.ptr }),
+            else => {},
+        },
+        else => {},
+    }
+}
 
 /// Outcome of one `driveTask` pass over a task's frame-stack.
 const AsyncOutcome = enum { suspended, completed };
@@ -995,9 +1182,7 @@ const StepAction = enum {
 
 /// Per-observer-rule context handed to the Tier-0 `ObserverRegistry` as the
 /// opaque `ctx` pointer. Points back at the interpreter + the
-/// descriptor index so the trampoline can run the right rule body. Allocated
-/// once per binding in `bindToWorld`, freed at `deinit` — the interpreter must
-/// outlive any flush that fires its observers.
+/// descriptor index so the trampoline can run the right rule body.
 const ObserverCtx = struct {
     interp: *Interpreter,
     rule_desc_idx: usize,
@@ -1007,12 +1192,25 @@ const ObserverCtx = struct {
 /// the type-checked AST against a `World` once per tick.
 pub const Interpreter = struct {
     gpa: std.mem.Allocator,
+    /// The program, read-only; the arena `owned_ast` owns.
     ast: *const AstArena,
+    /// A copy of the caller's arena the interpreter owns, into which every
+    /// hook text is parsed: every id the interpreter or a hook holds indexes
+    /// it, and it lives as long as they do.
+    owned_ast: *AstArena,
+    /// Each hook text run so far, parsed once into `owned_ast`: its statement
+    /// run, or null when the text does not parse. The keys are owned.
+    hook_runs: std.StringHashMapUnmanaged(?HookRun) = .empty,
+    /// Whether the type checker accepts a hook text in a scope: keyed by the
+    /// owned text and scope names (`hookVerdictKey`).
+    hook_verdicts: std.StringHashMapUnmanaged(bool) = .empty,
     bridge: Bridge,
     rule_descs: []RuleDesc,
     /// Top-level `fn` declarations keyed by name, for
     /// resolving a free-function call `f(args)` whose callee names a `fn`.
     fns: std.AutoHashMapUnmanaged(StringId, ast_mod.FnDecl) = .empty,
+    /// Top-level `const` declarations by name, read where a name is no local.
+    consts: std.AutoHashMapUnmanaged(StringId, ast_mod.ConstDecl) = .empty,
     /// Inherent `impl` methods keyed by `methodKey(type_name, method_name)`, for
     /// `recv.method()` / `Type.assoc()` dispatch.
     methods: std.AutoHashMapUnmanaged(u64, ast_mod.FnDecl) = .empty,
@@ -1134,10 +1332,13 @@ pub const Interpreter = struct {
     /// values (arrays / structs / closures / `.string_run`) still held by the test
     /// body's locals — a use-after-free (the string class). `runTestBody` sets
     /// this for its whole duration; the driven bodies then accumulate into the shared
-    /// stores (test-scale, bounded), and `runTestBody`'s own end-defers (raw resets,
-    /// NOT `resetBodyStores`) free everything at once. `false` on every production path
-    /// — no behavior change.
+    /// stores (test-scale, bounded), and `runTestBody`'s own end-defer
+    /// (`resetArena`, NOT `resetBodyStores`) frees everything at once. `false` on
+    /// every production path — no behavior change.
     suppress_body_store_resets: bool = false,
+    /// Blocks arena values hold a reference to, released at the arena's reset
+    /// (`etch-memory-model.md` §4.4).
+    deferred_decrefs: std.ArrayListUnmanaged([*]u8) = .empty,
     /// Whether a `return` is unwinding to the enclosing `fn` boundary.
     /// Mirrors `thrown`: every statement-run / loop / block site that stops on a
     /// throw also stops on a return; the fn-call boundary consumes it.
@@ -1229,8 +1430,8 @@ pub const Interpreter = struct {
     /// `.entity_id`) are copy-stable across ticks; a NON-AST string filter — a
     /// computed `.string_run` (`prefix + "!"`) or a borrowed `.string_persistent`
     /// (`get(R).s`, released on resource reassignment) — is deep-copied into
-    /// `captured_filter_strings` at capture and re-tagged `.string_persistent`
-    /// over the copy (which also enforces capture-once §9.4).
+    /// `captured_filter_strings` at capture and tagged `.string_view` over the
+    /// copy (which also enforces capture-once §9.4).
     captured_filters: std.ArrayListUnmanaged(StructField) = .empty,
     /// Buffer-owned deep copies of non-AST (`.string_run` / borrowed
     /// `.string_persistent`) filter-value bytes. Parallel to
@@ -1254,47 +1455,30 @@ pub const Interpreter = struct {
     merge_seen: std.AutoHashMapUnmanaged(CoreEntityId, void) = .empty,
     /// Per-observer-rule contexts registered into the world's `ObserverRegistry`
     /// at `bindToWorld`. One entry per rule with `observer_kind`
-    /// set; the registry holds `&observer_ctxs[k]` as its opaque `ctx`. Freed at
-    /// `deinit` (the interpreter must outlive any observer-firing flush).
+    /// set; the registry holds `&observer_ctxs[k]` as its opaque `ctx`.
+    /// Unregistered and freed when the interpreter unbinds.
     observer_ctxs: []ObserverCtx = &.{},
-    /// Set once observers have been registered (idempotent `bindToWorld`).
-    observers_bound: bool = false,
+    /// The address `bindToWorld` registered into the world, which holds it as
+    /// the hooks' and observers' context. Non-null once bound.
+    bound_at: ?*const Interpreter = null,
+    /// The world `bindToWorld` registered into, which must outlive the
+    /// interpreter.
+    bound_world: ?*World = null,
+    /// Set while a cooked hook text runs: its spans index that text.
+    in_hook_text: bool = false,
     /// Non-null while an observer body runs: the registry's deferred
     /// command buffer. Structural mutations issued by the body (tag mutations)
     /// route here instead of `pending_tags`, so they apply at the NEXT flush —
     /// never re-entrantly during the current one (the no-recursion contract).
     observer_deferred: ?*CommandBuffer = null,
-    /// The world this program was compiled against (`compile`), borrowed for the
-    /// persistent-string teardown in `deinit`. The interpreter is
-    /// already lifecycle-coupled to the world (its observer ctxs are registered
-    /// into the world's `ObserverRegistry`), so storing it here is consistent;
-    /// the world MUST outlive the interpreter (the existing contract — `deinit`
-    /// before `world.deinit`). `null` only before `compile` returns.
-    world: ?*World = null,
-    /// Immortal persistent-heap blocks holding compile-time `string` field
-    /// defaults. Allocated in `compileTypeDecl` via `allocImmortal`
-    /// (sentinel refcount, so slot decref never frees them) and `destroy`'d here
-    /// at `deinit` — they have no slot-owner to reclaim them, so the interpreter
-    /// (their allocator) does. Freed AFTER the per-slot decref so an un-overwritten
-    /// default (slot still points at its immortal block) is reclaimed exactly once.
-    persistent_literals: std.ArrayListUnmanaged([*]u8) = .empty,
-
+    /// Removes what it registered in the world it bound. Resource payloads and
+    /// the blocks they point into belong to the world and outlive this
+    /// interpreter.
     pub fn deinit(self: *Interpreter) void {
-        // Uniform resource-payload teardown. The decref walk over every
-        // resource's `.string_`/`.array_`/`.map_`/`.set_` slots now lives on
-        // `World.releaseResourcePayloads`; run it here BEFORE destroying the
-        // immortal `persistent_literals` below. Ordering is load-bearing: the
-        // walk zeroes each slot after decref, so the later `World.deinit` call
-        // is a no-op and never re-reads a slot pointing at a freed immortal
-        // block (a use-after-free). `decref` no-ops on a sentinel (immortal
-        // default) and frees a refcounted user-written block; the immortal
-        // defaults are then reclaimed by `destroy` below (their allocator is
-        // the interpreter). The walk no longer needs `bridge.resources`, so it
-        // is decoupled from `bridge.deinit`.
-        if (self.world) |w| w.releaseResourcePayloads(self.gpa);
-        for (self.persistent_literals.items) |block| persistent.destroy(self.gpa, block);
+        self.unbind();
+        self.drainDeferredDecrefs();
+        self.deferred_decrefs.deinit(self.gpa);
         self.event_sources.deinit(self.gpa);
-        self.persistent_literals.deinit(self.gpa);
         for (self.rule_descs) |*r| r.deinit(self.gpa);
         self.gpa.free(self.rule_descs);
         self.bridge.deinit(self.gpa);
@@ -1306,6 +1490,7 @@ pub const Interpreter = struct {
         for (self.run_strings.items) |s| self.gpa.free(s);
         self.run_strings.deinit(self.gpa);
         self.fns.deinit(self.gpa);
+        self.consts.deinit(self.gpa);
         self.methods.deinit(self.gpa);
         self.struct_decls.deinit(self.gpa);
         self.enum_decls.deinit(self.gpa);
@@ -1338,8 +1523,15 @@ pub const Interpreter = struct {
         self.descriptors.deinit(self.gpa);
         self.merge_cursors.deinit(self.gpa);
         self.merge_seen.deinit(self.gpa);
-        self.gpa.free(self.observer_ctxs);
         self.test_msg_buf.deinit(self.gpa);
+        var hook_keys = self.hook_runs.keyIterator();
+        while (hook_keys.next()) |k| self.gpa.free(k.*);
+        self.hook_runs.deinit(self.gpa);
+        var verdict_keys = self.hook_verdicts.keyIterator();
+        while (verdict_keys.next()) |k| self.gpa.free(k.*);
+        self.hook_verdicts.deinit(self.gpa);
+        self.owned_ast.deinit(self.gpa);
+        self.gpa.destroy(self.owned_ast);
         self.* = undefined;
     }
 
@@ -1377,7 +1569,15 @@ pub const Interpreter = struct {
         return try interp.runFor(world, ticks);
     }
 
-    pub fn compile(gpa: std.mem.Allocator, ast: *const AstArena, world: *World) !Interpreter {
+    /// Compile a copy of `program` the interpreter owns, so `program` may be
+    /// freed as soon as this returns.
+    pub fn compile(gpa: std.mem.Allocator, program: *const AstArena, world: *World) !Interpreter {
+        const owned_ast = try gpa.create(AstArena);
+        errdefer gpa.destroy(owned_ast);
+        owned_ast.* = try program.clone(gpa);
+        errdefer owned_ast.deinit(gpa);
+        const ast: *const AstArena = owned_ast;
+
         var bridge = Bridge.init();
         errdefer bridge.deinit(gpa);
 
@@ -1393,152 +1593,15 @@ pub const Interpreter = struct {
         var tag_table = try tags_mod.TagTable.build(gpa, ast, &tag_diags, tags_mod.default_max_tags);
         errdefer tag_table.deinit(gpa);
 
-        // Immortal blocks backing compile-time `string` field defaults. Filled
-        // by `compileTypeDecl`; moved into the returned interpreter,
-        // which `destroy`s them at `deinit`. On a compile error path they are
-        // reclaimed here so no default literal leaks.
-        var persistent_literals: std.ArrayListUnmanaged([*]u8) = .empty;
-        errdefer {
-            for (persistent_literals.items) |block| persistent.destroy(gpa, block);
-            persistent_literals.deinit(gpa);
-        }
-
-        // Register the collection block drops before any resource
-        // collection container is created (Pass A) or dropped (`deinit`).
-        // Idempotent: every interpreter init registers the same callback.
+        // Register the collection block drops before any collection container
+        // exists. Idempotent: every compile registers the same callbacks.
         persistent.registerDrop(persistent.type_array, dropPersistentArray);
         persistent.registerDrop(persistent.type_map, dropPersistentMap);
         // A set's payload is the same `ArrayListUnmanaged(Value)` as an array's,
         // so the array drop (decref string elements + deinit) applies verbatim.
         persistent.registerDrop(persistent.type_set, dropPersistentArray);
 
-        // PRE-VALIDATION, before the first mutation of the world. Pass A below
-        // registers as it walks, so a refusal raised where it is DETECTED leaves
-        // every earlier declaration of a rejected program in a live world. The
-        // confrontation therefore happens here, while the world is still the one
-        // the previous image left behind, and Pass A runs only once every declared
-        // schema is known to match.
-        try verifySchemas(gpa, ast, &world.registry, &tag_table);
-
-        // Pass A — register components and resources with the world.
-        var i: u28 = 0;
-        while (i < ast.items.len) : (i += 1) {
-            const kind = ast.items.items(.kind)[i];
-            const data = ast.items.items(.data)[i];
-            switch (kind) {
-                .component_decl => try compileComponent(gpa, ast, world, &bridge, ast.component_decls.items[data], &persistent_literals),
-                .resource_decl => try compileResource(gpa, ast, world, &bridge, ast.resource_decls.items[data], &persistent_literals),
-                else => {},
-            }
-        }
-
-        // After Pass A, resolve every `@requires` closure ONCE.
-        //
-        // At the END of the pass and not per declaration: a declaration may name
-        // a component registered later, Etch admitting forward references, which
-        // is why the descriptor carries NAMES rather than ids.
-        //
-        // A cycle or an unknown requisite here is a PROGRAM error the
-        // type-checker already reports with a span (E0505 / E0506). This arm is
-        // the registry's own refusal for the population the type-checker never
-        // sees — components a host registered from Zig — so reaching it from an
-        // Etch program means the type-check was skipped, and surfacing it as an
-        // ordinary error is the honest answer rather than a second diagnostic.
-        try world.registry.finalizeRequires(gpa);
-
-        // Register the builtin `TagSet` component when the program
-        // declares any tag — a fixed `[words]u64` bitfield, one slot per entity
-        // carrying tags. It has no named scalar fields; the runtime reads/writes
-        // its raw bytes as bits.
-        var tagset_id: ?ComponentId = null;
-        if (tag_table.leaf_count > 0) {
-            // ONE DESCRIPTOR FOR BOTH ARMS. The reuse arm used to take the
-            // existing id with no confrontation while only the fresh arm derived
-            // the size from `tag_table.words()` — so a reload crossing a 64-tag
-            // word boundary kept the NARROWER `TagSet` and every entity's tag
-            // bitfield was silently too small. `etch-validation-ecs.md` §13 names
-            // this component as the case the size in the digest exists to
-            // protect. The two arms now cannot disagree about the layout,
-            // because there is one layout and they read it.
-            const size: u16 = @intCast(tag_table.words() * 8);
-            const zeroed = try gpa.alloc(u8, size);
-            defer gpa.free(zeroed);
-            @memset(zeroed, 0);
-            const desc = tagSetDesc(size, zeroed);
-            // Idempotent on a hot-reload re-compile: reuse the
-            // already-registered `TagSet` instead of erroring DuplicateComponent.
-            if (world.registry.idOf("TagSet")) |existing| {
-                const candidate = weld_core.ecs.registry.schemaDigestOf(desc);
-                // An ABSENT digest refuses. Measured: the registry has exactly
-                // one entry-append site and it always derives the digest, and
-                // `existing` came from `idOf` so it is in range — so the null
-                // arm is unreachable today and its direction costs nothing. It
-                // is a refusal rather than an accept because an unknown layout
-                // is not a matching layout, and refusing a reload leaves the
-                // running session on the program it already has.
-                const stored = world.registry.schemaDigest(existing) orelse ~candidate;
-                if (stored != candidate) {
-                    std.log.warn(
-                        "etch/hot-reload: 'TagSet' changed layout — reload REFUSED, previous image kept. " ++
-                            "live: size={d}; new: size={d} ({d} tag(s))",
-                        .{ world.registry.componentSize(existing), size, tag_table.leaf_count },
-                    );
-                    return error.SchemaChanged;
-                }
-                try bridge.mapComponent(gpa, "TagSet", existing);
-                tagset_id = existing;
-            } else {
-                const id = try world.registry.registerComponentRaw(gpa, desc);
-                try bridge.mapComponent(gpa, "TagSet", id);
-                tagset_id = id;
-            }
-        }
-
-        // Register the three builtin engine time resources from
-        // the `types.zig` descriptor table — the same injection point as the
-        // builtin `TagSet` (after the user-decl registration loop). Idempotent
-        // on a hot-reload re-compile: the existing registration and the live
-        // resource values survive the AST swap (the `compileResource` seeding
-        // discipline).
-        for (&types_mod.builtin_resources) |*br| {
-            if (world.registry.idOf(br.name)) |existing| {
-                try bridge.mapResource(gpa, br.name, existing);
-                continue;
-            }
-            var fields_buf: [8]FieldDesc = undefined;
-            var default_buf: [64]u8 = @splat(0);
-            var size: usize = 0;
-            var max_align: usize = 1;
-            for (br.fields, 0..) |bf, fi| {
-                const kind: FieldKind = switch (bf.type_) {
-                    .float_ => .float_,
-                    .int_ => .int_,
-                    .bool_ => .bool_,
-                    else => unreachable, // the table holds POD scalars only
-                };
-                const align_b = kind.alignBytes();
-                if (align_b > max_align) max_align = align_b;
-                const off = std.mem.alignForward(usize, size, align_b);
-                size = off + kind.sizeBytes();
-                fields_buf[fi] = .{ .name = bf.name, .offset = @intCast(off), .kind = kind };
-                const v: Value = switch (bf.default) {
-                    .float_ => |x| .{ .float_ = x },
-                    .int_ => |x| .{ .int_ = x },
-                    .bool_ => |x| .{ .bool_ = x },
-                };
-                try bridge_mod.writeValueAsBytes(kind, default_buf[off..], v);
-            }
-            size = std.mem.alignForward(usize, size, max_align);
-            const id = try world.registry.registerComponentRaw(gpa, .{
-                .name = br.name,
-                .size = @intCast(size),
-                .alignment = @intCast(max_align),
-                .default_bytes = default_buf[0..size],
-                .fields = fields_buf[0..br.fields.len],
-            });
-            try bridge.mapResource(gpa, br.name, id);
-            try world.addResource(gpa, id, default_buf[0..size]);
-        }
+        const tagset_id = try registerProgramTypes(gpa, ast, world, &bridge, &tag_table);
 
         // Resolve the population handles (ids + field offsets) once. The
         // lookups cannot miss: the resources were registered from the same
@@ -1589,26 +1652,30 @@ pub const Interpreter = struct {
             for (rule_descs.items) |*r| r.deinit(gpa);
             rule_descs.deinit(gpa);
         }
-        i = 0;
+        var i: u28 = 0;
         while (i < ast.items.len) : (i += 1) {
             const kind = ast.items.items(.kind)[i];
             const data = ast.items.items(.data)[i];
             if (kind != .rule_decl) continue;
-            const desc = try compileRule(gpa, ast, &bridge, world, &tag_table, tagset_id, data);
-            try rule_descs.append(gpa, desc);
+            try rule_descs.ensureUnusedCapacity(gpa, 1);
+            rule_descs.appendAssumeCapacity(try compileRule(gpa, ast, &bridge, world, &tag_table, tagset_id, data));
         }
 
         // Pass C — index top-level `fn` declarations by name for free-call
         // resolution.
         var fns: std.AutoHashMapUnmanaged(StringId, ast_mod.FnDecl) = .empty;
         errdefer fns.deinit(gpa);
+        var consts: std.AutoHashMapUnmanaged(StringId, ast_mod.ConstDecl) = .empty;
+        errdefer consts.deinit(gpa);
         i = 0;
         while (i < ast.items.len) : (i += 1) {
             const kind = ast.items.items(.kind)[i];
             const data = ast.items.items(.data)[i];
-            if (kind != .fn_decl) continue;
-            const decl = ast.fn_decls.items[data];
-            try fns.put(gpa, decl.name, decl);
+            switch (kind) {
+                .fn_decl => try fns.put(gpa, ast.fn_decls.items[data].name, ast.fn_decls.items[data]),
+                .const_decl => try consts.put(gpa, ast.const_decls.items[data].name, ast.const_decls.items[data]),
+                else => {},
+            }
         }
 
         // Pass D — index inherent `impl` methods by `(type_name, method_name)`
@@ -1691,6 +1758,10 @@ pub const Interpreter = struct {
         }
 
         const slice = try rule_descs.toOwnedSlice(gpa);
+        errdefer {
+            for (slice) |*r| r.deinit(gpa);
+            gpa.free(slice);
+        }
         // Enable the tick-based change-detection path iff some rule filters by
         // `changed` — keeps `changed`-free programs free of tick churn.
         var any_changed = false;
@@ -1715,6 +1786,7 @@ pub const Interpreter = struct {
             @memset(map, null);
             break :blk map;
         } else &.{};
+        errdefer if (any_async) gpa.free(rule_tasks);
         // Per-rule `(entity → live task)` maps for entity-bound async rules, parallel
         // to `rule_descs`. Empty for non-entity-bound rules.
         const entity_rule_tasks: []std.AutoHashMapUnmanaged(EntityId, u32) = if (any_async) blk: {
@@ -1722,6 +1794,7 @@ pub const Interpreter = struct {
             for (maps) |*m| m.* = .empty;
             break :blk maps;
         } else &.{};
+        errdefer if (any_async) gpa.free(entity_rule_tasks);
 
         // Pass E — build the Level-B descriptors. Fail-loud on any
         // expression the canonical renderer does not support.
@@ -1731,9 +1804,11 @@ pub const Interpreter = struct {
         return .{
             .gpa = gpa,
             .ast = ast,
+            .owned_ast = owned_ast,
             .bridge = bridge,
             .rule_descs = slice,
             .fns = fns,
+            .consts = consts,
             .methods = methods,
             .struct_decls = struct_decls,
             .enum_decls = enum_decls,
@@ -1750,17 +1825,10 @@ pub const Interpreter = struct {
             .rule_tasks = rule_tasks,
             .entity_rule_tasks = entity_rule_tasks,
             .descriptors = descriptors,
-            .world = world,
-            .persistent_literals = persistent_literals,
         };
     }
 
     pub fn runFor(self: *Interpreter, world: *World, ticks: u32) !RuntimeReport {
-        // Register this program's observer rules into the world's
-        // `ObserverRegistry` — lazily, once, now that `self` is at a
-        // stable address (the caller holds the interpreter; `compile` returns by
-        // value). A test that drives a Tier-0 flush directly calls `bindToWorld`
-        // itself before flushing.
         try self.bindToWorld(world);
         var report: RuntimeReport = .{};
         var t: u32 = 0;
@@ -1807,11 +1875,7 @@ pub const Interpreter = struct {
         defer self.suppress_body_store_resets = false;
         self.in_test_body = true;
         defer self.in_test_body = false;
-        defer self.collections.reset(self.gpa);
-        defer self.closures.reset(self.gpa);
-        defer self.structs.reset(self.gpa);
-        defer self.optionals.clearRetainingCapacity();
-        defer self.resetRunStrings();
+        defer self.resetArena();
 
         self.control = .none;
         self.thrown = false;
@@ -1873,8 +1937,8 @@ pub const Interpreter = struct {
     /// give the interpreter a runtime extension resolver (name → cooked
     /// `.prefab.bin` bytes, the same interface the scene loader receives) so an
     /// Etch `entity.activate_extension("X")` / `deactivate_extension("X")`
-    /// resolves the extension at runtime. Absent → those methods fail with
-    /// `error.MissingExtensionResolver`.
+    /// resolves the extension at runtime. Absent, those methods fail the body
+    /// that calls them.
     pub fn setExtensionResolver(self: *Interpreter, resolver: scene_loader.ExtensionResolver) void {
         self.bridge.ext_resolver = resolver;
     }
@@ -1882,11 +1946,19 @@ pub const Interpreter = struct {
     /// Register this program's observer rules into `world`'s `ObserverRegistry`.
     /// Idempotent: the first call allocates one `ObserverCtx` per observer rule and
     /// registers a trampoline keyed on the rule's lifecycle kind + target component;
-    /// later calls no-op. Called lazily by `runFor`, or explicitly by a test that
-    /// drives a Tier-0 flush before any tick.
+    /// later calls no-op, and refuse from a copy of the bound interpreter or for
+    /// another world. An interpreter bound to `world` before is unbound. Called
+    /// lazily by `runFor`, or explicitly by a test that drives a Tier-0 flush
+    /// before any tick.
     pub fn bindToWorld(self: *Interpreter, world: *World) !void {
-        if (self.observers_bound) return;
-        self.observers_bound = true;
+        if (self.bound_at != null) {
+            try self.checkNotMoved();
+            if (self.bound_world.? != world) return error.InterpreterBoundToAnotherWorld;
+            return;
+        }
+        if (boundTo(world)) |replaced| replaced.unbind();
+        self.bound_at = self;
+        self.bound_world = world;
 
         // register the extension hook seams so the loader's
         // `dispatchOnAttach` / runtime `deactivate_extension` reach `execHookText`.
@@ -1895,6 +1967,7 @@ pub const Interpreter = struct {
         // so a program with no observer rules still wires its hook execution.
         world.registerOnAttach(self, &extensionAttachTrampoline);
         world.registerOnDetach(self, &extensionDetachTrampoline);
+        world.registerExtensionCheck(self, &extensionCheckTrampoline);
 
         var n: usize = 0;
         for (self.rule_descs) |rd| {
@@ -1918,6 +1991,38 @@ pub const Interpreter = struct {
                 .on_despawned => try reg.registerOnDespawned(self.gpa, ctx, &observerTrampoline),
             }
         }
+    }
+
+    /// The interpreter bound to `world`, found through any seam still holding
+    /// one of its trampolines.
+    fn boundTo(world: *const World) ?*Interpreter {
+        if (world.attach_hook) |h| {
+            if (h.func == &extensionAttachTrampoline) return @ptrCast(@alignCast(h.ctx.?));
+        }
+        if (world.detach_hook) |h| {
+            if (h.func == &extensionDetachTrampoline) return @ptrCast(@alignCast(h.ctx.?));
+        }
+        if (world.check_hook) |h| {
+            if (h.func == &extensionCheckTrampoline) return @ptrCast(@alignCast(h.ctx.?));
+        }
+        return null;
+    }
+
+    /// Remove from the world it bound what `bindToWorld` registered there.
+    fn unbind(self: *Interpreter) void {
+        const world = self.bound_world orelse return;
+        for (self.observer_ctxs) |*c| world.observer_registry.unregister(c);
+        world.unregisterExtensionHooks(@constCast(self.bound_at.?));
+        self.gpa.free(self.observer_ctxs);
+        self.observer_ctxs = &.{};
+        self.bound_world = null;
+        self.bound_at = null;
+    }
+
+    /// Refuse to run from an address other than the one the world holds: the
+    /// world would call back into the interpreter this one was copied from.
+    fn checkNotMoved(self: *const Interpreter) error{InterpreterMovedAfterBind}!void {
+        if (self.bound_at) |at| if (at != self) return error.InterpreterMovedAfterBind;
     }
 
     /// Top-level trampoline matching `observers.ObserverFn`: unpack
@@ -2018,46 +2123,59 @@ pub const Interpreter = struct {
         }
     }
 
+    /// The statement run of `text` in the interpreter's arena, parsed on the
+    /// first call and cached by text; `MalformedExtensionHook` when it does
+    /// not parse.
+    fn prepareHook(self: *Interpreter, text: []const u8) !HookRun {
+        if (self.hook_runs.get(text)) |cached| return cached orelse error.MalformedExtensionHook;
+        const key = try self.gpa.dupe(u8, text);
+        self.hook_runs.ensureUnusedCapacity(self.gpa, 1) catch |err| {
+            self.gpa.free(key);
+            return err;
+        };
+        var entry: ?HookRun = null;
+        const expr_from: u32 = @intCast(self.owned_ast.exprs.len);
+        const type_from: u32 = @intCast(self.owned_ast.type_nodes.len);
+        if (parser_mod.parseStmtBlockInto(self.gpa, self.owned_ast, text)) |parsed| {
+            var hook_run = parsed;
+            defer hook_run.deinit(self.gpa);
+            if (hook_run.diagnostics.len == 0) entry = .{
+                .start = hook_run.start,
+                .len = hook_run.len,
+                .expr_from = expr_from,
+                .expr_to = @intCast(self.owned_ast.exprs.len),
+                .type_from = type_from,
+                .type_to = @intCast(self.owned_ast.type_nodes.len),
+            };
+        } else |err| switch (err) {
+            error.OutOfMemory => {
+                self.gpa.free(key);
+                return error.OutOfMemory;
+            },
+            else => {},
+        }
+        self.hook_runs.putAssumeCapacityNoClobber(key, entry);
+        return entry orelse error.MalformedExtensionHook;
+    }
+
     /// Execute a cooked extension hook body. `hook_text` is the
     /// canonical Etch statement run a `.prefab.bin` carries for an `on_attach` /
     /// `on_detach` hook (`descriptor.renderStmtRunAlloc`): statements joined by
-    /// `"; "`, no braces. Parse it into a transient `AstArena`, rebind `self.ast`
-    /// to it for the body's duration (the executor resolves identifiers via
-    /// `self.ast.strings`, so the body MUST run with `ast` pointing at the hook
-    /// arena), bind the implicit `entity`, run the body with the same
-    /// `execStmtRun` that drives every rule, and route any deferred structural
+    /// `"; "`, no braces. It runs from the interpreter's own arena
+    /// (`prepareHook`) with the implicit `entity` bound, through the same
+    /// `execStmtRun` that drives every rule, and routes any deferred structural
     /// change into the world's shared observer-deferred buffer (drained by the
     /// loader before `on_spawned`). Mirrors `runObserverBody` — same fresh-scope
     /// + store-reset discipline. No re-entrancy: a hook runs at a load/flush
     /// boundary, never nested inside another running hook.
     fn execHookText(self: *Interpreter, world: *World, entity: CoreEntityId, hook_text: []const u8) !void {
-        var block = parser_mod.parseStmtBlock(self.gpa, hook_text) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            // A cooked hook that fails to re-parse is a corrupt asset (the cook
-            // validated it via `renderStmtRunAlloc` → `HookRenderFailed`), so this
-            // should be unreachable in practice — surface it clearly regardless.
-            else => return error.MalformedExtensionHook,
-        };
-        defer block.deinit(self.gpa);
-        if (block.diagnostics.len > 0) return error.MalformedExtensionHook;
-
-        // Rebind the program AST to the hook arena for the body's duration. Safe:
-        // `ast` is a reassignable `*const AstArena` field; nothing on the executor
-        // path dereferences a *program*-arena `NodeId` while rebound (component /
-        // resource field access + enum shorthand resolve by NAME via the registry,
-        // `emit` enqueues by event-name id, and hook-arena `StringId`s resolve
-        // through `self.ast.strings`).
-        const saved_ast = self.ast;
-        self.ast = &block.ast;
-        defer self.ast = saved_ast;
+        const hook_run = try self.prepareHook(hook_text);
 
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
         defer self.resetBodyStores();
 
-        // Bind the implicit `entity` — only if the body references it (else the
-        // name is not interned in the hook arena and no binding is needed).
-        if (block.ast.strings.find("entity")) |eid| {
+        if (self.ast.strings.find("entity")) |eid| {
             try locals.put(self.gpa, eid, .{ .entity_id = @bitCast(entity) }, false);
         }
 
@@ -2071,13 +2189,16 @@ pub const Interpreter = struct {
         const prev_deferred = self.observer_deferred;
         self.observer_deferred = &world.observer_registry.deferred.?;
         defer self.observer_deferred = prev_deferred;
+        const prev_in_hook = self.in_hook_text;
+        self.in_hook_text = true;
+        defer self.in_hook_text = prev_in_hook;
 
         self.control = .none;
         self.thrown = false;
         self.returning = false;
         self.pending_error = null;
 
-        self.execStmtRun(world, &locals, block.body_start, block.body_len) catch |err| switch (err) {
+        self.execStmtRun(world, &locals, hook_run.start, hook_run.len) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.RuntimeFailure => {
                 self.pending_error = null;
@@ -2110,6 +2231,44 @@ pub const Interpreter = struct {
         _ = name;
         const self: *Interpreter = @ptrCast(@alignCast(ctx.?));
         if (text) |t| try self.execHookText(world, entity, t);
+    }
+
+    /// Top-level trampoline matching `World.ExtensionCheckFn`: refuse, with
+    /// `ExtensionHookRefused`, any of the extension's hooks this program's type
+    /// checker refuses in the hooks' scope.
+    fn extensionCheckTrampoline(ctx: ?*anyopaque, world: *World, entity: CoreEntityId, name: []const u8, hooks: ExtensionHooks) anyerror!void {
+        _ = .{ world, entity, name };
+        const self: *Interpreter = @ptrCast(@alignCast(ctx.?));
+        if (hooks.on_attach) |t| try self.checkHook(t, hooks.scope);
+        if (hooks.on_detach) |t| try self.checkHook(t, hooks.scope);
+    }
+
+    /// `text` checked once per scope against this program, from the
+    /// interpreter's own arena.
+    fn checkHook(self: *Interpreter, text: []const u8, scope: []const []const u8) !void {
+        const hook_run = try self.prepareHook(text);
+        const key = try hookVerdictKey(self.gpa, text, scope);
+        if (self.hook_verdicts.get(key)) |accepted| {
+            self.gpa.free(key);
+            if (!accepted) return error.ExtensionHookRefused;
+            return;
+        }
+        self.hook_verdicts.ensureUnusedCapacity(self.gpa, 1) catch |err| {
+            self.gpa.free(key);
+            return err;
+        };
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(self.gpa);
+            diags.deinit(self.gpa);
+        }
+        types_mod.TypeChecker.checkHookRun(self.gpa, self.owned_ast, hook_run, scope, &diags) catch |err| {
+            self.gpa.free(key);
+            return err;
+        };
+        const accepted = diags.items.len == 0;
+        self.hook_verdicts.putAssumeCapacityNoClobber(key, accepted);
+        if (!accepted) return error.ExtensionHookRefused;
     }
 
     /// Materialise an observer value binding (`value`/`old`/`new`) as a struct
@@ -2150,6 +2309,7 @@ pub const Interpreter = struct {
     }
 
     pub fn stepOnce(self: *Interpreter, world: *World, report: *RuntimeReport) !void {
+        try self.checkNotMoved();
         // Advance `current_tick` (and clear the dirty bitsets) at the start of
         // the tick when change detection is live, so a write this tick stamps
         // `changedTick = current_tick > last_run_tick` and a `changed` filter
@@ -2168,15 +2328,14 @@ pub const Interpreter = struct {
         // counter backing `GameTime.frame` — it no longer drives `wait`.
         self.async_tick += 1;
         self.advanceTime(world);
-        // Events have a per-tick lifetime (`Lifetime.tick`): clear the previous
-        // tick's queue before running this tick's rules. The test-world
-        // `tick(n)` suppresses exactly this first clear so events
+        // Events have a per-tick lifetime (`Lifetime.tick`). The test-world
+        // `tick(n)` suppresses exactly this first drop so events
         // emitted before the tick (`world.emit`, or a `spawn_with` observer)
         // survive into it — §32's `emit; tick(1)`.
         if (self.suppress_event_clear) {
             self.suppress_event_clear = false;
         } else {
-            self.events.clear(self.gpa);
+            self.events.startTick(self.gpa);
         }
         // Drain the external event sources — AFTER the clear and
         // BEFORE rule dispatch, which is the whole deliverable of the bridge.
@@ -2213,16 +2372,20 @@ pub const Interpreter = struct {
             // the pre-update value, so the filter saw the correct baseline.
             if (self.has_changed) rd.last_run_tick = world.current_tick;
         }
+        self.events.endRules();
         // Apply deferred tag mutations at the tick boundary — after every rule
         // has run, never mid-archetype-walk (`etch-grammar.md` §4.4).
         try self.flushPendingTags(world);
         // Apply deferred extension activate/deactivate at the same boundary
         // — same never-mid-walk discipline.
-        try self.flushPendingExtensions(world);
+        try self.flushPendingExtensions(world, report);
         // Apply deferred structural mutations (spawn/despawn/add/remove) last, so
         // any extension hook's structural change (enqueued just above) drains in
         // the same boundary, with observers firing per op.
-        try self.flushStructural(world);
+        try self.flushStructural(world, report);
+        // Every invocation of the tick has ended, async drives included, which
+        // never reset the arena.
+        if (!self.suppress_body_store_resets) self.drainDeferredDecrefs();
     }
 
     /// Advance the two clock accumulators and publish the three builtin time
@@ -2334,6 +2497,10 @@ pub const Interpreter = struct {
         self.thrown = false;
         self.returning = false;
         self.pending_error = null;
+        // The body's own bindings end with each firing; the snapshot it runs
+        // on persists.
+        try t.snapshot.enter(self.gpa);
+        defer t.snapshot.leave(self.gpa);
         var s: u32 = 0;
         while (s < t.body_len) : (s += 1) {
             const stmt_id: NodeId = @bitCast(self.ast.extra.items[t.body_start + s]);
@@ -2676,13 +2843,13 @@ pub const Interpreter = struct {
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
         for (rd.resource_expr_filters) |rf| {
-            locals.map.clearRetainingCapacity();
+            locals.clear(self.gpa);
             const bytes = world.resources.getResource(rf.resource_id) orelse {
                 pass = false;
                 break;
             };
             for (rf.fields) |bf| {
-                const v = bridge_mod.readBytesAsValue(bf.kind, bytes[bf.offset .. bf.offset + @as(u16, @intCast(bf.kind.sizeBytes()))]);
+                const v = bridge_mod.readFieldValue(bf.kind, bf.enum_type_name_id, bytes[bf.offset .. bf.offset + @as(u16, @intCast(bf.kind.sizeBytes()))]);
                 try locals.put(self.gpa, bf.name, v, false);
             }
             if (!(try self.evalGuardExpr(world, &locals, rf.expr))) {
@@ -2703,7 +2870,7 @@ pub const Interpreter = struct {
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
         for (rd.expr_filters) |ef| {
-            locals.map.clearRetainingCapacity();
+            locals.clear(self.gpa);
             // The FOURTH per-slot guard to take the locator. Its
             // previous form asked the archetype for a column, which answers
             // null for a sparse id — so a `component T { expression }` guard on
@@ -2729,7 +2896,7 @@ pub const Interpreter = struct {
         if (pass) {
             const rule = self.ast.rule_decls.items[rd.rule_idx];
             for (rd.expr_conds) |expr| {
-                locals.map.clearRetainingCapacity();
+                locals.clear(self.gpa);
                 try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
                 if (!(try self.evalGuardExpr(world, &locals, expr))) {
                     pass = false;
@@ -2761,14 +2928,33 @@ pub const Interpreter = struct {
     /// rule / guard / timer / observer / hook bodies `tick(n)` drives, so their
     /// resets must not free heap-backed values its locals still hold (UAF, the
     /// string class). The single choke point for every per-body reset; a test's
-    /// own end-cleanup calls the raw resets directly (unconditional).
+    /// own end-cleanup calls `resetArena` directly (unconditional).
     fn resetBodyStores(self: *Interpreter) void {
         if (self.suppress_body_store_resets) return;
+        self.resetArena();
+    }
+
+    /// Free the rule-arena stores and return the references their values held.
+    fn resetArena(self: *Interpreter) void {
         self.collections.reset(self.gpa);
         self.closures.reset(self.gpa);
         self.structs.reset(self.gpa);
         self.optionals.clearRetainingCapacity();
         self.resetRunStrings();
+        self.drainDeferredDecrefs();
+    }
+
+    /// Count `v` as a copy an arena value holds; its reference returns at the
+    /// arena's reset.
+    fn retainArena(self: *Interpreter, v: Value) error{OutOfMemory}!void {
+        const block = handleBlock(v) orelse return;
+        try self.deferred_decrefs.append(self.gpa, block);
+        persistent.incref(block);
+    }
+
+    fn drainDeferredDecrefs(self: *Interpreter) void {
+        for (self.deferred_decrefs.items) |block| persistent.decref(self.gpa, block);
+        self.deferred_decrefs.clearRetainingCapacity();
     }
 
     /// Reset the rule-arena stores after a guard evaluation: guard
@@ -2933,24 +3119,45 @@ pub const Interpreter = struct {
         return &task.locals;
     }
 
-    /// Free a frame's owned resources: only a `call` frame owns heap
-    /// (its `async fn` scope). Called for every frame removal.
+    /// Free a frame's owned resources. Called for every frame removal.
     fn deinitFrame(self: *Interpreter, frame: *AsyncFrame) void {
-        switch (frame.*) {
-            .call => |cf| {
-                cf.scope.deinit(self.gpa);
-                self.gpa.destroy(cf.scope);
-            },
-            else => {},
+        releaseFrame(self.gpa, frame);
+    }
+
+    /// Pop the top frame, closing the scopes it opened and freeing its owned
+    /// resources.
+    fn popFrame(self: *Interpreter, task: *AsyncTask) void {
+        const scope = currentScope(task);
+        if (task.frames.pop()) |f| {
+            var fr = f;
+            var open = frameScopes(fr);
+            while (open > 0) : (open -= 1) scope.leave(self.gpa);
+            self.deinitFrame(&fr);
         }
     }
 
-    /// Pop the top frame, freeing its owned resources.
-    fn popFrame(self: *Interpreter, task: *AsyncTask) void {
-        if (task.frames.pop()) |f| {
-            var fr = f;
-            self.deinitFrame(&fr);
+    /// Close the scope of the iteration the loop frame at `ti` is running.
+    fn endIteration(self: *Interpreter, task: *AsyncTask, ti: usize) void {
+        const scope = currentScope(task);
+        switch (task.frames.items[ti]) {
+            inline .loop_, .while_, .for_ => |*frame| {
+                if (frame.iter_open) scope.leave(self.gpa);
+                frame.iter_open = false;
+            },
+            else => unreachable,
         }
+    }
+
+    /// The scopes `frame` holds open on the scope it runs in.
+    fn frameScopes(frame: AsyncFrame) usize {
+        return switch (frame) {
+            .run => |rf| rf.scopes,
+            .loop_ => |lf| @intFromBool(lf.iter_open),
+            .while_ => |wf| @intFromBool(wf.iter_open),
+            .for_ => |ff| @intFromBool(ff.iter_open),
+            .try_ => |tf| @intFromBool(tf.scope_open),
+            .call, .single => 0,
+        };
     }
 
     /// Pop every frame, freeing owned resources — the task-teardown
@@ -2968,7 +3175,7 @@ pub const Interpreter = struct {
             .bind => |b| try currentScope(task).put(self.gpa, b.name, v, b.is_mut),
             .assign_local => |name| {
                 const ptr = currentScope(task).getPtr(name) orelse return error.RuntimeFailure;
-                ptr.* = v;
+                replaceHeld(self.gpa, ptr, v);
             },
         }
     }
@@ -3032,7 +3239,7 @@ pub const Interpreter = struct {
     /// and push a `call` frame carrying `ret` (where `f`'s return value lands). `f`
     /// then runs as frames on this task; its own `await` suspends the whole task.
     /// A direct call to a SYNC fn/method, or an unresolved callee, fails loud.
-    fn beginAsyncCall(self: *Interpreter, world: *World, task: *AsyncTask, scope: *Locals, cursor: *u32, call_expr: NodeId, ret: RetTarget) StmtError!StepAction {
+    fn beginAsyncCall(self: *Interpreter, world: *World, task: *AsyncTask, scope: *Locals, cursor: *u32, call_expr: NodeId, ret: RetTarget, wraps: u8) StmtError!StepAction {
         const new_scope = try self.gpa.create(Locals);
         new_scope.* = .{};
         errdefer {
@@ -3089,6 +3296,7 @@ pub const Interpreter = struct {
             .scope = new_scope,
             .value_expr = if (fndecl.value.isNone()) null else fndecl.value,
             .ret = ret,
+            .wraps = wraps,
         } });
         return .pushed;
     }
@@ -3202,12 +3410,12 @@ pub const Interpreter = struct {
                 .run => {
                     const rf = &task.frames.items[ti].run;
                     if (rf.cursor >= rf.block_len) {
-                        const val = rf.value_expr;
-                        self.popFrame(task);
                         // A block's trailing value runs for effect (rare at stmt
-                        // position); it cannot suspend (an `await` there is a
-                        // sub-expression, rejected E0904 / fails loud).
-                        if (val) |v| _ = try self.evalExpr(world, scope, v);
+                        // position), in the block's scope; it cannot suspend (an
+                        // `await` there is a sub-expression, rejected E0904 /
+                        // fails loud).
+                        if (rf.value_expr) |v| _ = try self.evalExpr(world, scope, v);
+                        self.popFrame(task);
                         continue :drive;
                     }
                     const stmt: NodeId = @bitCast(self.ast.extra.items[rf.block_start + rf.cursor]);
@@ -3219,8 +3427,14 @@ pub const Interpreter = struct {
                 },
                 .loop_ => {
                     const lf = &task.frames.items[ti].loop_;
+                    if (!lf.iter_open) {
+                        try scope.enter(self.gpa);
+                        lf.iter_open = true;
+                    }
                     if (lf.cursor >= lf.block_len) {
-                        task.frames.items[ti].loop_.cursor = 0; // `loop` repeats
+                        scope.leave(self.gpa);
+                        lf.iter_open = false;
+                        lf.cursor = 0; // `loop` repeats
                         continue :drive;
                     }
                     const stmt: NodeId = @bitCast(self.ast.extra.items[lf.block_start + lf.cursor]);
@@ -3234,6 +3448,10 @@ pub const Interpreter = struct {
                     const wid = task.frames.items[ti].while_.while_id;
                     const wh = self.ast.while_stmts.items[self.ast.stmtData(wid)];
                     if (!task.frames.items[ti].while_.in_iter) {
+                        if (!task.frames.items[ti].while_.iter_open) {
+                            try scope.enter(self.gpa);
+                            task.frames.items[ti].while_.iter_open = true;
+                        }
                         if (!(try self.whileCondEnter(world, scope, wid))) {
                             self.popFrame(task); // condition false → `while` ends
                             continue :drive;
@@ -3243,6 +3461,8 @@ pub const Interpreter = struct {
                         continue :drive;
                     }
                     if (task.frames.items[ti].while_.cursor >= wh.body_len) {
+                        scope.leave(self.gpa);
+                        task.frames.items[ti].while_.iter_open = false;
                         task.frames.items[ti].while_.in_iter = false; // re-check cond
                         continue :drive;
                     }
@@ -3256,6 +3476,10 @@ pub const Interpreter = struct {
                 .for_ => {
                     const f = self.ast.for_stmts.items[self.ast.stmtData(task.frames.items[ti].for_.for_id)];
                     if (!task.frames.items[ti].for_.in_iter) {
+                        if (!task.frames.items[ti].for_.iter_open) {
+                            try scope.enter(self.gpa);
+                            task.frames.items[ti].for_.iter_open = true;
+                        }
                         if (!(try self.forAdvance(&task.frames.items[ti].for_, scope))) {
                             self.popFrame(task); // iterator exhausted → `for` ends
                             continue :drive;
@@ -3265,6 +3489,8 @@ pub const Interpreter = struct {
                         continue :drive;
                     }
                     if (task.frames.items[ti].for_.cursor >= f.body_len) {
+                        scope.leave(self.gpa);
+                        task.frames.items[ti].for_.iter_open = false;
                         task.frames.items[ti].for_.in_iter = false; // advance to next element
                         continue :drive;
                     }
@@ -3313,8 +3539,10 @@ pub const Interpreter = struct {
                         // caller's await site.
                         const val = cf.value_expr;
                         const ret = cf.ret;
+                        const wraps = cf.wraps;
                         var rv: Value = .{ .unit = {} };
                         if (val) |v| rv = try self.evalExpr(world, scope, v);
+                        rv = try self.wrapped(rv, wraps);
                         self.popFrame(task);
                         switch (ret) {
                             .return_ => {
@@ -3360,7 +3588,7 @@ pub const Interpreter = struct {
                     // evaluate it to a `TaskHandle` and join.
                     const ak = self.ast.exprKind(aw.arg_expr);
                     if (ak == .fn_call or ak == .method_call) {
-                        return try self.beginAsyncCall(world, task, scope, cursor, aw.arg_expr, site.ret);
+                        return try self.beginAsyncCall(world, task, scope, cursor, aw.arg_expr, site.ret, self.ast.implicit_wraps.get(site.await_id.raw()) orelse 0);
                     }
                     const hv = try self.evalExpr(world, scope, aw.arg_expr);
                     if (hv != .task_handle) return error.RuntimeFailure;
@@ -3469,6 +3697,7 @@ pub const Interpreter = struct {
             };
             cursor.* += 1;
             try task.frames.append(self.gpa, .{ .for_ = .{ .for_id = stmt, .iter = for_iter } });
+            retainHandle(iter);
             return .pushed;
         }
         // (2c) `try { } catch e { }` → push a try frame driving the `try` body; a
@@ -3477,12 +3706,15 @@ pub const Interpreter = struct {
         if (sk == .try_catch_stmt) {
             const tc = self.ast.try_catch_stmts.items[self.ast.stmtData(stmt)];
             cursor.* += 1;
+            try scope.enter(self.gpa);
+            errdefer scope.leave(self.gpa);
             try task.frames.append(self.gpa, .{ .try_ = .{
                 .try_start = tc.try_start,
                 .try_len = tc.try_len,
                 .catch_start = tc.catch_start,
                 .catch_len = tc.catch_len,
                 .catch_name = tc.catch_name,
+                .scope_open = true,
             } });
             return .pushed;
         }
@@ -3503,26 +3735,45 @@ pub const Interpreter = struct {
                 },
                 .block_expr => {
                     cursor.* += 1;
-                    try self.pushBlockRun(task, e);
+                    try self.pushBlockRun(task, e, 0);
                     return .pushed;
                 },
                 .if_expr => {
                     // Select the branch synchronously (a condition cannot suspend);
                     // push its block as a run frame (or nothing if no branch taken).
-                    const branch = try self.asyncIfBranch(world, scope, e);
+                    // The branch's scope holds an `if let` payload.
+                    try scope.enter(self.gpa);
+                    const branch = self.asyncIfBranch(world, scope, e) catch |err| {
+                        scope.leave(self.gpa);
+                        return err;
+                    };
                     cursor.* += 1;
-                    if (branch) |b| try self.pushBlockRun(task, b);
+                    if (branch) |b| {
+                        self.pushBlockRun(task, b, 1) catch |err| {
+                            scope.leave(self.gpa);
+                            return err;
+                        };
+                    } else scope.leave(self.gpa);
                     return .pushed;
                 },
                 .match_expr => {
                     // Select the arm synchronously; a block arm becomes a run
                     // frame (so its body can suspend); a bare-expr arm runs for
-                    // effect (a sub-expression `await` there fails loud).
-                    const body = try self.matchArmBody(world, scope, e);
+                    // effect (a sub-expression `await` there fails loud). The
+                    // arm's scope holds its pattern binding.
+                    try scope.enter(self.gpa);
+                    const body = self.matchArmBody(world, scope, e) catch |err| {
+                        scope.leave(self.gpa);
+                        return err;
+                    };
                     cursor.* += 1;
                     if (self.ast.exprKind(body) == .block_expr) {
-                        try self.pushBlockRun(task, body);
+                        self.pushBlockRun(task, body, 1) catch |err| {
+                            scope.leave(self.gpa);
+                            return err;
+                        };
                     } else {
+                        defer scope.leave(self.gpa);
                         _ = try self.evalExpr(world, scope, body);
                     }
                     return .pushed;
@@ -3594,7 +3845,7 @@ pub const Interpreter = struct {
             if (self.ast.stmtKind(br.stmt) == .expr_stmt) {
                 const e: NodeId = @bitCast(self.ast.stmtData(br.stmt));
                 if (self.ast.exprKind(e) == .block_expr) {
-                    try self.pushBlockRun(child, e);
+                    try self.pushBlockRun(child, e, 0);
                     framed = true;
                 }
             }
@@ -3656,18 +3907,25 @@ pub const Interpreter = struct {
     fn cloneLocalsInto(gpa: std.mem.Allocator, src: *const Locals, dest: *Locals) error{OutOfMemory}!void {
         var it = src.map.iterator();
         while (it.next()) |entry| {
-            try dest.map.put(gpa, entry.key_ptr.*, entry.value_ptr.*);
+            try dest.put(gpa, entry.key_ptr.*, entry.value_ptr.value, entry.value_ptr.is_mut);
         }
     }
 
     /// Push a `block_expr`'s body as a `.run` frame, carrying its
     /// trailing value expression (evaluated for effect on pop).
-    fn pushBlockRun(self: *Interpreter, task: *AsyncTask, block_expr_id: NodeId) StmtError!void {
+    /// Push the block `block_expr_id` in a scope of its own. `branch_scopes` is
+    /// the number of scopes the caller opened for it just before — a branch's
+    /// pattern binding — which the frame closes with its own.
+    fn pushBlockRun(self: *Interpreter, task: *AsyncTask, block_expr_id: NodeId, branch_scopes: u8) StmtError!void {
         const blk = self.ast.block_exprs.items[self.ast.exprData(block_expr_id)];
+        const scope = currentScope(task);
+        try scope.enter(self.gpa);
+        errdefer scope.leave(self.gpa);
         try task.frames.append(self.gpa, .{ .run = .{
             .block_start = blk.body_start,
             .block_len = blk.body_len,
             .value_expr = if (blk.value.isNone()) null else blk.value,
+            .scopes = 1 + branch_scopes,
         } });
     }
 
@@ -3704,12 +3962,14 @@ pub const Interpreter = struct {
                     // POD-across-suspend caveat.
                     task.returned = true;
                     task.result = self.return_value;
+                    retainHandle(task.result);
                     self.returning = false;
                     self.return_value = .{ .unit = {} };
                     return false;
                 }
-                const ret = task.frames.items[task.frames.items.len - 1].call.ret;
-                const v = self.return_value;
+                const top = task.frames.items[task.frames.items.len - 1].call;
+                const ret = top.ret;
+                const v = try self.wrapped(self.return_value, top.wraps);
                 self.popFrame(task);
                 switch (ret) {
                     .return_ => self.return_value = v, // enclosing fn returns `v` too → loop
@@ -3735,7 +3995,14 @@ pub const Interpreter = struct {
                     .try_ => |tfv| {
                         if (!tfv.in_catch) {
                             self.thrown = false;
-                            try currentScope(task).put(self.gpa, tfv.catch_name, self.thrown_value, false);
+                            // The try body's scope closes; the catch body's
+                            // opens with the caught binding.
+                            const scope = currentScope(task);
+                            if (tfv.scope_open) scope.leave(self.gpa);
+                            task.frames.items[ti].try_.scope_open = false;
+                            try scope.enter(self.gpa);
+                            task.frames.items[ti].try_.scope_open = true;
+                            try scope.put(self.gpa, tfv.catch_name, self.thrown_value, false);
                             task.frames.items[ti].try_.in_catch = true;
                             task.frames.items[ti].try_.cursor = 0;
                             return true;
@@ -3764,6 +4031,7 @@ pub const Interpreter = struct {
                         if (was_break) {
                             self.popFrame(task); // the loop exits
                         } else {
+                            self.endIteration(task, ti);
                             task.frames.items[ti].loop_.cursor = 0; // continue → loop again
                         }
                         return true;
@@ -3778,6 +4046,7 @@ pub const Interpreter = struct {
                         if (was_break) {
                             self.popFrame(task);
                         } else {
+                            self.endIteration(task, ti);
                             task.frames.items[ti].while_.in_iter = false; // continue → re-check cond
                         }
                         return true;
@@ -3792,6 +4061,7 @@ pub const Interpreter = struct {
                         if (was_break) {
                             self.popFrame(task);
                         } else {
+                            self.endIteration(task, ti);
                             task.frames.items[ti].for_.in_iter = false; // continue → next element
                         }
                         return true;
@@ -3895,7 +4165,7 @@ pub const Interpreter = struct {
                 .literal => {
                     const lit: NodeId = @bitCast(arm.pattern_payload);
                     const lit_v = try self.evalExpr(world, locals, lit);
-                    if (scrut.eql(lit_v)) return arm.body;
+                    if (self.valueEql(scrut, lit_v)) return arm.body;
                 },
                 .enum_variant => {
                     if (scrut != .enum_value) return error.RuntimeFailure;
@@ -3951,7 +4221,9 @@ pub const Interpreter = struct {
                 const more = if (r.inclusive) r.next <= r.end else r.next < r.end;
                 if (!more) return false;
                 try locals.put(self.gpa, f.var_name, .{ .int_ = r.next }, false);
-                r.next += 1;
+                // An inclusive range can end at `i64` max, past which `next` has
+                // no successor: the range closes on its last value instead.
+                if (r.next == r.end) r.inclusive = false else r.next += 1;
                 return true;
             },
             .array => {
@@ -3965,9 +4237,9 @@ pub const Interpreter = struct {
                 return true;
             },
             .array_persistent => {
-                // Resource `T[]` in an async body: the block pointer
-                // is stable across suspend; bounds-check the snapshotted length
-                // against the (possibly mutated) container, same as `.array`.
+                // Resource `T[]` in an async body: the frame holds a reference to
+                // the block; bounds-check the snapshotted length against the
+                // (possibly mutated) container, same as `.array`.
                 const a = &ff.iter.array_persistent;
                 if (a.idx >= a.len) return false;
                 const list = persistentArrayOf(a.ptr);
@@ -4042,7 +4314,7 @@ pub const Interpreter = struct {
                 const dup = try self.gpa.dupe(u8, self.stringBytes(v0).?);
                 errdefer self.gpa.free(dup);
                 try self.captured_filter_strings.append(self.gpa, dup);
-                break :blk Value{ .string_persistent = .{ .ptr = @intFromPtr(dup.ptr), .len = @intCast(dup.len) } };
+                break :blk Value{ .string_view = .{ .ptr = @intFromPtr(dup.ptr), .len = @intCast(dup.len) } };
             } else v0;
             try self.captured_filters.append(self.gpa, .{ .name = flit.name, .value = v });
         }
@@ -4107,22 +4379,9 @@ pub const Interpreter = struct {
         while (i < filter.start + filter.len) : (i += 1) {
             const want = self.captured_filters.items[i];
             const fv = eventFieldByName(ev, want.name) orelse return false;
-            if (!self.eventValueEql(want.value, fv)) return false;
+            if (!self.valueEql(want.value, fv)) return false;
         }
         return true;
-    }
-
-    /// Equality for an event-field comparison. Strings compare by
-    /// BYTES (a filter literal is `.string_id`, but an emitted string may be
-    /// `.string_run` / `.string_persistent` — `Value.eql` only matches same tag
-    /// + same pool index); every other admitted kind (int/float/bool/entity/
-    /// enum) uses `Value.eql`.
-    fn eventValueEql(self: *const Interpreter, a: Value, b: Value) bool {
-        if (self.stringBytes(a)) |ab| {
-            const bb = self.stringBytes(b) orelse return false;
-            return std.mem.eql(u8, ab, bb);
-        }
-        return a.eql(b);
     }
 
     /// Resolve a wake-condition `await` target to a `WakeCond`. Only
@@ -4143,7 +4402,7 @@ pub const Interpreter = struct {
         switch (aw.target_kind) {
             .wait, .wait_unscaled => {
                 if (self.ast.exprKind(aw.arg_expr) != .duration_lit) return error.RuntimeFailure;
-                const secs = durationLiteralSeconds(self.ast.strings.slice(self.ast.exprData(aw.arg_expr))) orelse return error.RuntimeFailure;
+                const secs = (try durationLiteralSeconds(self.gpa, self.ast.strings.slice(self.ast.exprData(aw.arg_expr)))) orelse return error.RuntimeFailure;
                 if (secs < 0) return error.RuntimeFailure;
                 const ticks = @round(secs * async_fixed_dt_hz);
                 return switch (aw.target_kind) {
@@ -4255,18 +4514,29 @@ pub const Interpreter = struct {
     /// Tier-0 `on_attach`/`on_detach` seam via the loader's bytes-taking
     /// `activateExtension` / `deactivateExtension`. The batch is snapshotted
     /// (`toOwnedSlice`) so a hook fired during apply that enqueues more ops does
-    /// NOT drain recursively — new ops wait for the next flush.
-    fn flushPendingExtensions(self: *Interpreter, world: *World) !void {
+    /// NOT drain recursively — new ops wait for the next flush. An op the loader
+    /// refuses, or whose hook fails, is a runtime error of the tick and the rest
+    /// of the batch still applies; only an allocation failure ends the tick.
+    fn flushPendingExtensions(self: *Interpreter, world: *World, report: *RuntimeReport) !void {
         if (self.pending_extensions.items.len == 0) return;
         const batch = try self.pending_extensions.toOwnedSlice(self.gpa);
         defer {
             for (batch) |pe| self.gpa.free(pe.name);
             self.gpa.free(batch);
         }
-        for (batch) |pe| switch (pe.op) {
-            .activate => try scene_loader.activateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
-            .deactivate => try scene_loader.deactivateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
-        };
+        for (batch) |pe| {
+            const applied = switch (pe.op) {
+                .activate => scene_loader.activateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
+                .deactivate => scene_loader.deactivateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
+            };
+            applied catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    report.runtime_errors += 1;
+                    report.last_error = .{ .kind = .ExtensionOpFailed, .span = pe.span };
+                },
+            };
+        }
     }
 
     /// Resolve a `tag_path` operand node to its leaf bit via the global table,
@@ -4432,14 +4702,20 @@ pub const Interpreter = struct {
     ) StmtError!Value {
         if (mc.args_len != spec.params.len) return error.RuntimeFailure;
 
+        // Evaluated in source order, then bound to the parameters by label.
+        const values = try self.gpa.alloc(Value, mc.args_len);
+        defer self.gpa.free(values);
+        var j: u32 = 0;
+        while (j < mc.args_len) : (j += 1) {
+            values[j] = try self.evalExpr(world, locals, @bitCast(self.ast.extra.items[mc.args_start + j]));
+        }
         var args: std.ArrayListUnmanaged(services_mod.Arg) = .empty;
         defer args.deinit(self.gpa);
         try args.ensureTotalCapacity(self.gpa, spec.params.len);
-        var i: u32 = 0;
-        while (i < mc.args_len) : (i += 1) {
-            const arg_id: NodeId = @bitCast(self.ast.extra.items[mc.args_start + i]);
-            const v = try self.evalExpr(world, locals, arg_id);
-            args.appendAssumeCapacity(try self.valueToArg(v, spec.params[i].type));
+        for (spec.params, 0..) |param, i| {
+            const name = self.ast.strings.find(param.name) orelse 0;
+            const idx = self.ast.callArgIndexForParam(mc.args_start, mc.args_len, mc.names_start, @intCast(i), name) orelse return error.RuntimeFailure;
+            args.appendAssumeCapacity(try self.valueToArg(values[idx], param.type));
         }
 
         const ret = spec.call(entry.ctx, args.items) catch |err| {
@@ -4454,11 +4730,7 @@ pub const Interpreter = struct {
     fn valueToArg(self: *Interpreter, v: Value, want: services_mod.TypeRef) StmtError!services_mod.Arg {
         return switch (want) {
             .int_ => if (v == .int_) services_mod.Arg{ .int_ = v.int_ } else error.RuntimeFailure,
-            .float_ => switch (v) {
-                .float_ => |f| services_mod.Arg{ .float_ = f },
-                .int_ => |n| services_mod.Arg{ .float_ = @floatFromInt(n) },
-                else => error.RuntimeFailure,
-            },
+            .float_ => if (v == .float_) services_mod.Arg{ .float_ = v.float_ } else error.RuntimeFailure,
             .bool_ => if (v == .bool_) services_mod.Arg{ .bool_ = v.bool_ } else error.RuntimeFailure,
             .string_ => services_mod.Arg{ .string_ = self.stringBytes(v) orelse return error.RuntimeFailure },
             .entity_ => if (v == .entity_id) services_mod.Arg{ .entity_ = v.entity_id } else error.RuntimeFailure,
@@ -4542,6 +4814,24 @@ pub const Interpreter = struct {
 
     /// Run a contiguous statement run, stopping early if a control signal
     /// fires (left set on `self` for the enclosing loop to interpret).
+    /// One iteration of a `for` body, its loop variables bound in its scope.
+    fn forIteration(self: *Interpreter, world: *World, locals: *Locals, f: ast_mod.ForStmt, v: Value, index: ?Value) StmtError!void {
+        try locals.enter(self.gpa);
+        defer locals.leave(self.gpa);
+        try locals.put(self.gpa, f.var_name, v, false);
+        if (index) |x| {
+            if (f.index_name != 0) try locals.put(self.gpa, f.index_name, x, false);
+        }
+        try self.execStmtRun(world, locals, f.body_start, f.body_len);
+    }
+
+    /// `execStmtRun` in a scope of its own.
+    fn execScopedRun(self: *Interpreter, world: *World, locals: *Locals, start: u32, len: u32) StmtError!void {
+        try locals.enter(self.gpa);
+        defer locals.leave(self.gpa);
+        try self.execStmtRun(world, locals, start, len);
+    }
+
     fn execStmtRun(self: *Interpreter, world: *World, locals: *Locals, start: u32, len: u32) StmtError!void {
         var s: u32 = 0;
         while (s < len) : (s += 1) {
@@ -4592,9 +4882,9 @@ pub const Interpreter = struct {
                     if (self.ast.exprKind(let.value) == .struct_lit) {
                         const sl = self.ast.struct_lits.items[self.ast.exprData(let.value)];
                         if (sl.type_name == 0) {
-                            if (let.type_annotation.isNone() or self.ast.typeNodeKind(let.type_annotation) != .named) return error.RuntimeFailure;
-                            const named = self.ast.named_types.items[self.ast.typeNodeData(let.type_annotation)];
-                            break :blk try self.evalStructLitAs(world, locals, sl, self.ast.resolveTypeAliasName(named.name));
+                            if (let.type_annotation.isNone()) return error.RuntimeFailure;
+                            const annotated = self.ast.namedTypeName(let.type_annotation) orelse return error.RuntimeFailure;
+                            break :blk try self.evalStructLitAs(world, locals, sl, self.ast.resolveTypeAliasName(annotated));
                         }
                     }
                     break :blk try self.evalExpr(world, locals, let.value);
@@ -4648,15 +4938,18 @@ pub const Interpreter = struct {
                 switch (iter) {
                     .range => |r| {
                         var i: i64 = r.start;
-                        range_loop: while (if (r.inclusive) i <= r.end else i < r.end) : (i += 1) {
-                            try locals.put(self.gpa, f.var_name, Value{ .int_ = i }, false);
-                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                        range_loop: while (if (r.inclusive) i <= r.end else i < r.end) {
+                            try self.forIteration(world, locals, f, Value{ .int_ = i }, null);
                             if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
                                 .stop => break :range_loop,
                                 .propagate => return,
                             }
+                            // An inclusive range can end at `i64` max, past which
+                            // `i` has no successor.
+                            if (i == r.end) break :range_loop;
+                            i += 1;
                         }
                     },
                     .array_ref => |handle| {
@@ -4666,9 +4959,8 @@ pub const Interpreter = struct {
                         const len = self.collections.arrays.items[handle].items.len;
                         var k: usize = 0;
                         arr_loop: while (k < len) : (k += 1) {
-                            const elem = self.collections.arrays.items[handle].items[k];
-                            try locals.put(self.gpa, f.var_name, elem, false);
-                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            if (k >= self.collections.arrays.items[handle].items.len) return error.RuntimeFailure;
+                            try self.forIteration(world, locals, f, self.collections.arrays.items[handle].items[k], null);
                             if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
@@ -4685,9 +4977,8 @@ pub const Interpreter = struct {
                         const len = persistentArrayOf(ptr).items.len;
                         var k: usize = 0;
                         parr_loop: while (k < len) : (k += 1) {
-                            const elem = persistentArrayOf(ptr).items[k];
-                            try locals.put(self.gpa, f.var_name, elem, false);
-                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            if (k >= persistentArrayOf(ptr).items.len) return error.RuntimeFailure;
+                            try self.forIteration(world, locals, f, persistentArrayOf(ptr).items[k], null);
                             if (self.thrown or self.returning) return;
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
@@ -4706,9 +4997,7 @@ pub const Interpreter = struct {
                         var k: usize = 0;
                         map_loop: while (k < len) : (k += 1) {
                             const pair = self.collections.maps.items[handle].items[k];
-                            try locals.put(self.gpa, f.var_name, pair.key, false);
-                            if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
-                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            try self.forIteration(world, locals, f, pair.key, pair.value);
                             if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
@@ -4724,9 +5013,7 @@ pub const Interpreter = struct {
                         var k: usize = 0;
                         pmap_loop: while (k < len) : (k += 1) {
                             const pair = persistentMapOf(ptr).items[k];
-                            try locals.put(self.gpa, f.var_name, pair.key, false);
-                            if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
-                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            try self.forIteration(world, locals, f, pair.key, pair.value);
                             if (self.thrown or self.returning) return;
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
@@ -4748,17 +5035,22 @@ pub const Interpreter = struct {
                 // runs the body, `none` stops the loop.
                 const wh = self.ast.while_stmts.items[data];
                 while_loop: while (true) {
+                    var payload: ?Value = null;
                     if (wh.let_binding != 0) {
                         const opt = try self.evalExpr(world, locals, wh.cond);
                         if (opt != .optional) return error.RuntimeFailure;
-                        const payload = self.optionals.items[opt.optional] orelse break :while_loop;
-                        try locals.put(self.gpa, wh.let_binding, payload, false);
+                        payload = self.optionals.items[opt.optional] orelse break :while_loop;
                     } else {
                         const cond = try self.evalExpr(world, locals, wh.cond);
                         if (cond != .bool_) return error.RuntimeFailure;
                         if (!cond.bool_) break :while_loop;
                     }
-                    try self.execStmtRun(world, locals, wh.body_start, wh.body_len);
+                    {
+                        try locals.enter(self.gpa);
+                        defer locals.leave(self.gpa);
+                        if (payload) |v| try locals.put(self.gpa, wh.let_binding, v, false);
+                        try self.execStmtRun(world, locals, wh.body_start, wh.body_len);
+                    }
                     if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                     switch (self.handleLoopControl(0)) {
                         .again => {},
@@ -4795,9 +5087,11 @@ pub const Interpreter = struct {
                 // threw, clear the signal, bind the caught value, run the catch
                 // body (which may itself throw → re-propagates).
                 const tc = self.ast.try_catch_stmts.items[data];
-                try self.execStmtRun(world, locals, tc.try_start, tc.try_len);
+                try self.execScopedRun(world, locals, tc.try_start, tc.try_len);
                 if (self.thrown) {
                     self.thrown = false;
+                    try locals.enter(self.gpa);
+                    defer locals.leave(self.gpa);
                     try locals.put(self.gpa, tc.catch_name, self.thrown_value, false);
                     try self.execStmtRun(world, locals, tc.catch_start, tc.catch_len);
                 }
@@ -4876,9 +5170,9 @@ pub const Interpreter = struct {
             const cur = locals.get(name_id) orelse return error.RuntimeFailure;
             const rhs = try self.evalExpr(world, locals, assign.value);
             if (self.thrown) return; // see `assignRhsThrew`
-            const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+            const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
             const ptr = locals.getPtr(name_id) orelse return error.RuntimeFailure;
-            ptr.* = new_v;
+            replaceHeld(self.gpa, ptr, new_v);
             return;
         }
         if (target_kind == .field_access) {
@@ -4892,7 +5186,7 @@ pub const Interpreter = struct {
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     const rhs = try self.evalExpr(world, locals, assign.value);
                     if (self.thrown) return; // see `assignRhsThrew`
-                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
                     Bridge.writeComponentField(&world.registry, cref, world, field_name, new_v) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     // Change detection: stamp `changed_tick = current_tick`
@@ -4956,7 +5250,7 @@ pub const Interpreter = struct {
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     const rhs = try self.evalExpr(world, locals, assign.value);
                     if (self.thrown) return; // see `assignRhsThrew`
-                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
                     Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, new_v) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     return;
@@ -4978,7 +5272,7 @@ pub const Interpreter = struct {
                     const cur = self.structs.list.items[handle].fields.items[k].value;
                     const rhs = try self.evalExpr(world, locals, assign.value);
                     if (self.thrown) return; // see `assignRhsThrew`
-                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
                     self.structs.list.items[handle].fields.items[k].value = new_v;
                     return;
                 },
@@ -5056,15 +5350,47 @@ pub const Interpreter = struct {
     /// `null` when the field is not enum-typed or the variant is unknown
     /// (the resolver has already rejected those programs).
     fn enumFieldShorthand(self: *Interpreter, f: ast_mod.Field, value: NodeId) ?Value {
-        if (self.ast.typeNodeKind(f.type_node) != .named) return null;
-        const named = self.ast.named_types.items[self.ast.typeNodeData(f.type_node)];
-        const ename = self.ast.resolveTypeAliasName(named.name);
+        return self.enumShorthandOf(f.type_node, value);
+    }
+
+    fn enumShorthandOf(self: *Interpreter, type_node: NodeId, value: NodeId) ?Value {
+        const ename = self.ast.resolveTypeAliasName(self.ast.namedTypeName(type_node) orelse return null);
         const edecl = self.enum_decls.get(ename) orelse return null;
         // Expression-position `tag_path` data IS the variant ident (the
         // parser interns it directly; multi-segment is a parse error there).
         const variant: StringId = self.ast.exprData(value);
         const vidx = self.enumVariantIndexOf(edecl, variant) orelse return null;
         return Value{ .enum_value = .{ .type_name = ename, .variant = vidx } };
+    }
+
+    /// The value of the top-level `const` `name` names, `null` when none does.
+    fn constValue(self: *Interpreter, name: StringId) StmtError!?Value {
+        const decl = self.consts.get(name) orelse return null;
+        return try self.constantOf(decl.type_node, decl.value);
+    }
+
+    /// The constant expression `value` a slot of type `type_node` holds,
+    /// wrapped into its optional as the checker recorded.
+    fn constantOf(self: *Interpreter, type_node: NodeId, value: NodeId) StmtError!Value {
+        const v: Value = switch (self.ast.exprKind(value)) {
+            .string_lit => .{ .string_id = self.ast.exprData(value) },
+            .tag_path => blk: {
+                const ename = self.ast.shorthandEnum(value) orelse break :blk self.enumShorthandOf(type_node, value) orelse return error.RuntimeFailure;
+                const edecl = self.enum_decls.get(ename) orelse return error.RuntimeFailure;
+                const vidx = self.enumVariantIndexOf(edecl, self.ast.exprData(value)) orelse return error.RuntimeFailure;
+                break :blk .{ .enum_value = .{ .type_name = ename, .variant = vidx } };
+            },
+            .none_lit => blk: {
+                const handle: u32 = @intCast(self.optionals.items.len);
+                try self.optionals.append(self.gpa, null);
+                break :blk .{ .optional = handle };
+            },
+            else => evalConst(self.gpa, self.ast, value) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.RuntimeFailure,
+            },
+        };
+        return self.wrapped(v, self.ast.implicit_wraps.get(value.raw()) orelse 0);
     }
 
     /// Resolve an enum assignment RHS against a known enum type id. A bare
@@ -5088,11 +5414,33 @@ pub const Interpreter = struct {
     /// declared-type lookup as `enumFieldShorthand`, for the anonymous
     /// `.{ … }` field-value resolution.
     fn structFieldTypeName(self: *Interpreter, f: ast_mod.Field) ?StringId {
-        if (self.ast.typeNodeKind(f.type_node) != .named) return null;
-        const named = self.ast.named_types.items[self.ast.typeNodeData(f.type_node)];
-        const sname = self.ast.resolveTypeAliasName(named.name);
+        const sname = self.ast.resolveTypeAliasName(self.ast.namedTypeName(f.type_node) orelse return null);
         if (self.struct_decls.get(sname) == null) return null;
         return sname;
+    }
+
+    /// The value of a struct field a literal omits: its declared default, or the
+    /// zero of its type, which is what the codegen's `zeroDefault` emits.
+    fn structFieldDefault(self: *Interpreter, f: ast_mod.Field) !Value {
+        // A struct-typed field has no agreed default: the resolver requires it
+        // provided (E0208).
+        if (self.structFieldTypeName(f) != null) return error.RuntimeFailure;
+        if (!f.default_value.isNone()) return self.constantOf(f.type_node, f.default_value);
+        if (self.ast.typeNodeKind(f.type_node) == .optional) {
+            const handle: u32 = @intCast(self.optionals.items.len);
+            try self.optionals.append(self.gpa, null);
+            return Value{ .optional = handle };
+        }
+        const declared = self.ast.namedTypeName(f.type_node) orelse return error.RuntimeFailure;
+        const resolved = self.ast.resolveTypeAliasName(declared);
+        const tname = self.ast.strings.slice(resolved);
+        const eql = std.mem.eql;
+        if (eql(u8, tname, "int") or eql(u8, tname, "i32") or eql(u8, tname, "u32")) return Value{ .int_ = 0 };
+        if (eql(u8, tname, "float") or eql(u8, tname, "f32") or eql(u8, tname, "f64")) return Value{ .float_ = 0.0 };
+        if (eql(u8, tname, "bool")) return Value{ .bool_ = false };
+        if (eql(u8, tname, "string")) return Value{ .string_id = 0 };
+        if (self.enum_decls.get(resolved) != null) return Value{ .enum_value = .{ .type_name = resolved, .variant = 0 } };
+        return error.RuntimeFailure;
     }
 
     /// Materialize a struct literal as a fresh `type_name` value in the
@@ -5141,14 +5489,7 @@ pub const Interpreter = struct {
                     break;
                 }
             }
-            const fval = provided orelse blk: {
-                // A struct-typed field has no agreed default (the resolver
-                // requires literal provision, E0208) — belt against the
-                // zero-fill below silently standing in for one.
-                if (self.structFieldTypeName(f) != null) return error.RuntimeFailure;
-                if (f.default_value.isNone()) break :blk Value{ .int_ = 0 };
-                break :blk evalConst(self.ast, f.default_value) catch Value{ .int_ = 0 };
-            };
+            const fval = provided orelse try self.structFieldDefault(f);
             try self.structs.list.items[handle].fields.append(self.gpa, .{ .name = f.name, .value = fval });
         }
         return Value{ .struct_ref = handle };
@@ -5171,12 +5512,14 @@ pub const Interpreter = struct {
     /// mutate an archetype mid-`iterateArchetype`. Missing resolver / unknown name
     /// surface as `RuntimeFailure` (the interp's failure channel). The name is
     /// dup'd (the AST / run-string source may not outlive the flush).
-    fn enqueueExtension(self: *Interpreter, entity: CoreEntityId, name: []const u8, op: ExtOp) StmtError!void {
+    fn enqueueExtension(self: *Interpreter, world: *World, locals: *Locals, entity: CoreEntityId, mc: ast_mod.MethodCall, op: ExtOp) StmtError!void {
+        const name = try self.extensionNameArg(world, locals, mc);
+        const span: SourceSpan = if (self.in_hook_text) .{ .byte_start = 0, .byte_end = 0 } else self.ast.exprSpan(@bitCast(self.ast.extra.items[mc.args_start]));
         const resolver = self.bridge.ext_resolver orelse return error.RuntimeFailure;
         const bytes = resolver.resolve(name) orelse return error.RuntimeFailure;
         const name_dup = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(name_dup);
-        try self.pending_extensions.append(self.gpa, .{ .entity = entity, .name = name_dup, .bytes = bytes, .op = op });
+        try self.pending_extensions.append(self.gpa, .{ .entity = entity, .name = name_dup, .bytes = bytes, .op = op, .span = span });
     }
 
     /// the Tier-0 `CommandBuffer` that a body's structural
@@ -5316,7 +5659,7 @@ pub const Interpreter = struct {
             .float_ => |x| try self.msgPrint("{d}", .{x}),
             .bool_ => |x| try self.msgAppend(if (x) "true" else "false"),
             .duration => |x| try self.msgPrint("{d}s", .{x}),
-            .string_id, .string_run, .string_persistent => try self.msgAppend(self.stringBytes(v) orelse ""),
+            .string_id, .string_run, .string_persistent, .string_view => try self.msgAppend(self.stringBytes(v) orelse ""),
             .entity_id => |e| try self.msgPrint("entity#{d}", .{e}),
             .unit => try self.msgAppend("()"),
             else => try self.msgAppend("<value>"),
@@ -5347,13 +5690,26 @@ pub const Interpreter = struct {
         var cap_it = self.closures.list.items[handle].captured.iterator();
         while (cap_it.next()) |e| try frame.put(self.gpa, e.key_ptr.*, e.value_ptr.*, false);
         const result = try self.evalExpr(world, &frame, ce.body);
+        return self.leaveClosure(result, node);
+    }
+
+    /// A closure body ends at its call, never in the enclosing fn: a `return`
+    /// becomes the call's value, a throw keeps propagating as unit, and a
+    /// `break` or `continue` still set has no loop to reach
+    /// (`etch-reference-part1.md` §7.7).
+    fn leaveClosure(self: *Interpreter, result: Value, node: NodeId) StmtError!Value {
         if (self.returning) {
             self.returning = false;
             const rv = self.return_value;
             self.return_value = .{ .unit = {} };
             return rv;
         }
-        if (self.thrown or self.control != .none) return Value{ .unit = {} };
+        if (self.thrown) return Value{ .unit = {} };
+        if (self.control != .none) {
+            self.control = .none;
+            self.control_label = 0;
+            return self.fail(.ControlFlowEscapesClosure, self.ast.exprSpan(node));
+        }
         return result;
     }
 
@@ -5365,7 +5721,7 @@ pub const Interpreter = struct {
         const pred = try self.evalArg(world, locals, call, 0);
         const timeout = try self.evalArg(world, locals, call, 1);
         if (timeout != .duration) return error.RuntimeFailure;
-        const budget: i64 = @intFromFloat(@round(timeout.duration * async_fixed_dt_hz));
+        const budget = value_mod.floatTrunc(i64, @round(timeout.duration * async_fixed_dt_hz)) orelse return error.RuntimeFailure;
         // Keep the event store clean for a later `emit; tick` in the same test.
         defer self.events.clear(self.gpa);
         if (self.events.list.items.len > 0) self.suppress_event_clear = true;
@@ -5378,17 +5734,14 @@ pub const Interpreter = struct {
             };
             world.tickBoundary();
             const r = try self.callZeroArgClosure(world, pred);
-            // A predicate `throw` / control signal stops the loop and surfaces as
-            // the test failure — do NOT keep ticking on a
-            // latched throw. `callZeroArgClosure` consumes `return`; only a throw
-            // or a stray control signal can remain set here.
+            // A predicate `throw` stops the loop and surfaces as the test
+            // failure — do NOT keep ticking on a latched throw.
             if (self.thrown) {
                 self.thrown = false;
                 self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
                 self.pending_message = null;
                 return error.RuntimeFailure;
             }
-            if (self.control != .none) return error.RuntimeFailure;
             if (r == .bool_ and r.bool_) return Value{ .bool_ = true };
         }
         return Value{ .bool_ = false };
@@ -5418,14 +5771,9 @@ pub const Interpreter = struct {
             if (call.args_len < 2) return error.RuntimeFailure;
             const a = try self.evalArg(world, locals, call, 0);
             const b = try self.evalArg(world, locals, call, 1);
-            // String-aware equality: `Value.eql` compares
-            // strings only by pool identity (`.string_run` is always unequal, and
-            // a `.string_id` literal never matches a `.string_persistent` /
-            // `.string_run`), which would false-fail `assert_eq` and — worse —
-            // false-PASS `assert_neq`. `eventValueEql` byte-compares strings and
-            // falls back to `Value.eql` otherwise. Aggregates are rejected at
-            // type-check (`synthBuiltinCall`), so only comparable values arrive.
-            if (self.eventValueEql(a, b) != want_eq) {
+            // Aggregates are rejected at type-check (`synthBuiltinCall`), so only
+            // comparable values arrive.
+            if (self.valueEql(a, b) != want_eq) {
                 self.test_msg_buf.clearRetainingCapacity();
                 try self.msgAssertPrefix(world, locals, call, 2, name);
                 try self.msgAppend(": ");
@@ -5518,7 +5866,8 @@ pub const Interpreter = struct {
             const v = try self.evalExpr(world, locals, flit.value);
             const fsize: u16 = @intCast(fd.kind.sizeBytes());
             const field_bytes = buf[fd.offset .. fd.offset + fsize];
-            bridge_mod.writeValueAsBytes(fd.kind, field_bytes, v) catch return error.RuntimeFailure;
+            bridge_mod.writeValueAsBytes(fd.kind, field_bytes, bridge_mod.narrowForStore(fd.kind, v)) catch |e|
+                return self.fail(bridgeFailureKind(e), self.ast.exprSpan(flit.value));
         }
         return .{ .cid = cid, .bytes = buf };
     }
@@ -5529,14 +5878,21 @@ pub const Interpreter = struct {
     /// add-on-present → `on_replaced`; add → `on_add`; remove → `on_remove`).
     /// Drains until empty: an observer body may itself enqueue more structural
     /// commands (routed back to the same buffer), and those apply in a later
-    /// round of this same boundary. Never runs mid-`iterateArchetype`.
-    fn flushStructural(self: *Interpreter, world: *World) !void {
+    /// round of this same boundary. Never runs mid-`iterateArchetype`. A command
+    /// on a dead entity is a no-op, as a stale tag is; any other refusal counts
+    /// as a runtime error of the tick and the batch goes on; only an allocation
+    /// failure ends the tick.
+    fn flushStructural(self: *Interpreter, world: *World, report: *RuntimeReport) !void {
         const reg = &world.observer_registry;
         if (reg.deferred == null) return;
         while (reg.deferred.?.commands.items.len > 0) {
             const batch = try reg.deferred.?.commands.toOwnedSlice(reg.deferred.?.gpa);
             defer reg.deferred.?.gpa.free(batch);
-            for (batch) |c| try observers_mod.applyWithObservers(c, reg, world, self.gpa);
+            for (batch) |c| observers_mod.applyWithObservers(c, reg, world, self.gpa) catch |err| switch (err) {
+                error.StaleEntityHandle => {},
+                error.OutOfMemory => return error.OutOfMemory,
+                else => report.runtime_errors += 1,
+            };
         }
         // All commands applied — reclaim the payload arena.
         reg.deferred.?.reset();
@@ -5602,18 +5958,16 @@ pub const Interpreter = struct {
                 const mname = self.ast.strings.slice(mc.method_name);
                 // runtime extension API on an entity receiver. Checked
                 // before the `impl Trait for Entity` lookup (these are builtin
-                // methods, not user traits). activate/deactivate route through the
-                // shared loader entries; a missing resolver / unknown extension /
-                // component conflict surfaces as the interp's `RuntimeFailure`
-                // (the loader path keeps the named `MissingExtensionResolver` etc.).
+                // methods, not user traits). activate/deactivate ENQUEUE, never an
+                // immediate structural mutation (we may be mid-iteration): a
+                // missing resolver or unknown extension fails the call, and a
+                // refusal at the tick boundary is a runtime error of that tick.
                 if (std.mem.eql(u8, mname, "activate_extension")) {
-                    // B1: ENQUEUE (deferred to the tick boundary) — never an
-                    // immediate structural mutation here (we may be mid-iteration).
-                    try self.enqueueExtension(@bitCast(eid), try self.extensionNameArg(world, locals, mc), .activate);
+                    try self.enqueueExtension(world, locals, @bitCast(eid), mc, .activate);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "deactivate_extension")) {
-                    try self.enqueueExtension(@bitCast(eid), try self.extensionNameArg(world, locals, mc), .deactivate);
+                    try self.enqueueExtension(world, locals, @bitCast(eid), mc, .deactivate);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "has_extension")) {
@@ -5624,9 +5978,8 @@ pub const Interpreter = struct {
                     if (mc.args_len != 0) return error.RuntimeFailure;
                     const handle = try self.collections.newArray(self.gpa);
                     for (world.entityExtensions(@bitCast(eid))) |n| {
-                        // Wrap each owned name as a borrowed persistent-string view
-                        // (the names outlive the call — owned by the side-table).
-                        try self.collections.arrays.items[handle].append(self.gpa, Value{ .string_persistent = .{ .ptr = @intFromPtr(n.ptr), .len = @intCast(n.len) } });
+                        // The names are owned by the world's side table.
+                        try self.collections.arrays.items[handle].append(self.gpa, Value{ .string_view = .{ .ptr = @intFromPtr(n.ptr), .len = @intCast(n.len) } });
                     }
                     return Value{ .array_ref = handle };
                 }
@@ -5674,13 +6027,9 @@ pub const Interpreter = struct {
                 const method = self.trait_methods.get(methodKey(entity_name, mc.method_name)) orelse return error.RuntimeFailure;
                 return try self.callMethod(world, locals, method, mc, recv);
             },
-            .string_id, .string_run, .string_persistent => {
-                // Builtin string methods. `len` → byte length, on a
-                // literal (`string_id`), a runtime-produced string
-                // (`string_run`), or a borrowed resource-string
-                // view (`string_persistent`); any other §12 method
-                // is unimplemented stdlib → fail loud. `stringBytes` already covers
-                // all three forms.
+            .string_id, .string_run, .string_persistent, .string_view => {
+                // Builtin string methods: `len` → byte length; any other §12
+                // method is unimplemented stdlib → fail loud.
                 const mname = self.ast.strings.slice(mc.method_name);
                 if (std.mem.eql(u8, mname, "len")) {
                     const bytes = self.stringBytes(recv) orelse return error.RuntimeFailure;
@@ -5809,7 +6158,7 @@ pub const Interpreter = struct {
                     const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
                     const v = try self.evalExpr(world, locals, arg);
                     for (persistentSetOf(ptr).items) |existing| {
-                        if (self.collectionKeyEql(existing, v)) return Value{ .bool_ = true };
+                        if (self.valueEql(existing, v)) return Value{ .bool_ = true };
                     }
                     return Value{ .bool_ = false };
                 }
@@ -5824,7 +6173,7 @@ pub const Interpreter = struct {
                 // of stdlib §15.2). `insert` is the same
                 // scan-skip-or-append as the `Set.from` seeding (its `bool`
                 // return is out of the subset — statement use only, the
-                // value here is unit); `contains` scans with `Value.eql`;
+                // value here is unit); `contains` scans with `valueEql`;
                 // `len` is the element count; any other §15 method is
                 // unimplemented stdlib → fail loud.
                 const mname = self.ast.strings.slice(mc.method_name);
@@ -5840,7 +6189,7 @@ pub const Interpreter = struct {
                     const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
                     const v = try self.evalExpr(world, locals, arg);
                     for (self.collections.sets.items[handle].items) |existing| {
-                        if (existing.eql(v)) return Value{ .bool_ = true };
+                        if (self.valueEql(existing, v)) return Value{ .bool_ = true };
                     }
                     return Value{ .bool_ = false };
                 }
@@ -5869,7 +6218,7 @@ pub const Interpreter = struct {
                     // could have grown the outer store vector).
                     var replaced = false;
                     for (self.collections.maps.items[handle].items) |*pair| {
-                        if (pair.key.eql(k)) {
+                        if (self.valueEql(pair.key, k)) {
                             pair.value = v;
                             replaced = true;
                             break;
@@ -5908,6 +6257,14 @@ pub const Interpreter = struct {
             if (mc.args_len != 1) return error.RuntimeFailure;
             const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
             const av = try self.evalExpr(world, locals, arg);
+            if (av == .array_persistent) {
+                const handle = try self.collections.newSet(self.gpa);
+                for (persistentArrayOf(av.array_persistent).items) |v| {
+                    try self.retainArena(v);
+                    try self.setInsert(handle, v);
+                }
+                return Value{ .set_ref = handle };
+            }
             if (av != .array_ref) return error.RuntimeFailure;
             const handle = try self.collections.newSet(self.gpa);
             var i: usize = 0;
@@ -5929,7 +6286,7 @@ pub const Interpreter = struct {
     /// byte-exact across the two backends by construction.
     fn setInsert(self: *Interpreter, handle: u32, item: Value) !void {
         for (self.collections.sets.items[handle].items) |existing| {
-            if (existing.eql(item)) return;
+            if (self.valueEql(existing, item)) return;
         }
         try self.collections.sets.items[handle].append(self.gpa, item);
     }
@@ -5984,26 +6341,28 @@ pub const Interpreter = struct {
     /// Whether a string `Value`'s bytes must be deep-copied to outlive the
     /// current body OR survive a mutation of their source. Only
     /// `.string_id` (the immortal AST string table) is stable; a `.string_run`
-    /// (per-body `run_strings`, freed at the body boundary) and a NON-EMPTY
+    /// (per-body `run_strings`, freed at the body boundary), a NON-EMPTY
     /// borrowed `.string_persistent` (a view over resource storage, released when
-    /// the resource string field is reassigned) are NOT. The empty
-    /// `.string_persistent` sentinel (`ptr == 0`, `len == 0`) has no bytes to own.
+    /// the resource string field is reassigned) and a non-empty `.string_view`
+    /// (owned by whichever store copied it) are NOT. An empty view (`ptr == 0`,
+    /// `len == 0`) has no bytes to own.
     fn stringNeedsOwning(v: Value) bool {
         return switch (v) {
             .string_run => true,
-            .string_persistent => |s| s.len > 0,
+            .string_persistent, .string_view => |s| s.len > 0,
             else => false,
         };
     }
 
     /// The bytes of a string value — an AST-table literal (`string_id`), a
-    /// runtime-produced string (`string_run`), or a borrowed resource-string
-    /// view (`string_persistent`). Null for any non-string value.
+    /// runtime-produced string (`string_run`), a borrowed resource-string view
+    /// (`string_persistent`) or a store-owned view (`string_view`). Null for any
+    /// non-string value.
     fn stringBytes(self: *const Interpreter, v: Value) ?[]const u8 {
         return switch (v) {
             .string_id => |sid| self.ast.strings.slice(sid),
             .string_run => |handle| self.run_strings.items[handle],
-            .string_persistent => |s| blk: {
+            .string_persistent, .string_view => |s| blk: {
                 if (s.len == 0) break :blk &.{};
                 const p: [*]const u8 = @ptrFromInt(s.ptr);
                 break :blk p[0..s.len];
@@ -6050,15 +6409,66 @@ pub const Interpreter = struct {
         return block;
     }
 
-    /// Collection key equality: string keys compared BY BYTES (a
-    /// stored key is always a promoted `.string_persistent`, an incoming key may
-    /// be `.string_id`/`.string_run` — `Value.eql` would false-mismatch across
-    /// tags), POD keys by value. Load-bearing for the `[K:V]` unique-key policy.
-    fn collectionKeyEql(self: *const Interpreter, a: Value, b: Value) bool {
+    /// The field `name` of `recv`.
+    fn fieldOf(self: *Interpreter, world: *World, recv: Value, name: StringId, id: NodeId) StmtError!Value {
+        const field_name = self.ast.strings.slice(name);
+        switch (recv) {
+            .component_ref => |cref| return Bridge.readComponentField(&world.registry, cref, world, field_name) catch |e|
+                self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
+            .resource_ref => |rref| return Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
+                self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
+            .struct_ref => |handle| {
+                for (self.structs.list.items[handle].fields.items) |f| {
+                    if (f.name == name) return f.value;
+                }
+                return error.RuntimeFailure;
+            },
+            else => return error.RuntimeFailure,
+        }
+    }
+
+    /// Runtime value equality: two strings compare by bytes, whatever their
+    /// tags; two optionals by what they hold; anything else by `Value.eql`,
+    /// which compares a `.string_id` by pool id and never matches a
+    /// `.string_run`.
+    fn valueEql(self: *const Interpreter, a: Value, b: Value) bool {
         const ab = self.stringBytes(a);
         const bb = self.stringBytes(b);
         if (ab != null and bb != null) return std.mem.eql(u8, ab.?, bb.?);
+        if (a == .optional and b == .optional) {
+            const pa = self.optionals.items[a.optional] orelse return self.optionals.items[b.optional] == null;
+            const pb = self.optionals.items[b.optional] orelse return false;
+            return self.valueEql(pa, pb);
+        }
         return a.eql(b);
+    }
+
+    /// `==` at run time: two values of one kind, as the checker admits them.
+    fn equalityOf(self: *const Interpreter, a: Value, b: Value) error{RuntimeFailure}!bool {
+        const strings = self.stringBytes(a) != null and self.stringBytes(b) != null;
+        if (!strings and std.meta.activeTag(a) != std.meta.activeTag(b)) return error.RuntimeFailure;
+        return self.valueEql(a, b);
+    }
+
+    /// `<`, `>`, `<=` and `>=` at run time, on the ordered types of
+    /// `etch-resolver-types.md` §16.4.
+    fn orderOf(self: *const Interpreter, op: ast_mod.BinaryOp, a: Value, b: Value) error{RuntimeFailure}!Value {
+        const order: std.math.Order = blk: {
+            if (self.stringBytes(a)) |ab| if (self.stringBytes(b)) |bb| break :blk std.mem.order(u8, ab, bb);
+            if (a == .entity_id and b == .entity_id) {
+                const x: CoreEntityId = @bitCast(a.entity_id);
+                const y: CoreEntityId = @bitCast(b.entity_id);
+                break :blk if (x.index != y.index) std.math.order(x.index, y.index) else std.math.order(x.generation, y.generation);
+            }
+            return binaryCompare(op, a, b);
+        };
+        return Value{ .bool_ = switch (op) {
+            .lt => order == .lt,
+            .gt => order == .gt,
+            .le => order != .gt,
+            .ge => order != .lt,
+            else => unreachable,
+        } };
     }
 
     /// Insert `(k, v)` into a persistent map with the unique-key / last-write-wins
@@ -6067,7 +6477,7 @@ pub const Interpreter = struct {
     /// AND value, append. Leak-safe (reserve → promote → commit).
     fn mapInsertPromoted(self: *Interpreter, list: *PersistentMap, k: Value, v: Value) !void {
         for (list.items) |*pair| {
-            if (self.collectionKeyEql(pair.key, k)) {
+            if (self.valueEql(pair.key, k)) {
                 const new_v = try self.promoteForCollection(v);
                 if (pair.value == .string_persistent and pair.value.string_persistent.ptr != 0) {
                     persistent.decref(self.gpa, @ptrFromInt(pair.value.string_persistent.ptr));
@@ -6106,7 +6516,7 @@ pub const Interpreter = struct {
     /// subtlety as map keys), else promote + append. Leak-safe.
     fn setInsertPromoted(self: *Interpreter, list: *PersistentSet, v: Value) !void {
         for (list.items) |existing| {
-            if (self.collectionKeyEql(existing, v)) return;
+            if (self.valueEql(existing, v)) return;
         }
         try list.ensureUnusedCapacity(self.gpa, 1);
         const owned = try self.promoteForCollection(v);
@@ -6131,23 +6541,47 @@ pub const Interpreter = struct {
     /// Take ownership of `bytes` into the per-body runtime-string store,
     /// returning its `string_run` handle value.
     fn newRunString(self: *Interpreter, bytes: []u8) !Value {
+        errdefer self.gpa.free(bytes);
         const handle: u32 = @intCast(self.run_strings.items.len);
         try self.run_strings.append(self.gpa, bytes);
         return Value{ .string_run = handle };
     }
 
+    /// Evaluate `id`. A persistent handle in the result is a copy an arena
+    /// value holds, whoever keeps it next; a call's result is the callee's
+    /// reference, transferred (§4.4).
     fn evalExpr(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!Value {
+        const v = try self.evalExprValue(world, locals, id);
+        switch (self.ast.exprKind(id)) {
+            .fn_call, .method_call => {},
+            else => try self.retainArena(v),
+        }
+        if (self.ast.implicit_wraps.count() == 0) return v;
+        return self.wrapped(v, self.ast.implicit_wraps.get(id.raw()) orelse 0);
+    }
+
+    /// `v` wrapped `layers` times into an optional.
+    fn wrapped(self: *Interpreter, v: Value, layers: u8) StmtError!Value {
+        var out = v;
+        var i: u8 = 0;
+        while (i < layers) : (i += 1) {
+            const oh: u32 = @intCast(self.optionals.items.len);
+            try self.optionals.append(self.gpa, out);
+            out = .{ .optional = oh };
+        }
+        return out;
+    }
+
+    fn evalExprValue(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!Value {
         const kind = self.ast.exprKind(id);
         const data = self.ast.exprData(id);
         switch (kind) {
             .int_lit => {
-                const text = self.ast.strings.slice(data);
-                const v = std.fmt.parseInt(i64, text, 10) catch return error.RuntimeFailure;
+                const v = const_eval.intLiteralValue(self.ast.strings.slice(data), false) orelse return error.RuntimeFailure;
                 return Value{ .int_ = v };
             },
             .float_lit => {
-                const text = self.ast.strings.slice(data);
-                const v = std.fmt.parseFloat(f64, text) catch return error.RuntimeFailure;
+                const v = (try const_eval.floatLiteralValue(self.gpa, self.ast.strings.slice(data))) orelse return error.RuntimeFailure;
                 return Value{ .float_ = v };
             },
             .bool_lit => {
@@ -6159,7 +6593,7 @@ pub const Interpreter = struct {
                 // carried so a timer argument can be a full expression
                 // (`after(d)`). `await wait` keeps its own literal-only path
                 // in `evalAwaitTarget`.
-                const secs = durationLiteralSeconds(self.ast.strings.slice(data)) orelse return error.RuntimeFailure;
+                const secs = (try durationLiteralSeconds(self.gpa, self.ast.strings.slice(data))) orelse return error.RuntimeFailure;
                 return Value{ .duration = secs };
             },
             .string_lit => return Value{ .string_id = data },
@@ -6191,7 +6625,7 @@ pub const Interpreter = struct {
                             try out.appendSlice(self.gpa, piece);
                         },
                         .bool_ => |x| try out.appendSlice(self.gpa, if (x) "true" else "false"),
-                        .string_id, .string_run => try out.appendSlice(self.gpa, self.stringBytes(v).?),
+                        .string_id, .string_run, .string_persistent, .string_view => try out.appendSlice(self.gpa, self.stringBytes(v).?),
                         // Any other type is resolver-gated (minimal Display
                         // subset) — fail loud if one slips through.
                         else => return error.RuntimeFailure,
@@ -6218,7 +6652,7 @@ pub const Interpreter = struct {
             .ident => {
                 const name_id: StringId = data;
                 if (locals.get(name_id)) |v| return v;
-                return error.RuntimeFailure;
+                return (try self.constValue(data)) orelse error.RuntimeFailure;
             },
             .field_access => {
                 const fa = self.ast.field_accesses.items[data];
@@ -6234,21 +6668,21 @@ pub const Interpreter = struct {
                     }
                 }
                 const recv = try self.evalExpr(world, locals, fa.receiver);
-                const field_name = self.ast.strings.slice(fa.field_name);
-                switch (recv) {
-                    .component_ref => |cref| return Bridge.readComponentField(&world.registry, cref, world, field_name) catch |e|
-                        self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
-                    .resource_ref => |rref| return Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
-                        self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
-                    // Struct field read — `self.x` / `v.x`.
-                    .struct_ref => |handle| {
-                        for (self.structs.list.items[handle].fields.items) |f| {
-                            if (f.name == fa.field_name) return f.value;
-                        }
-                        return error.RuntimeFailure;
-                    },
-                    else => return error.RuntimeFailure,
+                // `recv?.field`, or a field read after one: `none`, or the
+                // payload's field, optional.
+                if (fa.opt_chain or (recv == .optional and self.ast.inOptionalChain(fa.receiver))) {
+                    if (recv != .optional) return error.RuntimeFailure;
+                    const payload = self.optionals.items[recv.optional] orelse {
+                        const oh: u32 = @intCast(self.optionals.items.len);
+                        try self.optionals.append(self.gpa, null);
+                        return Value{ .optional = oh };
+                    };
+                    const field = try self.fieldOf(world, payload, fa.field_name, id);
+                    if (field == .optional) return field;
+                    try self.retainArena(field);
+                    return self.wrapped(field, 1);
                 }
+                return self.fieldOf(world, recv, fa.field_name, id);
             },
             .method_get, .method_get_mut => {
                 const mg = self.ast.method_gets.items[data];
@@ -6297,7 +6731,9 @@ pub const Interpreter = struct {
                 return switch (b.op) {
                     .add, .sub, .mul, .div, .rem => binaryArith(b.op, lhs, rhs) catch
                         return self.fail(arithFailureKind(b.op, lhs, rhs), self.ast.exprSpan(id)),
-                    .eq, .neq, .lt, .gt, .le, .ge => binaryCompare(b.op, lhs, rhs) catch return error.RuntimeFailure,
+                    .eq => Value{ .bool_ = try self.equalityOf(lhs, rhs) },
+                    .neq => Value{ .bool_ = !try self.equalityOf(lhs, rhs) },
+                    .lt, .gt, .le, .ge => self.orderOf(b.op, lhs, rhs) catch return error.RuntimeFailure,
                     .logical_and => {
                         if (lhs != .bool_ or rhs != .bool_) return error.RuntimeFailure;
                         return Value{ .bool_ = lhs.bool_ and rhs.bool_ };
@@ -6311,10 +6747,14 @@ pub const Interpreter = struct {
             },
             .unary => {
                 const u = self.ast.unary_exprs.items[data];
+                if (u.op == .neg and self.ast.exprKind(u.operand) == .int_lit) {
+                    const text = self.ast.strings.slice(self.ast.exprData(u.operand));
+                    return Value{ .int_ = const_eval.intLiteralValue(text, true) orelse return error.RuntimeFailure };
+                }
                 const v = try self.evalExpr(world, locals, u.operand);
                 return switch (u.op) {
                     .neg => switch (v) {
-                        .int_ => |x| Value{ .int_ = -x },
+                        .int_ => |x| Value{ .int_ = value_mod.intNeg(x) orelse return self.fail(.IntegerOverflow, self.ast.exprSpan(id)) },
                         .float_ => |x| Value{ .float_ = -x },
                         else => error.RuntimeFailure,
                     },
@@ -6354,13 +6794,15 @@ pub const Interpreter = struct {
                     switch (arm.pattern_kind) {
                         .wildcard => return try self.evalExpr(world, locals, arm.body),
                         .binding => {
+                            try locals.enter(self.gpa);
+                            defer locals.leave(self.gpa);
                             try locals.put(self.gpa, arm.pattern_payload, scrut, false);
                             return try self.evalExpr(world, locals, arm.body);
                         },
                         .literal => {
                             const lit: NodeId = @bitCast(arm.pattern_payload);
                             const lit_v = try self.evalExpr(world, locals, lit);
-                            if (scrut.eql(lit_v)) return try self.evalExpr(world, locals, arm.body);
+                            if (self.valueEql(scrut, lit_v)) return try self.evalExpr(world, locals, arm.body);
                         },
                         .enum_variant => {
                             // Compare the scrutinee's enum value against the
@@ -6379,6 +6821,8 @@ pub const Interpreter = struct {
                         .optional_some => {
                             if (scrut != .optional) return error.RuntimeFailure;
                             if (self.optionals.items[scrut.optional]) |payload| {
+                                try locals.enter(self.gpa);
+                                defer locals.leave(self.gpa);
                                 try locals.put(self.gpa, arm.pattern_payload, payload, false);
                                 return try self.evalExpr(world, locals, arm.body);
                             }
@@ -6394,26 +6838,44 @@ pub const Interpreter = struct {
                 return error.RuntimeFailure;
             },
             .cast => {
-                // `operand as Type`. Runtime values
-                // carry int as i64 and float as f64; a cast only flips the
-                // numeric domain (int↔float). Integer width narrowing is a
-                // storage concern handled on write, not in the Value.
+                // `operand as Type` (`etch-grammar.md` §2.6). An int is held as
+                // `i64` and a float as `f64`: a cast to `i32` / `u32` narrows the
+                // value to that width, one to `f32` rounds it to that precision.
                 const c = self.ast.casts.items[data];
                 const v = try self.evalExpr(world, locals, c.operand);
-                const named = self.ast.named_types.items[self.ast.typeNodeData(c.type_node)];
-                const tname = self.ast.strings.slice(self.ast.resolveTypeAliasName(named.name));
-                const to_float = std.mem.eql(u8, tname, "float") or std.mem.eql(u8, tname, "f32") or std.mem.eql(u8, tname, "f64");
-                return switch (v) {
-                    .int_ => |x| if (to_float) Value{ .float_ = @floatFromInt(x) } else Value{ .int_ = x },
-                    .float_ => |x| if (to_float) Value{ .float_ = x } else Value{ .int_ = @intFromFloat(x) },
-                    else => error.RuntimeFailure,
+                const target = self.ast.namedTypeName(c.type_node) orelse return error.RuntimeFailure;
+                const tname = self.ast.strings.slice(self.ast.resolveTypeAliasName(target));
+                const eql = std.mem.eql;
+                const span = self.ast.exprSpan(id);
+                if (eql(u8, tname, "float") or eql(u8, tname, "f64") or eql(u8, tname, "f32")) {
+                    const f: f64 = switch (v) {
+                        .int_ => |x| @floatFromInt(x),
+                        .float_ => |x| x,
+                        else => return error.RuntimeFailure,
+                    };
+                    return Value{ .float_ = if (eql(u8, tname, "f32")) @as(f32, @floatCast(f)) else f };
+                }
+                const narrow = eql(u8, tname, "i32") or eql(u8, tname, "u32");
+                const n: i64 = switch (v) {
+                    .int_ => |x| if (!narrow)
+                        x
+                    else if (eql(u8, tname, "i32"))
+                        value_mod.intNarrow(i32, x) orelse return self.fail(.IntegerOverflow, span)
+                    else
+                        value_mod.intNarrow(u32, x) orelse return self.fail(.IntegerOverflow, span),
+                    .float_ => |x| (if (!narrow)
+                        value_mod.floatTrunc(i64, x)
+                    else if (eql(u8, tname, "i32"))
+                        value_mod.floatTrunc(i32, x)
+                    else
+                        value_mod.floatTrunc(u32, x)) orelse return self.fail(.IntegerOverflow, span),
+                    else => return error.RuntimeFailure,
                 };
+                return Value{ .int_ = n };
             },
             .array_lit => {
                 // `[a, b, c]` / `[v; n]` → materialize a fresh array in the
-                // rule-body collection store, return its handle. Elements
-                // are builtin scalars (the
-                // type-checker rejects non-builtin / nested-array elements).
+                // rule-body collection store, return its handle.
                 const al = self.ast.array_lits.items[data];
                 const handle = try self.collections.newArray(self.gpa);
                 if (al.is_fill) {
@@ -6452,7 +6914,7 @@ pub const Interpreter = struct {
                     const v = try self.evalExpr(world, locals, entry.value);
                     var replaced = false;
                     for (self.collections.maps.items[handle].items) |*pair| {
-                        if (pair.key.eql(k)) {
+                        if (self.valueEql(pair.key, k)) {
                             pair.value = v;
                             replaced = true;
                             break;
@@ -6476,7 +6938,7 @@ pub const Interpreter = struct {
                     const key_v = try self.evalExpr(world, locals, ix.index);
                     var found: ?Value = null;
                     for (self.collections.maps.items[recv.map_ref].items) |pair| {
-                        if (pair.key.eql(key_v)) {
+                        if (self.valueEql(pair.key, key_v)) {
                             found = pair.value;
                             break;
                         }
@@ -6487,25 +6949,37 @@ pub const Interpreter = struct {
                 }
                 if (recv == .map_persistent) {
                     // `m[k] -> V?` on a resource map: byte/value key
-                    // match (keys are promoted `.string_persistent`); the found
-                    // value is a borrowed view (the map owns it, outlives the body).
+                    // match (keys are promoted `.string_persistent`); the optional
+                    // holding the found value counts it.
                     const key_v = try self.evalExpr(world, locals, ix.index);
                     var found: ?Value = null;
                     for (persistentMapOf(recv.map_persistent).items) |pair| {
-                        if (self.collectionKeyEql(pair.key, key_v)) {
+                        if (self.valueEql(pair.key, key_v)) {
                             found = pair.value;
                             break;
                         }
                     }
                     const oh: u32 = @intCast(self.optionals.items.len);
+                    if (found) |fv| try self.retainArena(fv);
                     try self.optionals.append(self.gpa, found);
                     return Value{ .optional = oh };
                 }
                 if (recv == .array_persistent) {
-                    // Single-element read `xs[i]` on a resource collection. Slicing
-                    // a persistent array (`xs[0..3]`) is out of the
-                    // surface (it would need a fresh rule-arena copy).
-                    if (self.ast.exprKind(ix.index) == .range) return error.RuntimeFailure;
+                    if (self.ast.exprKind(ix.index) == .range) {
+                        const r = self.ast.ranges.items[self.ast.exprData(ix.index)];
+                        const start_v = try self.evalExpr(world, locals, r.start);
+                        const end_v = try self.evalExpr(world, locals, r.end);
+                        if (start_v != .int_ or end_v != .int_) return error.RuntimeFailure;
+                        const lo = std.math.cast(usize, start_v.int_) orelse return error.RuntimeFailure;
+                        var hi = std.math.cast(usize, end_v.int_) orelse return error.RuntimeFailure;
+                        if (r.inclusive) hi += 1;
+                        const src = persistentArrayOf(recv.array_persistent).items;
+                        if (lo > hi or hi > src.len) return error.RuntimeFailure;
+                        const handle = try self.collections.newArray(self.gpa);
+                        for (src[lo..hi]) |v| try self.retainArena(v);
+                        try self.collections.arrays.items[handle].appendSlice(self.gpa, src[lo..hi]);
+                        return Value{ .array_ref = handle };
+                    }
                     const list = persistentArrayOf(recv.array_persistent);
                     const idx_v = try self.evalExpr(world, locals, ix.index);
                     if (idx_v != .int_) return error.RuntimeFailure;
@@ -6544,7 +7018,12 @@ pub const Interpreter = struct {
                 var captured: std.AutoHashMapUnmanaged(StringId, Value) = .empty;
                 errdefer captured.deinit(self.gpa);
                 var it = locals.map.iterator();
-                while (it.next()) |e| try captured.put(self.gpa, e.key_ptr.*, e.value_ptr.value);
+                while (it.next()) |e| {
+                    // A captured local can hold a value no evaluation counted,
+                    // such as a loop element.
+                    try self.retainArena(e.value_ptr.value);
+                    try captured.put(self.gpa, e.key_ptr.*, e.value_ptr.value);
+                }
                 const handle = try self.closures.newClosure(self.gpa, id, captured);
                 return Value{ .closure = handle };
             },
@@ -6592,22 +7071,8 @@ pub const Interpreter = struct {
                     const av = try self.evalExpr(world, locals, arg);
                     try frame.put(self.gpa, p.name, av, false);
                 }
-                // The closure call boundary consumes `returning`: a `return`
-                // inside the
-                // body exits the CLOSURE — it becomes the call's value — never
-                // the enclosing fn. Same boundary-consume as `callFn` /
-                // `callMethod`; `thrown` and `break`/`continue` keep
-                // propagating (the enclosing try / loop interprets them) and
-                // the call yields unit.
                 const result = try self.evalExpr(world, &frame, ce.body);
-                if (self.returning) {
-                    self.returning = false;
-                    const rv = self.return_value;
-                    self.return_value = .{ .unit = {} };
-                    return rv;
-                }
-                if (self.thrown or self.control != .none) return Value{ .unit = {} };
-                return result;
+                return self.leaveClosure(result, node);
             },
             .struct_lit => {
                 const sl = self.ast.struct_lits.items[data];
@@ -6656,11 +7121,11 @@ pub const Interpreter = struct {
                     }
                 }
                 const recv = try self.evalExpr(world, locals, mc.receiver);
-                // `recv?.method(args)` — optional chain (part1
+                // `recv?.method(args)`, or a method called after one (part1
                 // §6.6): `none` short-circuits to a fresh `none` without
                 // dispatching; `some(p)` dispatches on the payload and
                 // re-wraps the result in an optional.
-                if (mc.opt_chain) {
+                if (mc.opt_chain or (recv == .optional and self.ast.inOptionalChain(mc.receiver))) {
                     if (recv != .optional) return error.RuntimeFailure;
                     const payload = self.optionals.items[recv.optional] orelse {
                         const oh: u32 = @intCast(self.optionals.items.len);
@@ -6668,9 +7133,8 @@ pub const Interpreter = struct {
                         return Value{ .optional = oh };
                     };
                     const res = try self.dispatchMethodOnValue(world, locals, mc, payload);
-                    const oh: u32 = @intCast(self.optionals.items.len);
-                    try self.optionals.append(self.gpa, res);
-                    return Value{ .optional = oh };
+                    if (res == .optional) return res;
+                    return self.wrapped(res, 1);
                 }
                 return try self.dispatchMethodOnValue(world, locals, mc, recv);
             },
@@ -6681,7 +7145,7 @@ pub const Interpreter = struct {
                 // outer loop propagates (control left set, unit returned).
                 const lp = self.ast.loop_exprs.items[data];
                 while (true) {
-                    try self.execStmtRun(world, locals, lp.body_start, lp.body_len);
+                    try self.execScopedRun(world, locals, lp.body_start, lp.body_len);
                     if (self.thrown or self.returning) return Value{ .unit = {} }; // throw / return unwinds out
                     switch (self.control) {
                         .none => {}, // body completed → loop again (infinite)
@@ -6712,6 +7176,8 @@ pub const Interpreter = struct {
                 // for the enclosing loop / `try` to interpret, and the block
                 // yields `unit`.
                 const blk = self.ast.block_exprs.items[data];
+                try locals.enter(self.gpa);
+                defer locals.leave(self.gpa);
                 try self.execStmtRun(world, locals, blk.body_start, blk.body_len);
                 if (self.control != .none or self.thrown or self.returning) return Value{ .unit = {} };
                 if (blk.value.isNone()) return Value{ .unit = {} };
@@ -6726,9 +7192,13 @@ pub const Interpreter = struct {
                 const m = self.ast.measure_exprs.items[data];
                 const io = self.io orelse return error.RuntimeFailure;
                 const t0 = std.Io.Clock.now(.awake, io);
-                try self.execStmtRun(world, locals, m.body_start, m.body_len);
-                if (!m.value.isNone() and self.control == .none and !self.thrown and !self.returning) {
-                    _ = try self.evalExpr(world, locals, m.value);
+                {
+                    try locals.enter(self.gpa);
+                    defer locals.leave(self.gpa);
+                    try self.execStmtRun(world, locals, m.body_start, m.body_len);
+                    if (!m.value.isNone() and self.control == .none and !self.thrown and !self.returning) {
+                        _ = try self.evalExpr(world, locals, m.value);
+                    }
                 }
                 const t1 = std.Io.Clock.now(.awake, io);
                 const ns: u64 = @intCast(@max(@as(i96, 0), t0.durationTo(t1).nanoseconds));
@@ -6743,6 +7213,8 @@ pub const Interpreter = struct {
                     const opt = try self.evalExpr(world, locals, ife.cond);
                     if (opt != .optional) return error.RuntimeFailure;
                     if (self.optionals.items[opt.optional]) |payload| {
+                        try locals.enter(self.gpa);
+                        defer locals.leave(self.gpa);
                         try locals.put(self.gpa, ife.let_binding, payload, false);
                         return try self.evalExpr(world, locals, ife.then_block);
                     }
@@ -6783,7 +7255,12 @@ pub const Interpreter = struct {
                 try dbuf.commands.append(dbuf.gpa, .{ .spawn = .{ .component_ids = ids, .payloads = payloads } });
                 return Value{ .unit = {} };
             },
-            else => return error.RuntimeFailure, // path / tag_path / unsupported variants
+            .path => return (try self.constValue(data)) orelse error.RuntimeFailure,
+            .tag_path => {
+                const enum_name = self.ast.shorthandEnum(id) orelse return error.RuntimeFailure;
+                return self.evalEnumShorthandFor(world, locals, id, enum_name);
+            },
+            else => return error.RuntimeFailure, // unsupported variants
         }
     }
 };
@@ -6861,8 +7338,8 @@ fn bindParams(
     while (i < rule.params_len) : (i += 1) {
         const p = ast.rule_params.items[rule.params_start + i];
         const v: Value = blk: {
-            const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
-            const tname = ast.strings.slice(tnode.name);
+            const declared = ast.namedTypeName(p.type_node) orelse break :blk Value{ .unit = {} };
+            const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
             if (std.mem.eql(u8, tname, "Entity")) {
                 if (entity_id) |id| break :blk Value{ .entity_id = id };
                 break :blk Value{ .entity_id = value_mod.invalid_entity };
@@ -6876,6 +7353,20 @@ fn bindParams(
         };
         try locals.put(gpa, p.name, v, false);
     }
+}
+
+/// Classify an `applyAssignOp` failure the way `arithFailureKind` classifies the
+/// binary operator the assignment applies.
+fn assignFailureKind(op: ast_mod.AssignOp, cur: Value, rhs: Value) RuntimeErrorKind {
+    const bin: ast_mod.BinaryOp = switch (op) {
+        .assign => return .UnsupportedExpr,
+        .add_assign => .add,
+        .sub_assign => .sub,
+        .mul_assign => .mul,
+        .div_assign => .div,
+        .rem_assign => .rem,
+    };
+    return arithFailureKind(bin, cur, rhs);
 }
 
 fn applyAssignOp(cur: Value, op: ast_mod.AssignOp, rhs: Value) !Value {
@@ -6899,6 +7390,7 @@ fn bridgeFailureKind(err: anyerror) RuntimeErrorKind {
     return switch (err) {
         error.TypeMismatch => .TypeMismatch,
         error.StaleComponentRef => .StaleComponentRef,
+        error.IntegerOverflow => .IntegerOverflow,
         else => .UnsupportedExpr,
     };
 }
@@ -6916,6 +7408,8 @@ fn defaultFailureMessage(kind: RuntimeErrorKind) []const u8 {
         .UncaughtThrow => "uncaught throw",
         .AssertFailed => "assertion failed",
         .StaleComponentRef => "component ref outlived its entity",
+        .ExtensionOpFailed => "extension activation or deactivation failed",
+        .ControlFlowEscapesClosure => "a break or continue left its closure",
     };
 }
 
@@ -6939,9 +7433,9 @@ fn arithFailureKind(op: ast_mod.BinaryOp, a: Value, b: Value) RuntimeErrorKind {
 fn binaryArith(op: ast_mod.BinaryOp, a: Value, b: Value) !Value {
     if (a == .int_ and b == .int_) {
         return switch (op) {
-            .add => Value{ .int_ = value_mod.intAddChecked(a.int_, b.int_) orelse return error.RuntimeFailure },
-            .sub => Value{ .int_ = value_mod.intSubChecked(a.int_, b.int_) orelse return error.RuntimeFailure },
-            .mul => Value{ .int_ = value_mod.intMulChecked(a.int_, b.int_) orelse return error.RuntimeFailure },
+            .add => Value{ .int_ = value_mod.intAdd(a.int_, b.int_) orelse return error.RuntimeFailure },
+            .sub => Value{ .int_ = value_mod.intSub(a.int_, b.int_) orelse return error.RuntimeFailure },
+            .mul => Value{ .int_ = value_mod.intMul(a.int_, b.int_) orelse return error.RuntimeFailure },
             .div => Value{ .int_ = value_mod.intDiv(a.int_, b.int_) orelse return error.RuntimeFailure },
             .rem => Value{ .int_ = value_mod.intRem(a.int_, b.int_) orelse return error.RuntimeFailure },
             else => unreachable,
@@ -7013,91 +7507,321 @@ fn binaryCompare(op: ast_mod.BinaryOp, a: Value, b: Value) !Value {
 
 // ── Const evaluator ──
 
-/// Pure constant-folding evaluator over an Etch AST subtree. Used
-/// by the type-checker for `const` resolution and by `codegen` to
-/// pre-evaluate literal expressions during lowering.
-pub fn evalConst(ast: *const AstArena, node: NodeId) !Value {
-    const kind = ast.exprKind(node);
-    const data = ast.exprData(node);
-    switch (kind) {
-        .int_lit => return Value{ .int_ = try std.fmt.parseInt(i64, ast.strings.slice(data), 10) },
-        .float_lit => return Value{ .float_ = try std.fmt.parseFloat(f64, ast.strings.slice(data)) },
-        .bool_lit => return Value{ .bool_ = std.mem.eql(u8, ast.strings.slice(data), "true") },
-        .binary => {
-            const b = ast.binary_exprs.items[data];
-            const a = try evalConst(ast, b.lhs);
-            const c = try evalConst(ast, b.rhs);
-            return switch (b.op) {
-                .add, .sub, .mul, .div, .rem => binaryArith(b.op, a, c) catch return error.NotConstEvaluable,
-                .eq, .neq, .lt, .gt, .le, .ge => binaryCompare(b.op, a, c) catch return error.NotConstEvaluable,
-                else => return error.NotConstEvaluable,
-            };
-        },
-        .unary => {
-            const u = ast.unary_exprs.items[data];
-            const v = try evalConst(ast, u.operand);
-            return switch (u.op) {
-                .neg => switch (v) {
-                    .int_ => |x| Value{ .int_ = -x },
-                    .float_ => |x| Value{ .float_ = -x },
-                    else => return error.NotConstEvaluable,
-                },
-                .logical_not => switch (v) {
-                    .bool_ => |x| Value{ .bool_ = !x },
-                    else => return error.NotConstEvaluable,
-                },
-                // `expr!` needs the runtime optional store — never const.
-                .force_unwrap => return error.NotConstEvaluable,
-            };
-        },
-        else => return error.UnsupportedExpr,
-    }
+/// Folds a constant expression through `const_eval.fold`, the folder the
+/// checker admits constants with.
+pub fn evalConst(gpa: std.mem.Allocator, ast: *const AstArena, node: NodeId) const_eval.FoldError!Value {
+    return switch (try const_eval.fold(gpa, ast, node)) {
+        .int_ => |x| .{ .int_ = x },
+        .float_ => |x| .{ .float_ = x },
+        .bool_ => |x| .{ .bool_ = x },
+    };
 }
 
 // ── Compilation passes ──
 
-fn compileComponent(
+/// Every registration one `compile` makes, prepared before the world is touched:
+/// `entries[i]` is committed under id `base_id + i`, and `resources[i]` holds its
+/// store buffer when it is a resource.
+const PendingTypes = struct {
+    base_id: ComponentId,
+    entries: std.ArrayListUnmanaged(PreparedEntry) = .empty,
+    resources: std.ArrayListUnmanaged(?PendingResource) = .empty,
+
+    /// Releases whatever is still owned: everything before `commit`, nothing after.
+    fn deinit(self: *PendingTypes, gpa: std.mem.Allocator) void {
+        for (self.entries.items) |*e| e.deinit(gpa);
+        for (self.resources.items) |*r| {
+            if (r.*) |*res| res.deinit(gpa);
+        }
+        self.entries.deinit(gpa);
+        self.resources.deinit(gpa);
+    }
+
+    fn nextId(self: *const PendingTypes) ComponentId {
+        return self.base_id + @as(ComponentId, @intCast(self.entries.items.len));
+    }
+
+    fn idOf(self: *const PendingTypes, name: []const u8) ?ComponentId {
+        for (self.entries.items, 0..) |*e, i| {
+            if (std.mem.eql(u8, e.name(), name)) return self.base_id + @as(ComponentId, @intCast(i));
+        }
+        return null;
+    }
+
+    fn entryOf(self: *PendingTypes, id: ComponentId) *PreparedEntry {
+        return &self.entries.items[id - self.base_id];
+    }
+
+    /// Takes ownership of `entry` and `resource` on success only.
+    fn push(self: *PendingTypes, gpa: std.mem.Allocator, entry: PreparedEntry, resource: ?PendingResource) !void {
+        try self.entries.ensureUnusedCapacity(gpa, 1);
+        try self.resources.ensureUnusedCapacity(gpa, 1);
+        self.entries.appendAssumeCapacity(entry);
+        self.resources.appendAssumeCapacity(resource);
+    }
+
+    fn resourceCount(self: *const PendingTypes) usize {
+        var n: usize = 0;
+        for (self.resources.items) |r| {
+            if (r != null) n += 1;
+        }
+        return n;
+    }
+
+    /// Adopt every entry, resource and closure into `world` and leave `self`
+    /// empty. Cannot fail: requires room reserved for every entry and resource,
+    /// and `closures` staged over `entries`.
+    fn commit(self: *PendingTypes, gpa: std.mem.Allocator, world: *World, closures: StagedClosures) void {
+        for (self.entries.items, self.resources.items, 0..) |e, r, i| {
+            const id = world.registry.commitPrepared(e);
+            std.debug.assert(id == self.base_id + i);
+            if (r) |res| {
+                world.resources.adoptAssumeCapacity(id, res.buf);
+                // A resource with a collection field starts dirty.
+                if (res.collection_blocks.len != 0) {
+                    world.resources.setDirty(id, true);
+                    gpa.free(res.collection_blocks);
+                }
+            }
+        }
+        world.registry.commitClosures(gpa, closures);
+        self.entries.clearRetainingCapacity();
+        self.resources.clearRetainingCapacity();
+    }
+};
+
+/// A resource's store buffer — its default bytes, each collection slot pointing
+/// at a fresh container — and those containers, released if never committed.
+const PendingResource = struct {
+    buf: ResourceStore.Buffer,
+    collection_blocks: []const [*]u8,
+
+    fn deinit(self: *PendingResource, gpa: std.mem.Allocator) void {
+        for (self.collection_blocks) |b| persistent.decref(gpa, b);
+        if (self.collection_blocks.len != 0) gpa.free(self.collection_blocks);
+        gpa.free(self.buf);
+    }
+};
+
+/// What registration reads of a `component` or `resource` declaration.
+const DeclShape = struct {
+    name: []const u8,
+    fields_start: u32,
+    fields_len: u32,
+    reg_kind: RegKind,
+    requires: []const []const u8,
+    storage: StorageKind,
+};
+
+/// Register every type the program declares, then the builtin `TagSet` and the
+/// builtin time resources, and compute every `@requires` closure — or fail
+/// having changed nothing in `world`. Returns the `TagSet` id when the program
+/// declares a tag.
+fn registerProgramTypes(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
     world: *World,
     bridge: *Bridge,
-    decl: ast_mod.ComponentDecl,
-    literals: *std.ArrayListUnmanaged([*]u8),
-) !void {
-    const name = ast.strings.slice(decl.name);
-    const req = try types_mod.requiresNamesOf(gpa, ast, decl);
-    defer gpa.free(req);
-    _ = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .component, req, types_mod.storageModeOf(ast, decl), literals);
+    tag_table: *const tags_mod.TagTable,
+) !?ComponentId {
+    var pending: PendingTypes = .{ .base_id = @intCast(world.registry.componentCount()) };
+    defer pending.deinit(gpa);
+
+    var i: u28 = 0;
+    while (i < ast.items.len) : (i += 1) {
+        const data = ast.items.items(.data)[i];
+        switch (ast.items.items(.kind)[i]) {
+            .component_decl => {
+                const decl = ast.component_decls.items[data];
+                const req = try types_mod.requiresNamesOf(gpa, ast, decl);
+                defer gpa.free(req);
+                try stageDecl(gpa, ast, world, bridge, &pending, .{
+                    .name = ast.strings.slice(decl.name),
+                    .fields_start = decl.fields_start,
+                    .fields_len = decl.fields_len,
+                    .reg_kind = .component,
+                    .requires = req,
+                    .storage = types_mod.storageModeOf(ast, decl),
+                }, null);
+            },
+            .resource_decl => {
+                const decl = ast.resource_decls.items[data];
+                // `@storage` and `@requires` apply to `component` only.
+                try stageDecl(gpa, ast, world, bridge, &pending, .{
+                    .name = ast.strings.slice(decl.name),
+                    .fields_start = decl.fields_start,
+                    .fields_len = decl.fields_len,
+                    .reg_kind = .resource,
+                    .requires = &.{},
+                    .storage = .table,
+                }, decl);
+            },
+            else => {},
+        }
+    }
+    const tagset_id = try stageTagSet(gpa, world, bridge, &pending, tag_table);
+    for (&types_mod.builtin_resources) |*br| try stageBuiltinResource(gpa, world, bridge, &pending, br);
+
+    var closures = try world.registry.stageClosures(gpa, pending.entries.items);
+    errdefer closures.deinit(gpa);
+    try world.registry.reserve(gpa, pending.entries.items.len);
+    try world.resources.reserve(gpa, pending.resourceCount());
+    pending.commit(gpa, world, closures);
+    return tagset_id;
 }
 
-fn compileResource(
+/// Stage one declaration: confront it with the registered or already staged type
+/// holding its name, or prepare its entry and, for a resource, its store buffer.
+fn stageDecl(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
     world: *World,
     bridge: *Bridge,
-    decl: ast_mod.ResourceDecl,
-    literals: *std.ArrayListUnmanaged([*]u8),
+    pending: *PendingTypes,
+    shape: DeclShape,
+    resource_decl: ?ast_mod.ResourceDecl,
 ) !void {
-    const name = ast.strings.slice(decl.name);
-    // On a hot-reload re-compile the resource is already registered
-    // AND already lives in the resource store with its current value — adding
-    // it again would reset it to defaults. Seed the store only on first compile.
-    const pre_existing = world.registry.idOf(name) != null;
-    // `.table` and not a resolved mode: `@storage` applies to `component` only
-    // (`annotationAppliesTo`, refused on a resource with `E0502`), so a resource
-    // has no mode to read. Passing the default here states that rather than
-    // leaving a reader to infer it from the absence of a call.
-    // A resource carries no `@requires`: the annotation's applicability is
-    // validated to `component` only (`types.zig`), so an empty list here is the
-    // domain's answer and not a shortcut.
-    const id = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .resource, &.{}, .table, literals);
-    if (!pre_existing) {
-        const default_bytes = world.registry.componentDefaultBytes(id);
-        try world.addResource(gpa, id, default_bytes);
-        // Allocate the resource's collection field containers now
-        // that the store slot exists. On a hot-reload re-compile (`pre_existing`)
-        // the resource keeps its live containers, so this runs first-compile only.
-        try initResourceCollections(gpa, ast, world, id, decl);
+    if (world.registry.idOf(shape.name)) |existing| {
+        try confrontLayout(gpa, ast, shape, liveLayoutOf(&world.registry, existing));
+        return mapName(gpa, bridge, shape.reg_kind, shape.name, existing);
+    }
+    if (pending.idOf(shape.name)) |staged| {
+        const e = pending.entryOf(staged);
+        try confrontLayout(gpa, ast, shape, .{
+            .digest = e.schemaDigest(),
+            .size = e.size(),
+            .alignment = e.alignment(),
+            .fields_len = e.fields().len,
+            .kind = e.kind(),
+            .requires = e.requires(),
+        });
+        return mapName(gpa, bridge, shape.reg_kind, shape.name, staged);
+    }
+    if (resource_decl != null and world.resources.contains(pending.nextId())) return error.DuplicateResource;
+    var entry = try prepareTypeEntry(gpa, ast, &world.registry, shape);
+    errdefer entry.deinit(gpa);
+    var resource: ?PendingResource = null;
+    errdefer if (resource) |*r| r.deinit(gpa);
+    if (resource_decl) |decl| resource = try prepareResourceBuffer(gpa, ast, &entry, decl);
+    try mapName(gpa, bridge, shape.reg_kind, shape.name, pending.nextId());
+    try pending.push(gpa, entry, resource);
+}
+
+/// Stage the builtin `TagSet` when the program declares any tag, confronting the
+/// type already holding the name. Returns its id, committed or staged.
+fn stageTagSet(
+    gpa: std.mem.Allocator,
+    world: *World,
+    bridge: *Bridge,
+    pending: *PendingTypes,
+    tag_table: *const tags_mod.TagTable,
+) !?ComponentId {
+    if (tag_table.leaf_count == 0) return null;
+    const size: u16 = @intCast(tag_table.words() * 8);
+    const content_digest = try tag_table.contentDigest(gpa);
+    const candidate = weld_core.ecs.registry.schemaDigestOf(tagSetDesc(size, &.{}, content_digest));
+
+    const holder: ?ComponentId = world.registry.idOf(tagset_name) orelse pending.idOf(tagset_name);
+    if (holder) |id| {
+        const live: LiveLayout = if (id < pending.base_id) liveLayoutOf(&world.registry, id) else blk: {
+            const e = pending.entryOf(id);
+            break :blk .{
+                .digest = e.schemaDigest(),
+                .size = e.size(),
+                .alignment = e.alignment(),
+                .fields_len = e.fields().len,
+                .kind = e.kind(),
+                .requires = e.requires(),
+            };
+        };
+        // An absent digest refuses: an unknown layout is not a matching one.
+        if (live.kind != .component or (live.digest orelse ~candidate) != candidate) {
+            std.log.warn(
+                "etch/hot-reload: '" ++ tagset_name ++ "' changed layout, kind or tag identity — reload REFUSED, " ++
+                    "previous image kept. live: size={d}; new: size={d} ({d} tag(s)). " ++
+                    "An unchanged size means the tags themselves were renamed or reordered.",
+                .{ live.size, size, tag_table.leaf_count },
+            );
+            return error.SchemaChanged;
+        }
+        try bridge.mapComponent(gpa, tagset_name, id);
+        return id;
+    }
+
+    const zeroed = try gpa.alloc(u8, size);
+    defer gpa.free(zeroed);
+    @memset(zeroed, 0);
+    var entry = try world.registry.prepareEntry(gpa, tagSetDesc(size, zeroed, content_digest));
+    errdefer entry.deinit(gpa);
+    const id = pending.nextId();
+    try bridge.mapComponent(gpa, tagset_name, id);
+    try pending.push(gpa, entry, null);
+    return id;
+}
+
+/// Stage a builtin time resource unless a type already holds its name.
+fn stageBuiltinResource(
+    gpa: std.mem.Allocator,
+    world: *World,
+    bridge: *Bridge,
+    pending: *PendingTypes,
+    br: *const types_mod.BuiltinResource,
+) !void {
+    var fields_buf: [8]FieldDesc = undefined;
+    var default_buf: [64]u8 = @splat(0);
+    var size: usize = 0;
+    var max_align: usize = 1;
+    for (br.fields, 0..) |bf, fi| {
+        const kind: FieldKind = switch (bf.type_) {
+            .float_ => .float_,
+            .int_ => .int_,
+            .bool_ => .bool_,
+            else => unreachable, // the table holds POD scalars only
+        };
+        const align_b = kind.alignBytes();
+        if (align_b > max_align) max_align = align_b;
+        const off = std.mem.alignForward(usize, size, align_b);
+        size = off + kind.sizeBytes();
+        fields_buf[fi] = .{ .name = bf.name, .offset = @intCast(off), .kind = kind };
+        const v: Value = switch (bf.default) {
+            .float_ => |x| .{ .float_ = x },
+            .int_ => |x| .{ .int_ = x },
+            .bool_ => |x| .{ .bool_ = x },
+        };
+        try bridge_mod.writeValueAsBytes(kind, default_buf[off..], v);
+    }
+    size = std.mem.alignForward(usize, size, max_align);
+    const desc: weld_core.ecs.registry.ComponentDesc = .{
+        .name = br.name,
+        .size = @intCast(size),
+        .alignment = @intCast(max_align),
+        .default_bytes = default_buf[0..size],
+        .fields = fields_buf[0..br.fields.len],
+        .kind = .resource,
+    };
+    // The name may already be held; the holder must be this resource.
+    if (world.registry.idOf(br.name)) |id| {
+        if (world.registry.componentKind(id) != .resource or world.registry.schemaDigest(id) != weld_core.ecs.registry.schemaDigestOf(desc)) return error.SchemaChanged;
+        return bridge.mapResource(gpa, br.name, id);
+    }
+    if (pending.idOf(br.name)) |id| {
+        const e = pending.entryOf(id);
+        if (e.kind() != .resource or e.schemaDigest() != weld_core.ecs.registry.schemaDigestOf(desc)) return error.SchemaChanged;
+        return bridge.mapResource(gpa, br.name, id);
+    }
+    if (world.resources.contains(pending.nextId())) return error.DuplicateResource;
+    var entry = try world.registry.prepareEntry(gpa, desc);
+    errdefer entry.deinit(gpa);
+    var resource: PendingResource = .{ .buf = try ResourceStore.allocBuffer(gpa, entry.defaultBytes()), .collection_blocks = &.{} };
+    errdefer resource.deinit(gpa);
+    try bridge.mapResource(gpa, br.name, pending.nextId());
+    try pending.push(gpa, entry, resource);
+}
+
+fn mapName(gpa: std.mem.Allocator, bridge: *Bridge, reg_kind: RegKind, name: []const u8, id: ComponentId) !void {
+    switch (reg_kind) {
+        .component => try bridge.mapComponent(gpa, name, id),
+        .resource => try bridge.mapResource(gpa, name, id),
     }
 }
 
@@ -7199,88 +7923,143 @@ fn dropPersistentMap(gpa: std.mem.Allocator, p: [*]u8, size: usize) void {
     list.deinit(gpa);
 }
 
-/// Const-evaluate a literal-default collection entry for storage: a
-/// string literal is deep-copied into an owned persistent string; any other
-/// const expression is `evalConst`'d (POD inline). Errors on a non-const entry.
-fn constCollectionValue(gpa: std.mem.Allocator, ast: *const AstArena, node: NodeId) !Value {
-    if (ast.exprKind(node) == .string_lit) return ownBytesAsPersistentString(gpa, ast.strings.slice(ast.exprData(node)));
-    return evalConst(ast, node);
+/// One element of a collection default, stored: a string literal as an owned
+/// persistent string, a `.variant` as its value in the element enum
+/// `elem_enum`, any other constant as `evalConst` folds it. The checker admits
+/// nothing else, so anything else is `error.InvalidProgram`.
+fn constCollectionValue(gpa: std.mem.Allocator, ast: *const AstArena, node: NodeId, elem_enum: ?StringId) !Value {
+    switch (ast.exprKind(node)) {
+        .string_lit => return ownBytesAsPersistentString(gpa, ast.strings.slice(ast.exprData(node))),
+        .tag_path => {
+            const ename = elem_enum orelse return error.InvalidProgram;
+            const edecl = findEnumDecl(ast, ename) orelse return error.InvalidProgram;
+            const vidx = enumVariantIndex(ast, edecl, ast.exprData(node)) orelse return error.InvalidProgram;
+            return Value{ .enum_value = .{ .type_name = ename, .variant = vidx } };
+        },
+        else => return evalConst(gpa, ast, node) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidProgram,
+        },
+    }
 }
 
-/// Build a `type_array` container for a resource field: empty, or a literal-array
-/// default (`= [...]`) with elements deep-copied.
-fn initArrayBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) std.mem.Allocator.Error![*]u8 {
+/// The declared enum a collection element type node names, or null.
+fn collectionElemEnum(ast: *const AstArena, elem: NodeId) ?StringId {
+    const name = ast.resolveTypeAliasName(ast.namedTypeName(elem) orelse return null);
+    return if (findEnumDecl(ast, name) != null) name else null;
+}
+
+/// Bytes of a `.string_persistent` value (empty otherwise).
+fn persistentStrBytes(v: Value) []const u8 {
+    return switch (v) {
+        .string_persistent => |s| if (s.len == 0) "" else @as([*]const u8, @ptrFromInt(s.ptr))[0..s.len],
+        else => "",
+    };
+}
+
+/// Whether two keys of a default map are one key: strings by their bytes.
+fn defaultKeyEql(a: Value, b: Value) bool {
+    if (a == .string_persistent and b == .string_persistent) return std.mem.eql(u8, persistentStrBytes(a), persistentStrBytes(b));
+    return a.eql(b);
+}
+
+fn dropDefaultValue(gpa: std.mem.Allocator, v: Value) void {
+    if (v == .string_persistent and v.string_persistent.ptr != 0) persistent.decref(gpa, @ptrFromInt(v.string_persistent.ptr));
+}
+
+/// Build a `type_array` container for a resource field: empty, or its array
+/// literal default (`[a, b]`, or `[v; n]` as `n` copies) with elements
+/// deep-copied.
+fn initArrayBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) ![*]u8 {
     const block = try allocEmptyArrayBlock(gpa);
     errdefer persistent.decref(gpa, block);
-    if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .array_lit) {
-        const al = ast.array_lits.items[ast.exprData(f.default_value)];
-        const list: *PersistentArray = @ptrCast(@alignCast(block));
-        var e_i: u32 = 0;
-        while (e_i < al.elements_len) : (e_i += 1) {
-            const en: NodeId = @bitCast(ast.extra.items[al.elements_start + e_i]);
-            // Reserve before promoting so a string allocation never dangles on an
-            // append-time OOM (the block's errdefer drops appended elements).
-            try list.ensureUnusedCapacity(gpa, 1);
-            const ev = constCollectionValue(gpa, ast, en) catch continue;
-            list.appendAssumeCapacity(ev);
-        }
+    if (f.default_value.isNone()) return block;
+    if (ast.exprKind(f.default_value) != .array_lit) return error.InvalidProgram;
+    const al = ast.array_lits.items[ast.exprData(f.default_value)];
+    const elem_enum = collectionElemEnum(ast, ast.array_types.items[ast.typeNodeData(f.type_node)].elem);
+    const count: usize = if (!al.is_fill) al.elements_len else blk: {
+        if (ast.exprKind(al.fill_count) != .int_lit) return error.InvalidProgram;
+        break :blk const_eval.intLiteralMagnitude(ast.strings.slice(ast.exprData(al.fill_count))) orelse return error.InvalidProgram;
+    };
+    const list: *PersistentArray = @ptrCast(@alignCast(block));
+    var e_i: usize = 0;
+    while (e_i < count) : (e_i += 1) {
+        const en: NodeId = @bitCast(ast.extra.items[al.elements_start + if (al.is_fill) 0 else e_i]);
+        // Reserve before promoting so a string allocation never dangles on an
+        // append-time OOM (the block's errdefer drops appended elements).
+        try list.ensureUnusedCapacity(gpa, 1);
+        list.appendAssumeCapacity(try constCollectionValue(gpa, ast, en, elem_enum));
     }
     return block;
 }
 
-/// Build a `type_map` container for a resource field: empty, or a literal-map
-/// default (`= [k: v, …]`) with keys+values deep-copied. Entries are
-/// appended in order; a degenerate duplicate key in the literal yields duplicate
-/// pairs (runtime `insert` is the last-write-wins path).
-fn initMapBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) std.mem.Allocator.Error![*]u8 {
+/// Build a `type_map` container for a resource field: empty, or its map
+/// literal default with keys and values deep-copied. A repeated key keeps its
+/// last value, as the runtime map literal does.
+fn initMapBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) ![*]u8 {
     const block = try allocEmptyMapBlock(gpa);
     errdefer persistent.decref(gpa, block);
-    if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .map_lit) {
-        const ml = ast.map_lits.items[ast.exprData(f.default_value)];
-        const list: *PersistentMap = @ptrCast(@alignCast(block));
-        var e_i: u32 = 0;
-        while (e_i < ml.entries_len) : (e_i += 1) {
-            const entry = ast.map_entries.items[ml.entries_start + e_i];
-            try list.ensureUnusedCapacity(gpa, 1);
-            const kv = constCollectionValue(gpa, ast, entry.key) catch continue;
-            const vv = constCollectionValue(gpa, ast, entry.value) catch {
-                if (kv == .string_persistent and kv.string_persistent.ptr != 0) persistent.decref(gpa, @ptrFromInt(kv.string_persistent.ptr));
-                continue;
-            };
-            list.appendAssumeCapacity(.{ .key = kv, .value = vv });
+    if (f.default_value.isNone()) return block;
+    if (ast.exprKind(f.default_value) != .map_lit) return error.InvalidProgram;
+    const mt = ast.map_types.items[ast.typeNodeData(f.type_node)];
+    const key_enum = collectionElemEnum(ast, mt.key);
+    const value_enum = collectionElemEnum(ast, mt.value);
+    const ml = ast.map_lits.items[ast.exprData(f.default_value)];
+    const list: *PersistentMap = @ptrCast(@alignCast(block));
+    var e_i: u32 = 0;
+    entries: while (e_i < ml.entries_len) : (e_i += 1) {
+        const entry = ast.map_entries.items[ml.entries_start + e_i];
+        try list.ensureUnusedCapacity(gpa, 1);
+        const kv = try constCollectionValue(gpa, ast, entry.key, key_enum);
+        const vv = constCollectionValue(gpa, ast, entry.value, value_enum) catch |e| {
+            dropDefaultValue(gpa, kv);
+            return e;
+        };
+        for (list.items) |*pair| {
+            if (!defaultKeyEql(pair.key, kv)) continue;
+            dropDefaultValue(gpa, kv);
+            dropDefaultValue(gpa, pair.value);
+            pair.value = vv;
+            continue :entries;
         }
+        list.appendAssumeCapacity(.{ .key = kv, .value = vv });
     }
     return block;
 }
 
-/// Initialize a resource's collection fields right after the resource is seeded
-/// into the store: `.array_` → `type_array`,
-/// `.map_` → `type_map`. Each field gets a fresh container written into its
-/// `CollectionSlot` (empty or a literal default), so a live collection field's
-/// slot is never `ptr == 0` (the read path relies on this). Registry field order
-/// matches `decl.fields` 1:1.
-fn initResourceCollections(gpa: std.mem.Allocator, ast: *const AstArena, world: *World, id: ComponentId, decl: ast_mod.ResourceDecl) !void {
-    const fields = world.registry.componentFields(id);
-    for (fields, 0..) |fd, i| {
+/// A resource's store buffer: its default bytes, with every collection slot
+/// pointing at a fresh container, empty or holding the field's literal default.
+/// Registry field order matches `decl.fields` 1:1.
+fn prepareResourceBuffer(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    entry: *const PreparedEntry,
+    decl: ast_mod.ResourceDecl,
+) !PendingResource {
+    const buf = try ResourceStore.allocBuffer(gpa, entry.defaultBytes());
+    errdefer gpa.free(buf);
+    var blocks: std.ArrayListUnmanaged([*]u8) = .empty;
+    errdefer {
+        for (blocks.items) |b| persistent.decref(gpa, b);
+        blocks.deinit(gpa);
+    }
+    for (entry.fields(), 0..) |fd, i| {
+        if (fd.kind != .array_ and fd.kind != .map_ and fd.kind != .set_) continue;
         const f = ast.fields.items[decl.fields_start + i];
+        try blocks.ensureUnusedCapacity(gpa, 1);
         const block: [*]u8 = switch (fd.kind) {
             .array_ => try initArrayBlock(gpa, ast, f),
             .map_ => try initMapBlock(gpa, ast, f),
-            // A set has no literal form (`etch-reference-part1.md` §3.3), so a set
-            // field always starts empty (a `= Set.new()`/`Set.from(...)` default
-            // is a non-const call, not materialized here).
-            .set_ => try allocEmptySetBlock(gpa),
-            else => continue,
+            else => blk: {
+                if (!f.default_value.isNone() and !types_mod.isEmptySetConstructor(ast, f.default_value)) return error.InvalidProgram;
+                break :blk try allocEmptySetBlock(gpa);
+            },
         };
-        errdefer persistent.decref(gpa, block);
-        const buf = world.resources.getMutResource(id) orelse {
-            persistent.decref(gpa, block);
-            return;
-        };
-        const slot = buf[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)];
+        blocks.appendAssumeCapacity(block);
         const cs = persistent.CollectionSlot{ .ptr = @intFromPtr(block) };
-        @memcpy(slot, std.mem.asBytes(&cs));
+        @memcpy(buf[fd.offset..][0..@sizeOf(persistent.CollectionSlot)], std.mem.asBytes(&cs));
     }
+    return .{ .buf = buf, .collection_blocks = try blocks.toOwnedSlice(gpa) };
 }
 
 /// Registration origin threaded into `compileTypeDecl`: `.resource` unlocks the
@@ -7288,159 +8067,82 @@ fn initResourceCollections(gpa: std.mem.Allocator, ast: *const AstArena, world: 
 /// `pub` so the scene cook can drive `compileTypeDecl` against its own registry.
 pub const RegKind = enum { component, resource };
 
-/// The `TagSet` descriptor, derived in ONE place. Both the pre-pass and the
-/// registration arm read it, for the reason `schemaDigestFor` exists: a builtin
-/// whose layout is computed twice is a builtin whose two computations can differ,
-/// and that difference IS the defect this milestone closed at the reuse arm.
-///
-/// `default_bytes` is the caller's, because `registerComponentRaw` stores it; the
-/// digest does not read it (see `schemaDigestFor`).
-fn tagSetDesc(size: u16, default_bytes: []const u8) weld_core.ecs.registry.ComponentDesc {
+/// The `TagSet` descriptor, for both the confrontation and the registration: one
+/// derivation, so the two cannot differ. `content_digest` must be
+/// `TagTable.contentDigest` of the table `size` came from.
+fn tagSetDesc(size: u16, default_bytes: []const u8, content_digest: u64) weld_core.ecs.registry.ComponentDesc {
     return .{
-        .name = "TagSet",
+        .name = tagset_name,
         .size = size,
         .alignment = 8,
         .default_bytes = default_bytes,
         .fields = &.{},
+        .content_digest = content_digest,
     };
 }
 
-/// Confront every schema this program declares against the live registry BEFORE
-/// the first registration.
-///
-/// **A refusal per declaration is not a refusal.** `compileTypeDecl` refuses a
-/// changed layout where it meets it, and Pass A walks declarations in order, so a
-/// program whose third type changed left the first two registered in a world that
-/// then kept running the PREVIOUS program — components belonging to an image that
-/// was rejected, permanently, with nothing announcing them. The `TagSet` arm is
-/// worse still: it runs AFTER the whole of Pass A, so a reload that merely crossed
-/// a 64-tag word boundary stranded every type the program declares.
-///
-/// The requirement a refusal exists to serve is that the previous image survive
-/// it. Intact is a property of the WORLD and not of the declaration being
-/// examined, so the check belongs where the world is still untouched.
-///
-/// WHAT THIS PASS DOES NOT COVER, and it is named rather than implied: an
-/// `OutOfMemory` in the middle of Pass A still leaves a half-registration. That is
-/// a different failure — exhaustion, not a layout change — with its own remedies,
-/// and closing it means a rollback path the registry has never had. This pass
-/// makes the SchemaChanged path total; it does not make registration
-/// transactional.
-///
-/// The builtin time resources are deliberately absent, and the honest reason is
-/// narrower than "their descriptor is a constant". It IS one — `types.zig`'s
-/// `builtin_resources` — but that says nothing about what is registered under
-/// those NAMES, since nothing reserves them. What excludes them is that this pass
-/// walks the PROGRAM's declarations and the builtins are not among them: their own
-/// registration arm is first-compile-only (`idOf` → map → `continue`), so a reload
-/// mutates nothing there and there is no half-registration to prevent.
-///
-/// A residual that is NOT this pass's and predates it: a program declaring a
-/// `resource GameTime` of its own registers under that name in Pass A, the builtin
-/// arm then takes its `continue`, and the `findField(gid, "dt").?` that follows
-/// unwraps a field the user's type need not have. That is a missing name
-/// reservation, and it fails by panic rather than by diagnostic.
-fn verifySchemas(
-    gpa: std.mem.Allocator,
-    ast: *const AstArena,
-    registry: *Registry,
-    tag_table: *const tags_mod.TagTable,
-) !void {
-    var i: u28 = 0;
-    while (i < ast.items.len) : (i += 1) {
-        const kind = ast.items.items(.kind)[i];
-        const data = ast.items.items(.data)[i];
-        const shape: struct {
-            name: []const u8,
-            fields_start: u32,
-            fields_len: u32,
-            reg_kind: RegKind,
-        } = switch (kind) {
-            .component_decl => blk: {
-                const decl = ast.component_decls.items[data];
-                break :blk .{
-                    .name = ast.strings.slice(decl.name),
-                    .fields_start = decl.fields_start,
-                    .fields_len = decl.fields_len,
-                    .reg_kind = .component,
-                };
-            },
-            .resource_decl => blk: {
-                const decl = ast.resource_decls.items[data];
-                break :blk .{
-                    .name = ast.strings.slice(decl.name),
-                    .fields_start = decl.fields_start,
-                    .fields_len = decl.fields_len,
-                    .reg_kind = .resource,
-                };
-            },
-            else => continue,
-        };
+/// What is recorded for the type already holding a declaration's name.
+const LiveLayout = struct {
+    digest: ?u64,
+    size: u16,
+    alignment: u16,
+    fields_len: usize,
+    kind: TypeKind,
+    requires: []const []const u8,
+};
 
-        // A name the registry does not hold cannot fail this check: the refusal
-        // lives in `compileTypeDecl`'s reuse arm and nowhere else. Skipping it is
-        // not an optimisation, it is the check's domain.
-        const existing_id = registry.idOf(shape.name) orelse continue;
-
-        var layout = computeLayout(gpa, ast, shape.fields_start, shape.fields_len, shape.reg_kind) catch |e| switch (e) {
-            // An invalid field type is a PROGRAM error the type-checker reports
-            // with a span. Letting it through here hands the same diagnosis to
-            // `compileTypeDecl`, which is where it has always been raised — this
-            // pass judges layout IDENTITY, never program validity.
-            error.InvalidProgram => continue,
-            else => return e,
-        };
-        defer layout.deinit(gpa);
-
-        const candidate = schemaDigestFor(shape.name, layout);
-        if ((registry.schemaDigest(existing_id) orelse ~candidate) != candidate) {
-            std.log.warn(
-                "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
-                    "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",
-                .{
-                    shape.name,
-                    registry.componentSize(existing_id),
-                    registry.componentAlignment(existing_id),
-                    registry.componentFields(existing_id).len,
-                    layout.size,
-                    layout.alignment,
-                    layout.fields.items.len,
-                },
-            );
-            return error.SchemaChanged;
-        }
-    }
-
-    // `TagSet` LAST among the checks and still BEFORE every mutation, which is the
-    // whole point: its own registration arm sits after Pass A, so confronting it
-    // there could never protect the types Pass A had already written.
-    if (tag_table.leaf_count > 0) {
-        if (registry.idOf("TagSet")) |existing| {
-            const size: u16 = @intCast(tag_table.words() * 8);
-            const candidate = weld_core.ecs.registry.schemaDigestOf(tagSetDesc(size, &.{}));
-            if ((registry.schemaDigest(existing) orelse ~candidate) != candidate) {
-                std.log.warn(
-                    "etch/hot-reload: 'TagSet' changed layout — reload REFUSED, previous image kept. " ++
-                        "live: size={d}; new: size={d} ({d} tag(s))",
-                    .{ registry.componentSize(existing), size, tag_table.leaf_count },
-                );
-                return error.SchemaChanged;
-            }
-        }
-    }
+fn liveLayoutOf(registry: *const Registry, id: ComponentId) LiveLayout {
+    return .{
+        .digest = registry.schemaDigest(id),
+        .size = registry.componentSize(id),
+        .alignment = registry.componentAlignment(id),
+        .fields_len = registry.componentFields(id).len,
+        .kind = registry.componentKind(id),
+        .requires = registry.componentRequires(id),
+    };
 }
 
-/// The LAYOUT half of a type declaration: field descriptors, size, alignment.
-/// Extracted because it is EXACTLY what a schema digest reads and nothing more —
-/// `Registry.schemaDigestOf` hashes name, size, alignment and each field's
-/// (name, kind, offset), and never `default_bytes`. Materialising the defaults is
-/// the other half of `compileTypeDecl`, it allocates immortal persistent blocks,
-/// and the digest never looks at them.
-///
-/// That split is what makes the pre-validation pass in `Interpreter.compile` cheap
-/// and side-effect-free: it can confront every declared schema against the live
-/// registry BEFORE the first registration, without materialising one default and
-/// without an intermediate to cache for the pass that follows.
+fn typeKindOf(reg_kind: RegKind) TypeKind {
+    return switch (reg_kind) {
+        .component => .component,
+        .resource => .resource,
+    };
+}
+
+/// Whether two `@requires` lists name the same types, in any order.
+fn sameRequisites(a: []const []const u8, b: []const []const u8) bool {
+    if (a.len != b.len) return false;
+    outer: for (a) |x| {
+        for (b) |y| if (std.mem.eql(u8, x, y)) continue :outer;
+        return false;
+    }
+    return true;
+}
+
+/// Refuse `shape` with `error.SchemaChanged` unless its layout has `live`'s
+/// digest and it keeps `live`'s kind and requisites, which a reload does not
+/// apply. The storage mode is no part of the comparison: a changed mode is
+/// neither refused nor migrated (`engine-ecs-internals.md` §13). An absent
+/// digest refuses: an unknown layout is not a matching one.
+fn confrontLayout(gpa: std.mem.Allocator, ast: *const AstArena, shape: DeclShape, live: LiveLayout) !void {
+    if (live.kind != typeKindOf(shape.reg_kind) or !sameRequisites(live.requires, shape.requires)) {
+        std.log.warn("etch/hot-reload: '{s}' changed its kind or its @requires — reload REFUSED, previous image kept", .{shape.name});
+        return error.SchemaChanged;
+    }
+    var layout = try computeLayout(gpa, ast, shape.fields_start, shape.fields_len, shape.reg_kind);
+    defer layout.deinit(gpa);
+    const candidate = schemaDigestFor(shape.name, layout);
+    if ((live.digest orelse ~candidate) == candidate) return;
+    std.log.warn(
+        "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
+            "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",
+        .{ shape.name, live.size, live.alignment, live.fields_len, layout.size, layout.alignment, layout.fields.items.len },
+    );
+    return error.SchemaChanged;
+}
+
+/// The LAYOUT half of a type declaration — field descriptors, size, alignment —
+/// which is exactly what its schema digest reads: never its default bytes.
 const Layout = struct {
     fields: std.ArrayListUnmanaged(FieldDesc) = .empty,
     size: usize = 0,
@@ -7451,10 +8153,9 @@ const Layout = struct {
     }
 };
 
-/// Compute a declaration's layout. Mutates NOTHING outside the returned value —
-/// no registry write, no bridge mapping, no persistent allocation — which is the
-/// property the pre-pass rests on and the reason this is a function rather than a
-/// comment inside `compileTypeDecl`.
+/// Compute a declaration's layout. Mutates nothing outside the returned value,
+/// so it may run before anything is registered. `error.InvalidProgram` on a
+/// field type it cannot place, `error.LayoutTooLarge` past the registry's 64 KiB.
 fn computeLayout(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
@@ -7472,17 +8173,14 @@ fn computeLayout(
         const f = ast.fields.items[fields_start + f_i];
         var enum_type_id: u32 = 0;
         const kind: FieldKind = kb: {
-            // a resource `T[]` field is a `.slice` type node (NOT
-            // `.named`): map it to `.array_` (a CollectionSlot) BEFORE the named-
-            // type decode below, which would mis-index `named_types`. Resource-
-            // only (validator-gated). Fixed `T[N]` (`.array`) and `.map_type` /
-            // `.set_type` are out of the surface.
+            // A resource collection field (`T[]`, `[K: V]`, `Set<T>`) is a
+            // CollectionSlot. Resource-only (validator-gated).
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .slice) break :kb .array_;
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .map_type) break :kb .map_;
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .set_type) break :kb .set_;
-            const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
+            const type_name = ast.namedTypeName(f.type_node) orelse return error.InvalidProgram;
             // Resolve through any top-level `type` alias chain.
-            const resolved_name_id = ast.resolveTypeAliasName(tnode.name);
+            const resolved_name_id = ast.resolveTypeAliasName(type_name);
             const tname = ast.strings.slice(resolved_name_id);
             if (fieldKindFromTypeName(tname, reg_kind)) |k| break :kb k;
             // Enum resource field: a declared enum type, resource-only
@@ -7499,6 +8197,7 @@ fn computeLayout(
         if (align_b > max_align) max_align = align_b;
         const off = std.mem.alignForward(usize, size, align_b);
         size = off + kind.sizeBytes();
+        if (size > std.math.maxInt(u16)) return error.LayoutTooLarge;
         try out.fields.append(gpa, .{
             .name = ast.strings.slice(f.name),
             .offset = @intCast(off),
@@ -7507,30 +8206,15 @@ fn computeLayout(
         });
     }
     out.size = std.mem.alignForward(usize, size, max_align);
+    if (out.size > std.math.maxInt(u16)) return error.LayoutTooLarge;
     out.alignment = max_align;
     return out;
 }
 
-/// The ONE derivation of a declaration's schema digest, read by the registration
-/// site and by the pre-pass alike. Two derivations of one quantity is how the two
-/// come to disagree, and a pre-pass that disagrees with the site it protects is
-/// worse than no pre-pass: it would refuse reloads the site accepts, or wave
-/// through the ones it refuses.
-///
-/// **It takes a name and a layout, and nothing else, because nothing else is
-/// hashed.** `schemaDigestOf` reads the name, the size, the alignment and each
-/// field's (name, kind, offset) — measured, and pinned by `registry.zig`'s « the
-/// digest is blind to the default bytes », which names this function as its
-/// dependent. `default_bytes`, `storage` and `requires` are all absent from it.
-///
-/// Taking a `storage` and a `requires` this function cannot use would be a
-/// signature declaring an influence it does not have, and it cost the pre-pass an
-/// allocation of `@requires` names for a quantity that never reaches the hash.
-///
-/// The consequence is NOT hidden by that omission and is not this function's to
-/// repair: a reload that changes only a component's `@storage` mode or its
-/// `@requires` set produces the same digest and is ACCEPTED. Whether schema
-/// identity should cover them belongs to whoever owns `schemaDigestOf`.
+/// The ONE derivation of a declaration's schema digest, matching the digest the
+/// registry derives at registration. A reload changing only a component's
+/// `@storage` mode or its `@requires` set produces the same digest and is
+/// accepted.
 fn schemaDigestFor(name: []const u8, layout: Layout) u64 {
     return weld_core.ecs.registry.schemaDigestOf(.{
         .name = name,
@@ -7541,17 +8225,11 @@ fn schemaDigestFor(name: []const u8, layout: Layout) u64 {
     });
 }
 
-/// Register one Etch `component`/`resource` declaration into `registry`,
-/// computing its byte layout (`FieldDesc` + size/alignment) and materializing
-/// its compile-time default bytes (POD via `evalConst`, resource `string` via
-/// an immortal persistent block, resource `enum` via the variant discriminant).
-/// Returns the assigned `ComponentId` (or the existing one on a hot-reload
-/// re-compile, idempotent). `bridge` records the name→id mapping.
-///
-/// Operates on a bare `*Registry` — World-free by construction (it never touches
-/// archetypes/entities). The interpreter passes `&world.registry`; the
-/// scene cook (`src/etch/scene_cook.zig`) reuses it verbatim against its own
-/// standalone `Registry` so registration is shared, not duplicated.
+/// Register one Etch `component`/`resource` declaration into `registry` and map
+/// it in `bridge`, returning its id. A name already registered is confronted
+/// with its layout and mapped, not registered again. Fails having changed
+/// neither. Shared with the scene cook, which drives it against its own
+/// registry.
 pub fn compileTypeDecl(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
@@ -7561,57 +8239,56 @@ pub fn compileTypeDecl(
     fields_start: u32,
     fields_len: u32,
     reg_kind: RegKind,
-    /// DIRECT `@requires` names, already read from the declaration. Passed
-    /// RESOLVED for the same reason `storage` is: this function receives no
-    /// declaration node, so it cannot read an annotation itself, and handing it
-    /// the names keeps the reading in ONE place shared by both callers.
     requires: []const []const u8,
-    /// Storage backend to record in the registry. Passed as a RESOLVED mode and
-    /// not as the annotation range, deliberately: this function receives no
-    /// declaration node — it takes `name`,
-    /// `fields_start`, `fields_len` and `reg_kind` and therefore cannot reach
-    /// `annotations_extra` at all — and widening it to take the node would give
-    /// the registry seam a dependency on AST item shape that its three callers
-    /// do not share. `storageModeOf` is the single resolver they share instead.
     storage: StorageKind,
-    literals: *std.ArrayListUnmanaged([*]u8),
 ) !ComponentId {
-    var layout = try computeLayout(gpa, ast, fields_start, fields_len, reg_kind);
+    const shape: DeclShape = .{
+        .name = name,
+        .fields_start = fields_start,
+        .fields_len = fields_len,
+        .reg_kind = reg_kind,
+        .requires = requires,
+        .storage = storage,
+    };
+    if (registry.idOf(name)) |existing| {
+        try confrontLayout(gpa, ast, shape, liveLayoutOf(registry, existing));
+        try mapName(gpa, bridge, reg_kind, name, existing);
+        return existing;
+    }
+    var entry = try prepareTypeEntry(gpa, ast, registry, shape);
+    errdefer entry.deinit(gpa);
+    try registry.reserve(gpa, 1);
+    try mapName(gpa, bridge, reg_kind, name, @intCast(registry.componentCount()));
+    return registry.commitPrepared(entry);
+}
+
+/// The registry entry of a declaration not yet registered: its layout and its
+/// default bytes.
+fn prepareTypeEntry(gpa: std.mem.Allocator, ast: *const AstArena, registry: *const Registry, shape: DeclShape) !PreparedEntry {
+    var layout = try computeLayout(gpa, ast, shape.fields_start, shape.fields_len, shape.reg_kind);
     defer layout.deinit(gpa);
     const fields = layout.fields;
-    const size = layout.size;
-    const max_align = layout.alignment;
-    var f_i: u32 = 0;
 
-    var default_buf: []u8 = try gpa.alloc(u8, size);
+    const default_buf: []u8 = try gpa.alloc(u8, layout.size);
     defer gpa.free(default_buf);
     @memset(default_buf, 0);
-    while (f_i < fields_len) : (f_i += 1) {
-        const f = ast.fields.items[fields_start + f_i];
+    var f_i: u32 = 0;
+    while (f_i < shape.fields_len) : (f_i += 1) {
+        const f = ast.fields.items[shape.fields_start + f_i];
         const fd = fields.items[f_i];
         const slot = default_buf[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))];
-        // a collection field's container is allocated at `addResource`
-        // (initResourceCollections), not here: the default slot stays `{ptr=0}`
-        // (zeroed), overwritten with the real block pointer then.
+        // A collection slot stays `{ptr=0}`; `prepareResourceBuffer` points the
+        // store's copy at a container.
         if (fd.kind == .array_ or fd.kind == .map_ or fd.kind == .set_) continue;
         if (fd.kind == .string_) {
-            // Resource `string` default = compile-time literal → an immortal
-            // interned block (sentinel refcount): `addResource` copies only the
-            // 16-byte `{ptr,len}` slot, no per-instance allocation. No default ⇒
-            // slot stays `{ptr=0,len=0}` (the empty string; `default_buf` is
-            // zeroed). The block is owned by `literals` and `destroy`'d at the
-            // interpreter's `deinit`. Non-literal const string defaults are out
-            // of the surface; they leave the empty-string slot.
+            // A non-empty literal points at the AST's bytes; `prepareEntry`
+            // copies them. Any other default leaves the empty string.
             if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .string_lit) {
                 const lit = ast.strings.slice(ast.exprData(f.default_value));
-                const block = try persistent.allocImmortal(gpa, persistent.type_string, lit.len);
-                literals.append(gpa, block) catch |e| {
-                    persistent.destroy(gpa, block);
-                    return e;
-                };
-                if (lit.len > 0) @memcpy(block[0..lit.len], lit);
-                const ss = persistent.StringSlot{ .ptr = @intFromPtr(block), .len = @intCast(lit.len) };
-                @memcpy(slot, std.mem.asBytes(&ss));
+                if (lit.len != 0) {
+                    const ss = persistent.StringSlot{ .ptr = @intFromPtr(lit.ptr), .len = @intCast(lit.len) };
+                    @memcpy(slot, std.mem.asBytes(&ss));
+                }
             }
             continue;
         }
@@ -7619,14 +8296,11 @@ pub fn compileTypeDecl(
             // Enum default = a bare `.variant` shorthand → its declaration-order
             // discriminant (consistent with `EnumValue.variant`). No default ⇒
             // discriminant 0, the first variant (`default_buf` is zeroed).
-            if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .tag_path) {
-                const variant = ast.exprData(f.default_value);
-                if (findEnumDecl(ast, fd.enum_type_name_id)) |edecl| {
-                    if (enumVariantIndex(ast, edecl, variant)) |vidx| {
-                        const disc: u32 = vidx;
-                        @memcpy(slot[0..@sizeOf(u32)], std.mem.asBytes(&disc));
-                    }
-                }
+            if (!f.default_value.isNone()) {
+                if (ast.exprKind(f.default_value) != .tag_path) return error.InvalidProgram;
+                const edecl = findEnumDecl(ast, fd.enum_type_name_id) orelse return error.InvalidProgram;
+                const disc: u32 = enumVariantIndex(ast, edecl, ast.exprData(f.default_value)) orelse return error.InvalidProgram;
+                @memcpy(slot[0..@sizeOf(u32)], std.mem.asBytes(&disc));
             }
             continue;
         }
@@ -7641,57 +8315,28 @@ pub fn compileTypeDecl(
             continue;
         }
         if (f.default_value.isNone()) continue;
-        const v = evalConst(ast, f.default_value) catch continue;
-        try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
+        const v = evalConst(gpa, ast, f.default_value) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.LiteralOutOfRange, error.IntegerOverflow, error.FloatOverflow => return error.ValueOutOfRange,
+            error.NotConstant, error.KindMismatch, error.DivisionByZero => return error.InvalidProgram,
+        };
+        bridge_mod.writeValueAsBytes(fd.kind, slot, v) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.IntegerOverflow => return error.ValueOutOfRange,
+            else => return error.InvalidProgram,
+        };
     }
 
-    if (registry.idOf(name)) |existing_id| {
-        // THE LAST LINE OF DEFENCE, not the first. `Interpreter.compile` confronts
-        // every declared schema before it registers anything, so a hot-reload
-        // never reaches this arm with a changed layout. This check stays because
-        // `scene_cook.zig` drives this function against its own registry and does
-        // NOT go through that pass — and because a refusal that exists only in the
-        // caller is a refusal the next caller will not have.
-        //
-        // An ABSENT digest refuses, for the reason given at the `TagSet` arm.
-        const candidate = schemaDigestFor(name, layout);
-        if ((registry.schemaDigest(existing_id) orelse ~candidate) != candidate) {
-            std.log.warn(
-                "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
-                    "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",
-                .{
-                    name,
-                    registry.componentSize(existing_id),
-                    registry.componentAlignment(existing_id),
-                    registry.componentFields(existing_id).len,
-                    size,
-                    max_align,
-                    fields.items.len,
-                },
-            );
-            return error.SchemaChanged;
-        }
-        switch (reg_kind) {
-            .component => try bridge.mapComponent(gpa, name, existing_id),
-            .resource => try bridge.mapResource(gpa, name, existing_id),
-        }
-        return existing_id;
-    }
-
-    const id = try registry.registerComponentRaw(gpa, .{
-        .name = name,
-        .size = @intCast(size),
-        .alignment = @intCast(max_align),
+    return registry.prepareEntry(gpa, .{
+        .name = shape.name,
+        .size = @intCast(layout.size),
+        .alignment = @intCast(layout.alignment),
         .default_bytes = default_buf,
         .fields = fields.items,
-        .storage = storage,
-        .requires = requires,
+        .storage = shape.storage,
+        .requires = shape.requires,
+        .kind = typeKindOf(shape.reg_kind),
     });
-    switch (reg_kind) {
-        .component => try bridge.mapComponent(gpa, name, id),
-        .resource => try bridge.mapResource(gpa, name, id),
-    }
-    return id;
 }
 
 fn fieldKindFromTypeName(name: []const u8, reg_kind: RegKind) ?FieldKind {
@@ -7838,8 +8483,9 @@ fn dnfFromPool(gpa: std.mem.Allocator, pool: []const PredicateNode, root: u32, n
             if (cross) return try crossProduct(gpa, lhs, rhs);
             var out: Dnf = .empty;
             errdefer freeDnf(gpa, &out);
-            for (lhs.items) |t| try out.append(gpa, try t.clone(gpa));
-            for (rhs.items) |t| try out.append(gpa, try t.clone(gpa));
+            try out.ensureTotalCapacity(gpa, lhs.items.len + rhs.items.len);
+            for (lhs.items) |t| out.appendAssumeCapacity(try t.clone(gpa));
+            for (rhs.items) |t| out.appendAssumeCapacity(try t.clone(gpa));
             return out;
         },
     }
@@ -7966,8 +8612,8 @@ fn compileRule(
     var p_i: u32 = 0;
     while (p_i < rule.params_len) : (p_i += 1) {
         const p = ast.rule_params.items[rule.params_start + p_i];
-        const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
-        const tname = ast.strings.slice(tnode.name);
+        const declared = ast.namedTypeName(p.type_node) orelse continue;
+        const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
         if (std.mem.eql(u8, tname, "Entity")) {
             entity_param_name = p.name;
             break;
@@ -8009,22 +8655,42 @@ fn compileRule(
         &.{};
     errdefer freeSelection(gpa, selection);
 
+    const resource_deps = try res_deps.toOwnedSlice(gpa);
+    errdefer gpa.free(resource_deps);
+    const field_filter_slice = try field_filters.toOwnedSlice(gpa);
+    errdefer gpa.free(field_filter_slice);
+    const tag_predicates = try tag_preds.toOwnedSlice(gpa);
+    errdefer {
+        for (tag_predicates) |*tp| tp.deinit(gpa);
+        gpa.free(tag_predicates);
+    }
+    const changed_filter_slice = try changed_filters.toOwnedSlice(gpa);
+    errdefer gpa.free(changed_filter_slice);
+    const expr_filter_slice = try expr_filters.toOwnedSlice(gpa);
+    errdefer {
+        for (expr_filter_slice) |ef| gpa.free(ef.fields);
+        gpa.free(expr_filter_slice);
+    }
+    const expr_cond_slice = try expr_conds.toOwnedSlice(gpa);
+    errdefer gpa.free(expr_cond_slice);
+    const resource_expr_filter_slice = try resource_expr_filters.toOwnedSlice(gpa);
+
     return .{
         .rule_idx = rule_data,
         .name = rule.name,
         .selection = selection,
-        .resource_deps = try res_deps.toOwnedSlice(gpa),
-        .field_filters = try field_filters.toOwnedSlice(gpa),
-        .tag_predicates = try tag_preds.toOwnedSlice(gpa),
+        .resource_deps = resource_deps,
+        .field_filters = field_filter_slice,
+        .tag_predicates = tag_predicates,
         .entity_param_name = entity_param_name,
         .is_entity_bound = is_entity_bound,
         .event_type = event_type,
         .observer_kind = observer_kind,
         .observer_component = observer_component,
-        .changed_filters = try changed_filters.toOwnedSlice(gpa),
-        .expr_filters = try expr_filters.toOwnedSlice(gpa),
-        .expr_conds = try expr_conds.toOwnedSlice(gpa),
-        .resource_expr_filters = try resource_expr_filters.toOwnedSlice(gpa),
+        .changed_filters = changed_filter_slice,
+        .expr_filters = expr_filter_slice,
+        .expr_conds = expr_cond_slice,
+        .resource_expr_filters = resource_expr_filter_slice,
         .last_run_tick = initial_tick,
         .is_async = rule.is_async,
     };
@@ -8086,7 +8752,7 @@ fn captureBoundFields(ctx: *LowerWhenCtx, type_name: StringId, id: ComponentId, 
     while (f < fields_len) : (f += 1) {
         const field = ast.fields.items[fields_start + f];
         const fd = ctx.registry.findField(id, ast.strings.slice(field.name)) orelse return error.InvalidProgram;
-        try out.append(ctx.gpa, .{ .name = field.name, .offset = fd.offset, .kind = fd.kind });
+        try out.append(ctx.gpa, .{ .name = field.name, .offset = fd.offset, .kind = fd.kind, .enum_type_name_id = fd.enum_type_name_id });
     }
     return try out.toOwnedSlice(ctx.gpa);
 }
@@ -8132,7 +8798,10 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
             const id = ctx.bridge.componentIdOf(tname) orelse return error.InvalidProgram;
             const fname = ast.strings.slice(node.field_name);
             const fd = ctx.registry.findField(id, fname) orelse return error.InvalidProgram;
-            const v = evalConst(ast, node.filter_value) catch return error.InvalidProgram;
+            const v = evalConst(ctx.gpa, ast, node.filter_value) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidProgram,
+            };
             // One filter per `has T { … }` clause — append, never
             // overwrite.
             try ctx.filters.append(ctx.gpa, .{
@@ -8180,11 +8849,12 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
             // scope, resolver-checked).
             const tname = ast.strings.slice(node.type_name);
             const id = ctx.bridge.componentIdOf(tname) orelse return error.InvalidProgram;
+            try ctx.expr_filters.ensureUnusedCapacity(ctx.gpa, 1);
+            try ctx.pool.ensureUnusedCapacity(ctx.gpa, 1);
             const fields = try captureBoundFields(ctx, node.type_name, id, false);
-            errdefer ctx.gpa.free(fields);
-            try ctx.expr_filters.append(ctx.gpa, .{ .component_id = id, .expr = node.filter_value, .fields = fields });
+            ctx.expr_filters.appendAssumeCapacity(.{ .component_id = id, .expr = node.filter_value, .fields = fields });
             const idx: u32 = @intCast(ctx.pool.items.len);
-            try ctx.pool.append(ctx.gpa, .{ .kind = .has, .component_id = id });
+            ctx.pool.appendAssumeCapacity(.{ .kind = .has, .component_id = id });
             ctx.has_component_ref.* = true;
             return idx;
         },
@@ -8222,7 +8892,8 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
                 const path_node = ast.tag_operands.items[tf.operand_start + oi];
                 try resolveTagOperandBits(ctx, path_node, &bits);
             }
-            try ctx.tag_preds.append(ctx.gpa, .{ .op = tf.op, .bits = try bits.toOwnedSlice(ctx.gpa) });
+            try ctx.tag_preds.ensureUnusedCapacity(ctx.gpa, 1);
+            ctx.tag_preds.appendAssumeCapacity(.{ .op = tf.op, .bits = try bits.toOwnedSlice(ctx.gpa) });
             ctx.has_component_ref.* = true;
             const positive = switch (tf.op) {
                 .has_tag, .has_any_tag, .has_all_tags => true,
@@ -8283,7 +8954,7 @@ test "evalConst on int literal returns Value.int" {
     const lit_id = try ast.strings.intern(gpa, "42");
     const node = try ast.addExpr(gpa, .int_lit, lit_id, .{ .byte_start = 0, .byte_end = 2 });
 
-    const v = try evalConst(&ast, node);
+    const v = try evalConst(gpa, &ast, node);
     try std.testing.expectEqual(@as(i64, 42), v.int_);
 }
 
@@ -8298,18 +8969,18 @@ test "evalConst on arithmetic on literals folds correctly" {
     const b = try ast.addExpr(gpa, .int_lit, lit_b, .{ .byte_start = 0, .byte_end = 0 });
     const bin = try ast.addBinary(gpa, .add, a, b, .{ .byte_start = 0, .byte_end = 0 });
 
-    const v = try evalConst(&ast, bin);
+    const v = try evalConst(gpa, &ast, bin);
     try std.testing.expectEqual(@as(i64, 5), v.int_);
 }
 
-test "evalConst on tag_path returns UnsupportedExpr" {
+test "evalConst on tag_path is not a constant it folds" {
     const gpa = std.testing.allocator;
     var ast = try AstArena.init(gpa);
     defer ast.deinit(gpa);
 
     const lit_id = try ast.strings.intern(gpa, "update");
     const node = try ast.addExpr(gpa, .tag_path, lit_id, .{ .byte_start = 0, .byte_end = 0 });
-    try std.testing.expectError(error.UnsupportedExpr, evalConst(&ast, node));
+    try std.testing.expectError(error.NotConstant, evalConst(gpa, &ast, node));
 }
 
 test "runProgram on minimal component + rule mutates entity" {
@@ -8546,15 +9217,8 @@ test "resource string field is mutable and the previous value is released" {
 }
 
 test "world+interp teardown frees resource strings once" {
-    // The resource-payload decref walk is owned by Tier-0
-    // `World.releaseResourcePayloads`, called from BOTH `Interpreter.deinit`
-    // (before its immortal `persistent_literals` are destroyed) and
-    // `World.deinit` (before `resources.deinit`). Slot zeroing makes the second
-    // call a no-op, so a written resource string is freed exactly once across
-    // the two-stage teardown. The teardown runs via LIFO defers below —
-    // `interp.deinit()` first, then `world.deinit(gpa)` — and
-    // `std.testing.allocator` flags either a leak (missed free) or a
-    // double-free (both stages freeing the same block).
+    // `std.testing.allocator` flags a leak or a double free of the written
+    // resource string across `interp.deinit()` then `world.deinit(gpa)`.
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -8723,8 +9387,8 @@ test "resource string[] whole-field reassignment releases previous backing" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // Literal-array default `["a","b"]` (materialized at addResource), reassigned
-    // to `["x","y","z"]` on tick 1.
+    // Literal-array default `["a","b"]` (materialized with the store buffer),
+    // reassigned to `["x","y","z"]` on tick 1.
     const source =
         \\resource Inventory { items: string[] = ["a", "b"] }
         \\rule reset()
@@ -8951,14 +9615,6 @@ fn resourceCollectionPtr(world: *World, res_name: []const u8, field_name: []cons
     var cs: persistent.CollectionSlot = undefined;
     @memcpy(std.mem.asBytes(&cs), bytes[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)]);
     return cs.ptr;
-}
-
-/// Bytes of a `.string_persistent` value (empty otherwise). Test helper.
-fn persistentStrBytes(v: Value) []const u8 {
-    return switch (v) {
-        .string_persistent => |s| if (s.len == 0) "" else @as([*]const u8, @ptrFromInt(s.ptr))[0..s.len],
-        else => "",
-    };
 }
 
 fn expectResourceMapLen(world: *World, res_name: []const u8, field_name: []const u8, expected: usize) !void {
@@ -11357,13 +12013,13 @@ test "observable behaviour: all five observer kinds + emit/@on_event, determinis
     try std.testing.expectEqualSlices(i64, &[_]i64{ 1, 101, 312, 402, 5 }, log.items);
 
     // ── Then: a per-tick `@on_event` drain coexists in the same program ──
-    // `stepOnce` clears the event store first; produce_ping emits Ping, on_ping
-    // drains it same-tick → Log 6.
+    // The five logs were emitted outside a tick, so this tick keeps them;
+    // produce_ping emits Ping, on_ping drains it same-tick → Log 6.
     var report: RuntimeReport = .{};
     try interp.stepOnce(&world, &report);
     log.clearRetainingCapacity();
     try collectLog(&interp, log_id, code_id, &log, gpa);
-    try std.testing.expectEqualSlices(i64, &[_]i64{6}, log.items);
+    try std.testing.expectEqualSlices(i64, &[_]i64{ 1, 101, 312, 402, 5, 6 }, log.items);
 }
 
 test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter" {
@@ -13509,6 +14165,536 @@ test "global_event filter is captured once at suspension, not re-evaluated at po
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // captured 7 matched despite want→9
 }
 
+test "the event store's string copy is a view, not a persistent string" {
+    const gpa = std.testing.allocator;
+    var store: EventStore = .{};
+    defer store.deinit(gpa);
+    const v = try store.ownEscapingString(gpa, "abc");
+    try std.testing.expect(v == .string_view);
+    try std.testing.expectEqualStrings("abc", @as([*]const u8, @ptrFromInt(v.string_view.ptr))[0..v.string_view.len]);
+}
+
+test "a captured event filter string is a view, not a persistent string" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\event Ping { s: string }
+        \\resource Out { n: int = 0 }
+        \\async rule watch()
+        \\  when resource Out
+        \\{
+        \\  await global_event(Ping { s: "a" + "b" })
+        \\  get_mut(Out).n = 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(usize, 1), interp.captured_filters.items.len);
+    const v = interp.captured_filters.items[0].value;
+    try std.testing.expect(v == .string_view);
+    try std.testing.expectEqualStrings("ab", interp.stringBytes(v).?);
+}
+
+test "active_extensions yields views of the world's names" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Probe { count: i32 = 0 }
+        \\rule probe(entity: Entity) when entity has Probe {
+        \\  entity.get_mut(Probe).count = entity.active_extensions().len() as i32
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{world.componentId("Probe").?});
+    try world.addEntityExtension(gpa, eid, "Combat");
+    interp.suppress_body_store_resets = true;
+    _ = try interp.runFor(&world, 1);
+    var seen: usize = 0;
+    for (interp.collections.arrays.items) |arr| for (arr.items) |el| {
+        try std.testing.expect(el == .string_view);
+        try std.testing.expectEqualStrings("Combat", interp.stringBytes(el).?);
+        seen += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), seen);
+}
+
+test "a store-owned view and a resource string with the same bytes are one set element" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\event Named { name: string }
+        \\resource R { name: string = "x", n: int = 0 }
+        \\rule emitter() when resource R { emit Named { name: "a" + "b" } }
+        \\rule rename() when resource R { get_mut(R).name = "a" + "b" }
+        \\@on_event(Named)
+        \\rule seen() when resource R {
+        \\  let mut s: Set<string> = Set.new()
+        \\  s.insert(event.name)
+        \\  s.insert(get(R).name)
+        \\  get_mut(R).n = s.len()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 1), readResourceIntNamed(&world, "R", "n"));
+}
+
+/// One checked program, run for `ticks`, then `R.out` read back.
+fn expectCheckedOut(source: []const u8, ticks: u32, expected: []const u8) !void {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa, source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, ticks);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try expectResourceStringField(&world, "R", "out", expected);
+}
+
+/// `expectCheckedOut` for a program the checker refuses, which is how a caller
+/// that skips it reaches these paths.
+fn expectUncheckedOut(source: []const u8, ticks: u32, expected: []const u8) !void {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, ticks);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try expectResourceStringField(&world, "R", "out", expected);
+}
+
+test "a string concatenation keeps its left operand alive while its right operand runs" {
+    try expectCheckedOut(
+        \\resource R { name: string = "", out: string = "", done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    get_mut(R).name = "old"
+        \\    get_mut(R).out = get(R).name + if true {
+        \\      get_mut(R).name = "new"
+        \\      "!"
+        \\    } else {
+        \\      "?"
+        \\    }
+        \\  }
+        \\}
+    , 1, "old!");
+}
+
+test "an arena struct keeps the resource string it was built from" {
+    try expectCheckedOut(
+        \\struct P { a: string }
+        \\resource R { name: string = "", out: string = "", done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    get_mut(R).name = "old"
+        \\    let p = P { a: get(R).name }
+        \\    get_mut(R).name = "new"
+        \\    get_mut(R).out = p.a
+        \\  }
+        \\}
+    , 1, "old");
+}
+
+test "a resource map lookup keeps the value it found after the key is replaced" {
+    try expectCheckedOut(
+        \\resource R { m: [string: string] = ["k": "x"], out: string = "", done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    get_mut(R).m.insert("k", "old")
+        \\    let o = get(R).m["k"]
+        \\    get_mut(R).m.insert("k", "new")
+        \\    if let v = o {
+        \\      get_mut(R).out = v
+        \\    }
+        \\  }
+        \\}
+    , 1, "old");
+}
+
+test "a closure keeps a captured loop element its collection has dropped" {
+    try expectCheckedOut(
+        \\resource R { names: string[] = ["alpha", "beta"], out: string = "", done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    let mut c = |x: int| ""
+        \\    let mut first = true
+        \\    for s in get(R).names {
+        \\      if first {
+        \\        c = |x: int| s
+        \\        first = false
+        \\      }
+        \\    }
+        \\    let a = get_mut(R).names.pop()
+        \\    let b = get_mut(R).names.pop()
+        \\    get_mut(R).out = c(0)
+        \\  }
+        \\}
+    , 1, "alpha");
+}
+
+test "a local assigned a resource string holds its own reference" {
+    try expectCheckedOut(
+        \\resource R { a: string = "", b: string = "", out: string = "", stage: int = 0 }
+        \\rule copy() when resource R {
+        \\  if get(R).stage == 1 {
+        \\    get_mut(R).stage = 2
+        \\    get_mut(R).out = get(R).b
+        \\  }
+        \\}
+        \\rule r() when resource R {
+        \\  if get(R).stage == 0 {
+        \\    get_mut(R).stage = 1
+        \\    get_mut(R).a = "aa"
+        \\    get_mut(R).b = "bb"
+        \\    let mut s = get(R).a
+        \\    s = get(R).b
+        \\  }
+        \\}
+    , 2, "bb");
+}
+
+test "a local assigned an awaited resource string holds its own reference" {
+    try expectUncheckedOut(
+        \\resource R { a: string = "", b: string = "", out: string = "", stage: int = 0 }
+        \\async fn g() -> string {
+        \\  await wait(0.05s)
+        \\  return get(R).b
+        \\}
+        \\rule copy() when resource R {
+        \\  if get(R).stage == 2 {
+        \\    get_mut(R).stage = 3
+        \\    get_mut(R).out = get(R).b
+        \\  }
+        \\}
+        \\async rule r() when resource R {
+        \\  if get(R).stage == 0 {
+        \\    get_mut(R).stage = 1
+        \\    get_mut(R).a = "aa"
+        \\    get_mut(R).b = "bb"
+        \\    let mut s = get(R).a
+        \\    s = await g()
+        \\    get_mut(R).stage = 2
+        \\  }
+        \\}
+    , 6, "bb");
+}
+
+test "a task local keeps a resource string across a suspension" {
+    try expectUncheckedOut(
+        \\resource R { name: string = "", out: string = "", n: int = 0 }
+        \\async rule r() when resource R {
+        \\  if get(R).n == 0 {
+        \\    get_mut(R).name = "old"
+        \\    let s = get(R).name
+        \\    await wait(0.05s)
+        \\    get_mut(R).out = s
+        \\  }
+        \\}
+        \\rule rename() when resource R {
+        \\  get_mut(R).n = get(R).n + 1
+        \\  if get(R).n == 1 {
+        \\    get_mut(R).name = "new"
+        \\  }
+        \\}
+    , 5, "old");
+}
+
+test "a timer snapshot keeps a resource string until the timer fires" {
+    try expectUncheckedOut(
+        \\resource R { name: string = "", out: string = "", armed: bool = true }
+        \\rule sched() when resource R {
+        \\  if get(R).armed {
+        \\    get_mut(R).armed = false
+        \\    get_mut(R).name = "old"
+        \\    let s = get(R).name
+        \\    after(0.05s) {
+        \\      get_mut(R).name = "new"
+        \\      get_mut(R).out = s
+        \\    }
+        \\  }
+        \\}
+    , 5, "old");
+}
+
+test "a race winner's returned resource string survives until the race resumes" {
+    try expectUncheckedOut(
+        \\resource R { name: string = "", out: string = "", n: int = 0 }
+        \\async fn pick() -> string {
+        \\  race {
+        \\    {
+        \\      return get(R).name
+        \\    }
+        \\    {
+        \\      await wait(1.0s)
+        \\      return "late"
+        \\    }
+        \\  }
+        \\  return "none"
+        \\}
+        \\rule setup() when resource R {
+        \\  get_mut(R).n = get(R).n + 1
+        \\  if get(R).n == 1 {
+        \\    get_mut(R).name = "old"
+        \\  }
+        \\}
+        \\async rule r() when resource R {
+        \\  if get(R).n == 1 {
+        \\    let s = await pick()
+        \\    get_mut(R).out = s
+        \\  }
+        \\}
+        \\rule rename() when resource R {
+        \\  if get(R).n == 1 {
+        \\    get_mut(R).name = "new"
+        \\  }
+        \\}
+    , 3, "old");
+}
+
+test "a loop variable releases each resource element it held" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { names: string[] = ["a", "b", "c"], n: int = 0 }
+        \\rule r() when resource R {
+        \\  for s in get(R).names {
+        \\    get_mut(R).n = get(R).n + 1
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 3), readResourceIntNamed(&world, "R", "n"));
+}
+
+test "a resource expression guard releases the fields it bound" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource A { s: string = "", ready: bool = false }
+        \\resource B { k: int = 1 }
+        \\resource Out { n: int = 0 }
+        \\rule setup() when resource A {
+        \\  if get(A).ready == false {
+        \\    get_mut(A).ready = true
+        \\    get_mut(A).s = "xy"
+        \\  }
+        \\}
+        \\rule gated() when resource A { ready } and resource B { k == 1 } and resource Out {
+        \\  get_mut(Out).n = get(Out).n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceIntNamed(&world, "Out", "n"));
+}
+
+test "a tick returns the arena references of its async drives" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { name: string = "x", out: string = "" }
+        \\async rule r() when resource R {
+        \\  get_mut(R).out = get(R).name
+        \\  await wait(0.05s)
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(usize, 0), interp.deferred_decrefs.items.len);
+}
+
+test "a rule body returns its arena references at its reset" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { name: string = "x", out: string = "" }
+        \\rule r() when resource R {
+        \\  get_mut(R).out = get(R).name
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    var report: RuntimeReport = .{};
+    try interp.execBody(&world, interp.rule_descs[0], null, null, &report);
+    try std.testing.expectEqual(@as(usize, 0), interp.deferred_decrefs.items.len);
+}
+
+test "an interpreter returns the arena references still held when it is torn down" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { name: string = "", out: string = "", done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    get_mut(R).name = "old"
+        \\    get_mut(R).out = get(R).name
+        \\    get_mut(R).name = "new"
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    interp.suppress_body_store_resets = true;
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expect(interp.deferred_decrefs.items.len > 0);
+}
+
+/// The async walk of the two tests below: `swap` replaces the array at tick 2,
+/// while `walk` waits on its first element.
+const async_walk_source =
+    \\resource R { xs: int[] = [1, 2, 3], sum: int = 0, tick: int = 0 }
+    \\async rule walk() when resource R {
+    \\  for x in get(R).xs {
+    \\    await wait(0.05s)
+    \\    get_mut(R).sum = get(R).sum + x
+    \\  }
+    \\}
+    \\rule swap() when resource R {
+    \\  get_mut(R).tick = get(R).tick + 1
+    \\  if get(R).tick == 2 {
+    \\    get_mut(R).xs = [100]
+    \\  }
+    \\}
+;
+
+test "an async for suspended at teardown releases the array it iterates" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa, async_walk_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "R", "sum"));
+}
+
+test "an async for keeps iterating a resource array reassigned while it waits" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa, async_walk_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 12);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 6), readResourceIntNamed(&world, "R", "sum"));
+}
+
+test "a sync for keeps iterating a resource array its body reassigns" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { xs: int[] = [1, 2, 3], sum: int = 0, done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    for x in get(R).xs {
+        \\      get_mut(R).xs = [7]
+        \\      get_mut(R).sum = get(R).sum + x
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 6), readResourceIntNamed(&world, "R", "sum"));
+}
+
+test "a sync for over an arena array fails loud when its body shrinks it" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\resource R { done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    let mut xs = [1, 2, 3]
+        \\    for x in xs {
+        \\      let p = xs.pop()
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+}
+
+test "a sync for over a resource array fails loud when its body shrinks it" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { xs: int[] = [1, 2, 3], done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    for x in get(R).xs {
+        \\      let p = get_mut(R).xs.pop()
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+}
+
 test "emit stabilizes a computed string so an @on_event observer reads it safely" {
     const gpa = std.testing.allocator;
     var world = World.init();
@@ -15406,7 +16592,7 @@ test "execHookText mutates a component on the live world" {
     try std.testing.expectEqual(@as(i32, 150), std.mem.readInt(i32, hb[4..8], .little)); // max @4
 }
 
-test "execHookText restores self.ast and the program still steps" {
+test "a hook runs in the interpreter's own arena and the program still steps" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15420,20 +16606,107 @@ test "execHookText restores self.ast and the program still steps" {
 
     var interp = try Interpreter.compile(gpa, &pr.ast, &world);
     defer interp.deinit();
+    try std.testing.expect(interp.ast != &pr.ast);
     const cid = world.registry.idOf("Health").?;
     var hv = [_]i32{ 100, 100 };
     const eid = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{cid}, &[_][]const u8{std.mem.asBytes(&hv)});
 
-    const program_ast = interp.ast; // == &pr.ast
     try interp.execHookText(&world, eid, "entity.get_mut(Health).max += 50");
-    // The hook ran against a transient arena; the program AST pointer is restored.
-    try std.testing.expectEqual(program_ast, interp.ast);
-
-    // The program still steps on the restored AST: the rule bumps current 100→101.
     _ = try interp.runFor(&world, 1);
     const hb = world.componentBytes(eid, cid).?;
     try std.testing.expectEqual(@as(i32, 101), std.mem.readInt(i32, hb[0..4], .little)); // current @0
-    try std.testing.expectEqual(@as(i32, 150), std.mem.readInt(i32, hb[4..8], .little)); // max @4 (hook effect persisted)
+    try std.testing.expectEqual(@as(i32, 150), std.mem.readInt(i32, hb[4..8], .little)); // max @4
+}
+
+/// A world holding one `Health { current: 100, max: 100 }` entity, and an
+/// interpreter compiled from `source` onto it.
+const HookFixture = struct {
+    world: World,
+    pr: parser_mod.ParseResult,
+    interp: Interpreter,
+    health: ComponentId,
+    entity: CoreEntityId,
+
+    fn init(self: *HookFixture, gpa: std.mem.Allocator, source: []const u8) !void {
+        self.world = World.init();
+        errdefer self.world.deinit(gpa);
+        self.pr = try parser_mod.parse(gpa, source);
+        errdefer self.pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), self.pr.diagnostics.len);
+        self.interp = try Interpreter.compile(gpa, &self.pr.ast, &self.world);
+        errdefer self.interp.deinit();
+        self.health = self.world.registry.idOf("Health").?;
+        var hv = [_]i32{ 100, 100 };
+        self.entity = try self.world.spawnDynamicWithValues(gpa, &[_]ComponentId{self.health}, &[_][]const u8{std.mem.asBytes(&hv)});
+    }
+
+    fn deinit(self: *HookFixture, gpa: std.mem.Allocator) void {
+        self.interp.deinit();
+        self.pr.deinit(gpa);
+        self.world.deinit(gpa);
+    }
+
+    fn max(self: *HookFixture) i32 {
+        return std.mem.readInt(i32, self.world.componentBytes(self.entity, self.health).?[4..8], .little);
+    }
+};
+
+test "an event a hook emits carries the program's name for its type" {
+    const gpa = std.testing.allocator;
+    var f: HookFixture = undefined;
+    try f.init(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\event Boosted { amount: int }
+        \\rule keep(entity: Entity) when entity has Health {}
+    );
+    defer f.deinit(gpa);
+    try f.interp.execHookText(&f.world, f.entity, "emit Boosted { amount: 7 }");
+    try std.testing.expectEqual(@as(usize, 1), f.interp.events.count(f.pr.ast.strings.find("Boosted").?));
+}
+
+test "a string literal a hook emits reads back its own bytes" {
+    const gpa = std.testing.allocator;
+    var f: HookFixture = undefined;
+    try f.init(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Armor { plates: i32 = 0, weight: i32 = 0 }
+        \\event Named { who: string }
+        \\rule keep(entity: Entity) when entity has Health {}
+    );
+    defer f.deinit(gpa);
+    try f.interp.execHookText(&f.world, f.entity, "emit Named { who: \"hero\" }");
+    const v = f.interp.events.list.items[0].fields.items[0].value;
+    try std.testing.expectEqualStrings("hero", f.interp.stringBytes(v).?);
+}
+
+test "a hook calls a function of the program" {
+    const gpa = std.testing.allocator;
+    var f: HookFixture = undefined;
+    try f.init(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\fn seven() -> int { return 7 }
+        \\rule keep(entity: Entity) when entity has Health {}
+    );
+    defer f.deinit(gpa);
+    try f.interp.execHookText(&f.world, f.entity, "entity.get_mut(Health).max = seven()");
+    try std.testing.expectEqual(@as(i32, 7), f.max());
+}
+
+test "a hook text is parsed once, however often it runs" {
+    const gpa = std.testing.allocator;
+    var f: HookFixture = undefined;
+    try f.init(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\rule keep(entity: Entity) when entity has Health {}
+    );
+    defer f.deinit(gpa);
+    const before = f.interp.ast.extra.items.len;
+    try f.interp.execHookText(&f.world, f.entity, "entity.get_mut(Health).max += 1");
+    const after_first = f.interp.ast.extra.items.len;
+    try f.interp.execHookText(&f.world, f.entity, "entity.get_mut(Health).max += 1");
+    try std.testing.expect(after_first > before);
+    try std.testing.expectEqual(after_first, f.interp.ast.extra.items.len);
+    try std.testing.expectEqual(@as(i32, 102), f.max());
 }
 
 test "execHookText emit enqueues into the dynamic event store" {
@@ -15570,6 +16843,85 @@ test "despawn defers — entity removed at flush" {
     try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
     try std.testing.expect(world.dynamicLocation(e) == null); // gone after the flush
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
+}
+
+test "a stale structural command is skipped and the rest of the flush applies" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Doomed { d: i32 = 0 }
+        \\component Marker { m: i32 = 0 }
+        \\component Shield { amount: i32 = 0 }
+        \\rule first(entity: Entity) when entity has Doomed {
+        \\  entity.despawn()
+        \\}
+        \\rule second(entity: Entity) when entity has Doomed {
+        \\  entity.despawn()
+        \\}
+        \\rule shield(entity: Entity) when entity has Marker {
+        \\  entity.add(Shield { amount: 7 })
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const doomed = world.registry.idOf("Doomed").?;
+    const marker = world.registry.idOf("Marker").?;
+    const shield = world.registry.idOf("Shield").?;
+    const d = try world.spawnDynamic(gpa, &[_]ComponentId{doomed});
+    const m = try world.spawnDynamic(gpa, &[_]ComponentId{marker});
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expect(world.dynamicLocation(d) == null);
+    try std.testing.expectEqual(@as(i32, 7), readI32(&world, m, shield, "amount").?);
+}
+
+fn refuseObserved(
+    _: ?*anyopaque,
+    _: *World,
+    _: CoreEntityId,
+    _: ?ComponentId,
+    _: ?*const anyopaque,
+    _: ?*const anyopaque,
+    _: *CommandBuffer,
+) anyerror!void {
+    return error.Refused;
+}
+
+test "a refused structural command counts as a runtime error and the flush goes on" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Doomed { d: i32 = 0 }
+        \\component Marker { m: i32 = 0 }
+        \\component Shield { amount: i32 = 0 }
+        \\rule shield(entity: Entity) when entity has Marker {
+        \\  entity.add(Shield { amount: 7 })
+        \\}
+        \\rule kill(entity: Entity) when entity has Doomed {
+        \\  entity.despawn()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const doomed = world.registry.idOf("Doomed").?;
+    const marker = world.registry.idOf("Marker").?;
+    const shield = world.registry.idOf("Shield").?;
+    try world.observer_registry.registerOnAdd(gpa, shield, null, &refuseObserved);
+    const d = try world.spawnDynamic(gpa, &[_]ComponentId{doomed});
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{marker});
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    try std.testing.expect(world.dynamicLocation(d) == null);
 }
 
 test "add defers — component present at flush" {
@@ -16245,4 +17597,1411 @@ test "a sync with no arena value in scope stays accepted" {
         \\  get_mut(S).n = count
         \\}
     , .rule_arena_value_escapes));
+}
+
+/// Compiles `source` with no type-check, which is how a caller that skips the
+/// checker reaches the interpreter.
+fn compileUnchecked(gpa: std.mem.Allocator, pr: *const parser_mod.ParseResult, world: *World) !Interpreter {
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    return Interpreter.compile(gpa, &pr.ast, world);
+}
+
+test "a component collection field is refused, not laid out as a named type" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa, "component C { xs: int[] }");
+    defer pr.deinit(gpa);
+    var world = World.init();
+    defer world.deinit(gpa);
+    try std.testing.expectError(error.InvalidProgram, compileUnchecked(gpa, &pr, &world));
+}
+
+test "the same component with a named field type compiles" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa, "component C { xs: int }");
+    defer pr.deinit(gpa);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    interp.deinit();
+}
+
+test "a non-named rule parameter is never taken for the entity parameter" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa,
+        \\rule q(e: Entity) {}
+        \\rule r(xs: int[]) {}
+    );
+    defer pr.deinit(gpa);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    try std.testing.expect(interp.rule_descs[0].entity_param_name != null);
+    try std.testing.expectEqual(@as(?StringId, null), interp.rule_descs[1].entity_param_name);
+}
+
+test "a non-named rule parameter is bound as unit, not as the entity" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa, "rule r(e: Entity, xs: int[]) {}");
+    defer pr.deinit(gpa);
+    const rule = pr.ast.rule_decls.items[0];
+    var locals: Locals = .{};
+    defer locals.deinit(gpa);
+    try bindParams(gpa, &pr.ast, rule, null, &locals);
+    const xs = pr.ast.rule_params.items[rule.params_start + 1].name;
+    try std.testing.expect(locals.get(xs).? == .unit);
+}
+
+test "a rule parameter typed by an alias of Entity is the entity parameter" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa,
+        \\type Ent = Entity
+        \\rule r(e: Ent) {}
+    );
+    defer pr.deinit(gpa);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    try std.testing.expect(interp.rule_descs[0].entity_param_name != null);
+}
+
+test "a rule parameter typed by an alias of a scalar is bound as that scalar" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa,
+        \\type Seconds = float
+        \\rule r(e: Entity, dt: Seconds) {}
+    );
+    defer pr.deinit(gpa);
+    const rule = pr.ast.rule_decls.items[0];
+    var locals: Locals = .{};
+    defer locals.deinit(gpa);
+    try bindParams(gpa, &pr.ast, rule, null, &locals);
+    const dt = pr.ast.rule_params.items[rule.params_start + 1].name;
+    try std.testing.expect(locals.get(dt).? == .float_);
+}
+
+/// One tick of `source` over one entity carrying `Acc`, unchecked, by an
+/// interpreter compiled into `interp`, which the caller then owns.
+fn tickOnAcc(gpa: std.mem.Allocator, world: *World, pr: *const parser_mod.ParseResult, interp: *Interpreter) !struct { report: RuntimeReport, bytes: []u8 } {
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    interp.* = try Interpreter.compile(gpa, &pr.ast, world);
+    errdefer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(world, 1);
+    const off = world.registry.findField(cid, "out").?.offset;
+    return .{ .report = report, .bytes = world.componentBytes(e, cid).?[off..] };
+}
+
+/// Asserts `report` holds exactly one runtime error, of `kind`.
+fn expectRuntimeError(report: RuntimeReport, kind: RuntimeErrorKind) !void {
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    try std.testing.expectEqual(kind, (report.last_error orelse return error.TestExpectedTypedError).kind);
+}
+
+test "an interpreter moved after it bound its world refuses to tick" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component Acc { out: int = 0 }\n");
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var moved = interp;
+    var report: RuntimeReport = .{};
+    try std.testing.expectError(error.InterpreterMovedAfterBind, moved.stepOnce(&world, &report));
+}
+
+test "an interpreter moved after it bound its world refuses to bind again" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component Acc { out: int = 0 }\n");
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var moved = interp;
+    try std.testing.expectError(error.InterpreterMovedAfterBind, moved.bindToWorld(&world));
+}
+
+const observed_source =
+    \\component Health { current: int = 0 }
+    \\@on_added(Health)
+    \\rule seen(entity: Entity, value: Health) {}
+;
+
+fn onAddListeners(world: *World, cid: ComponentId) usize {
+    return if (world.observer_registry.on_add.get(cid)) |list| list.items.len else 0;
+}
+
+test "a freed interpreter leaves no observer in the world it bound" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    try interp.bindToWorld(&world);
+    const health = world.registry.idOf("Health").?;
+    interp.deinit();
+    try std.testing.expectEqual(@as(usize, 0), onAddListeners(&world, health));
+}
+
+test "a freed interpreter leaves no extension seam in the world it bound" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    try interp.bindToWorld(&world);
+    interp.deinit();
+    try std.testing.expect(world.attach_hook == null);
+    try std.testing.expect(world.detach_hook == null);
+    try std.testing.expect(world.check_hook == null);
+}
+
+test "an interpreter bound to a world replaces the one bound before it" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var first = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer first.deinit();
+    try first.bindToWorld(&world);
+    var second = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer second.deinit();
+    try second.bindToWorld(&world);
+    try std.testing.expectEqual(@as(usize, 1), onAddListeners(&world, world.registry.idOf("Health").?));
+}
+
+test "a replaced interpreter freed leaves its successor bound" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var first = try Interpreter.compile(gpa, &pr.ast, &world);
+    try first.bindToWorld(&world);
+    var second = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer second.deinit();
+    try second.bindToWorld(&world);
+    first.deinit();
+    try std.testing.expectEqual(@as(usize, 1), onAddListeners(&world, world.registry.idOf("Health").?));
+    const hook = world.check_hook orelse return error.TestExpectedSeam;
+    try std.testing.expect(hook.ctx == @as(?*anyopaque, &second));
+}
+
+fn standInAttach(_: ?*anyopaque, _: *World, _: CoreEntityId, _: []const u8, _: ?[]const u8) anyerror!void {}
+
+test "a freed interpreter leaves in place a seam another registered" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    try interp.bindToWorld(&world);
+    var other: u8 = 0;
+    world.registerOnAttach(&other, &standInAttach);
+    interp.deinit();
+    const hook = world.attach_hook orelse return error.TestExpectedSeam;
+    try std.testing.expect(hook.ctx == @as(?*anyopaque, &other));
+}
+
+test "an interpreter bound to a world replaces the one bound before it through any of its seams" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var first = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer first.deinit();
+    try first.bindToWorld(&world);
+    var other: u8 = 0;
+    world.registerOnAttach(&other, &standInAttach);
+    var second = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer second.deinit();
+    try second.bindToWorld(&world);
+    try std.testing.expectEqual(@as(usize, 1), onAddListeners(&world, world.registry.idOf("Health").?));
+}
+
+test "an interpreter bound to one world refuses another" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var other = World.init();
+    defer other.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, observed_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    try std.testing.expectError(error.InterpreterBoundToAnotherWorld, interp.bindToWorld(&other));
+}
+
+test "after a reload frees the old interpreter, a structural change calls only the new one" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Health { current: int = 0 }
+        \\@on_added(Health)
+        \\rule seen(entity: Entity, value: Health) {
+        \\  entity.get_mut(Health).current = 7
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var old = try Interpreter.compile(gpa, &pr.ast, &world);
+    try old.bindToWorld(&world);
+    var new = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer new.deinit();
+    try new.bindToWorld(&world);
+    old.deinit();
+    const health = world.registry.idOf("Health").?;
+    var zero: i64 = 0;
+    const e = try world.observer_registry.spawnWithObservers(gpa, &world, &[_]ComponentId{health}, &[_][]const u8{std.mem.asBytes(&zero)});
+    try std.testing.expectEqual(@as(i64, 7), std.mem.readInt(i64, world.componentBytes(e, health).?[0..8], .little));
+}
+
+test "an interpreter tickOnAcc ran ticks again" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  entity.get_mut(Acc).out += 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 2), std.mem.readInt(i64, run.bytes[0..8], .little));
+}
+
+test "an overflowing addition panics or wraps by build mode" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let big = 9223372036854775807
+        \\  entity.get_mut(Acc).out = big + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    if (value_mod.overflow_wraps) {
+        try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+        try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
+    } else try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "an overflowing compound assignment reports IntegerOverflow" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let mut x = 9223372036854775807
+        \\  x += 1
+        \\  entity.get_mut(Acc).out = x
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    if (value_mod.overflow_wraps) {
+        try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
+    } else try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "negating the int minimum panics or wraps by build mode" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let m = -9223372036854775808
+        \\  entity.get_mut(Acc).out = -m
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    if (value_mod.overflow_wraps) {
+        try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
+    } else try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "the int minimum literal evaluates" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc { entity.get_mut(Acc).out = -9223372036854775808 }
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
+}
+
+test "a literal with a trailing separator evaluates" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc { entity.get_mut(Acc).out = 1_000_ }
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 1000), std.mem.readInt(i64, run.bytes[0..8], .little));
+}
+
+test "a narrowing cast panics or wraps by build mode" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let big = 3000000000
+        \\  entity.get_mut(Acc).out = big as i32
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    if (value_mod.overflow_wraps) {
+        try std.testing.expectEqual(@as(i32, -1294967296), std.mem.readInt(i32, run.bytes[0..4], .little));
+    } else try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "a float beyond the integer range fails its cast in every mode" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let f = 100000000000000000000.0
+        \\  entity.get_mut(Acc).out = f as int
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "a cast to f32 rounds to f32" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: float = 0.0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let x = 0.1
+        \\  entity.get_mut(Acc).out = (x as f32) as float
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    const want: f64 = @as(f32, 0.1);
+    try std.testing.expectEqual(want, @as(f64, @bitCast(std.mem.readInt(u64, run.bytes[0..8], .little))));
+}
+
+test "a store outside an i32 field panics or wraps by build mode" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: i32 = 2147483647 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let a = entity.get(Acc).out
+        \\  entity.get_mut(Acc).out = a + a
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    if (value_mod.overflow_wraps) {
+        try std.testing.expectEqual(@as(i32, -2), std.mem.readInt(i32, run.bytes[0..4], .little));
+    } else try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "an inclusive range ending at the int maximum terminates" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let mut n = 0
+        \\  for i in 9223372036854775806..=9223372036854775807 { n += 1 }
+        \\  entity.get_mut(Acc).out = n
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 2), std.mem.readInt(i64, run.bytes[0..8], .little));
+}
+
+test "an omitted struct field takes the zero of its type" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: float = 0.0 }
+        \\struct S {
+        \\  x: float
+        \\  n: int = 1
+        \\}
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let s = S { n: 2 }
+        \\  entity.get_mut(Acc).out = s.x + 1.5
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    try std.testing.expectEqual(@as(f64, 1.5), @as(f64, @bitCast(std.mem.readInt(u64, run.bytes[0..8], .little))));
+}
+
+test "an omitted struct field takes its string default" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\struct S {
+        \\  name: string = "hi"
+        \\  n: int = 1
+        \\}
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let s = S { n: 2 }
+        \\  entity.get_mut(Acc).out = s.name.len()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp: Interpreter = undefined;
+    const run = try tickOnAcc(gpa, &world, &pr, &interp);
+    defer interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 2), std.mem.readInt(i64, run.bytes[0..8], .little));
+}
+
+test "a default of logic over constants is stored" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component C { flag: bool = true or false }");
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("C").?;
+    try std.testing.expectEqual(@as(u8, 1), world.registry.componentDefaultBytes(cid)[0]);
+}
+
+test "a default that overflows its i32 field is refused at compile" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component C { v: i32 = 3000000000 }");
+    defer pr.deinit(gpa);
+    try std.testing.expectError(error.ValueOutOfRange, compileUnchecked(gpa, &pr, &world));
+}
+
+test "a default that divides by zero is refused at compile" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component C { v: int = 1 / 0 }");
+    defer pr.deinit(gpa);
+    try std.testing.expectError(error.InvalidProgram, compileUnchecked(gpa, &pr, &world));
+}
+
+test "a default whose folding overflows is refused at compile" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component C { v: int = 9223372036854775807 + 1 }");
+    defer pr.deinit(gpa);
+    try std.testing.expectError(error.ValueOutOfRange, compileUnchecked(gpa, &pr, &world));
+}
+
+test "a fill default materialises its count" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "resource R { xs: int[] = [7; 3] }");
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const list = persistentArrayOf(resourceCollectionPtr(&world, "R", "xs"));
+    try std.testing.expectEqual(@as(usize, 3), list.items.len);
+    for (list.items) |v| try std.testing.expectEqual(@as(i64, 7), v.int_);
+}
+
+test "an enum element default is stored as its variant" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\enum Mode { a, b }
+        \\resource R { xs: Mode[] = [.b] }
+    );
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const list = persistentArrayOf(resourceCollectionPtr(&world, "R", "xs"));
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expectEqual(@as(u32, 1), list.items[0].enum_value.variant);
+}
+
+test "a map default keeps the last value of a repeated key" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "resource R { m: [string: int] = [\"a\": 1, \"a\": 2] }");
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const map = persistentMapOf(resourceCollectionPtr(&world, "R", "m"));
+    try std.testing.expectEqual(@as(usize, 1), map.items.len);
+    try std.testing.expectEqual(@as(i64, 2), map.items[0].value.int_);
+}
+
+/// Asserts compiling `src`, unchecked, is refused as an invalid program.
+fn expectInvalidProgram(src: []const u8) !void {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, src);
+    defer pr.deinit(gpa);
+    try std.testing.expectError(error.InvalidProgram, compileUnchecked(gpa, &pr, &world));
+}
+
+test "an array field default that is not an array literal is refused at compile" {
+    try expectInvalidProgram("resource R { xs: int[] = 5 }");
+}
+
+test "a map field default that is not a map literal is refused at compile" {
+    try expectInvalidProgram("resource R { m: [string: int] = [] }");
+}
+
+test "a set field default other than Set.new() is refused at compile" {
+    try expectInvalidProgram("resource R { s: Set<int> = [1] }");
+}
+
+test "a collection element that does not fold is refused at compile" {
+    try expectInvalidProgram("resource R { xs: int[] = [1 / 0] }");
+}
+
+test "an enum field default that names no variant is refused at compile" {
+    try expectInvalidProgram("enum Mode { a }\nresource R { m: Mode = .nope }");
+}
+
+fn runOneTickOut(gpa: std.mem.Allocator, source: []const u8) !i64 {
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa, source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    return readResourceIntNamed(&world, "Out", "n");
+}
+
+test "a match literal arm matches a runtime-built string" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let s = "a" + ""
+        \\  let o = get_mut(Out)
+        \\  o.n = match s { "a" => 1, _ => 2 }
+        \\}
+    ));
+}
+
+test "a match literal arm matches a resource string" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0, name: string = "a" }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let v = match get(Out).name { "a" => 1, _ => 2 }
+        \\  get_mut(Out).n = v
+        \\}
+    ));
+}
+
+test "an async match statement's literal arm matches a runtime-built string" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let s = "a" + ""
+        \\  match s {
+        \\    "a" => { get_mut(Out).n = 1 },
+        \\    _ => { get_mut(Out).n = 2 }
+        \\  }
+        \\}
+    ));
+}
+
+test "a rule-arena map keeps one entry per runtime-built string key" {
+    try std.testing.expectEqual(@as(i64, 2), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let mut m = ["x": 0]
+        \\  m.insert("k" + "", 1)
+        \\  m.insert("k" + "", 2)
+        \\  get_mut(Out).n = m.len()
+        \\}
+    ));
+}
+
+test "a rule-arena map finds a runtime-built string key" {
+    try std.testing.expectEqual(@as(i64, 7), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let mut m = ["x": 0]
+        \\  m.insert("k" + "", 7)
+        \\  get_mut(Out).n = m["k" + ""] ?? 0
+        \\}
+    ));
+}
+
+test "a rule-arena set keeps one element per runtime-built string" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let mut s: Set<string> = Set.new()
+        \\  s.insert("k" + "")
+        \\  s.insert("k" + "")
+        \\  get_mut(Out).n = s.len()
+        \\}
+    ));
+}
+
+test "a rule-arena set contains a runtime-built string" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let mut s: Set<string> = Set.new()
+        \\  s.insert("k" + "")
+        \\  get_mut(Out).n = if s.contains("k" + "") { 1 } else { 0 }
+        \\}
+    ));
+}
+
+test "a resource string interpolates" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, name: string = "a" }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  get_mut(Out).name = "{get(Out).name}!"
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try expectResourceStringField(&world, "Out", "name", "a!");
+}
+
+test "Set.from takes a resource array" {
+    try std.testing.expectEqual(@as(i64, 3), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0, items: string[] = ["a", "b", "c"] }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  get_mut(Out).n = Set.from(get(Out).items).len()
+        \\}
+    ));
+}
+
+test "a resource array slices" {
+    try std.testing.expectEqual(@as(i64, 2), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0, items: string[] = ["a", "b", "c"] }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  get_mut(Out).n = get(Out).items[0..2].len()
+        \\}
+    ));
+}
+
+test "a resource filter runs on a resource carrying an enum field" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\enum Mode { a, b }
+        \\resource Out { n: int = 0, m: Mode = .a }
+        \\rule r()
+        \\  when resource Out { n == 0 }
+        \\{
+        \\  get_mut(Out).n = 1
+        \\}
+    ));
+}
+
+test "a resource filter reads an enum field typed" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\enum Mode { a, b }
+        \\resource Out { n: int = 0, m: Mode = .b }
+        \\rule r()
+        \\  when resource Out { match m { Mode.a => false, Mode.b => true } }
+        \\{
+        \\  get_mut(Out).n = 1
+        \\}
+    ));
+}
+
+test "newRunString frees the bytes it takes on an allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const gpa = failing.allocator();
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0 }
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try std.testing.expectEqual(interp.run_strings.items.len, interp.run_strings.capacity);
+    const bytes = try gpa.dupe(u8, "abc");
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, interp.newRunString(bytes));
+}
+
+test "a break that leaves its closure fails the rule and does not break the caller's loop" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const source =
+        \\resource Out { n: int = 0 }
+        \\rule r() when resource Out {
+        \\  let v = loop {
+        \\    let f = |k: int| {
+        \\      if k > 0 {
+        \\        break 7
+        \\      }
+        \\      k
+        \\    }
+        \\    let z = f(1)
+        \\    break 1
+        \\  }
+        \\  get_mut(Out).n = v
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    const le = report.last_error orelse return error.TestExpectedTypedError;
+    try std.testing.expectEqual(RuntimeErrorKind.ControlFlowEscapesClosure, le.kind);
+    try std.testing.expect(std.mem.startsWith(u8, source[le.span.byte_start..le.span.byte_end], "|k: int|"));
+    try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "Out", "n"));
+}
+
+test "a continue that leaves its closure fails the rule and does not continue the caller's loop" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const source =
+        \\resource Out { n: int = 0 }
+        \\rule r() when resource Out {
+        \\  let mut total = 0
+        \\  for i in 0..3 {
+        \\    let f = |k: int| {
+        \\      if k > 0 {
+        \\        continue
+        \\      }
+        \\      k
+        \\    }
+        \\    let z = f(i)
+        \\    total = total + 1
+        \\  }
+        \\  get_mut(Out).n = total + 10
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    const le = report.last_error orelse return error.TestExpectedTypedError;
+    try std.testing.expectEqual(RuntimeErrorKind.ControlFlowEscapesClosure, le.kind);
+    try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "Out", "n"));
+}
+
+const ConstRun = struct { name: []const u8, src: []const u8, out: i64 };
+
+const const_runs = [_]ConstRun{
+    .{ .name = "a lowercase const", .out = 7, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = limit
+    \\}
+    },
+    .{ .name = "an uppercase const", .out = 9, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = MAX
+    \\}
+    },
+    .{ .name = "two consts in arithmetic", .out = 16, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = limit + MAX
+    \\}
+    },
+    .{ .name = "an enum const", .out = 3, .src =
+    \\resource Out { n: int = 0 }
+    \\enum Tag { a, b }
+    \\const START: Tag = .b
+    \\rule r() when resource Out {
+    \\  let t: Tag = START
+    \\  get_mut(Out).n = match t { .a => 1, .b => 3 }
+    \\}
+    },
+    .{ .name = "a string const", .out = 2, .src =
+    \\resource Out { n: int = 0 }
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  let s = label
+    \\  get_mut(Out).n = s.len()
+    \\}
+    },
+};
+
+test "a const is read at run time by either spelling" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (const_runs) |c| {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa, c.src);
+        defer pr.deinit(gpa);
+        try std.testing.expect(pr.diagnostics.len == 0);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const report = try interp.runFor(&world, 1);
+        const out = readResourceIntNamed(&world, "Out", "n");
+        if (report.runtime_errors != 0 or out != c.out) {
+            wrong += 1;
+            std.debug.print("{s}: {d} runtime errors, Out.n = {d}, expected {d}\n", .{ c.name, report.runtime_errors, out, c.out });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const ScopeRun = struct { name: []const u8, out: i64, ticks: u32 = 1, src: []const u8 };
+
+const scope_runs = [_]ScopeRun{
+    .{ .name = "a nested block's shadow ends with the block", .out = 1, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  if true { let x = 2 }
+    \\  get_mut(Out).n = x
+    \\}
+    },
+    .{ .name = "an if-let payload shadows until its block ends", .out = 91, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  if let x = some(9) { get_mut(Out).n = x }
+    \\  get_mut(Out).n = get(Out).n * 10 + x
+    \\}
+    },
+    .{ .name = "a match binding shadows until its arm ends", .out = 41, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let o = some(4)
+    \\  match o { some(x) => { get_mut(Out).n = x }, none => {} }
+    \\  get_mut(Out).n = get(Out).n * 10 + x
+    \\}
+    },
+    .{ .name = "a for variable shadows until the loop ends", .out = 7, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let i = 7
+    \\  for i in 0..3 { }
+    \\  get_mut(Out).n = i
+    \\}
+    },
+    .{ .name = "a loop body's let shadows on each iteration", .out = 35, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 5
+    \\  let mut s = 0
+    \\  for i in 0..3 {
+    \\    let x = i
+    \\    s += x
+    \\  }
+    \\  get_mut(Out).n = s * 10 + x
+    \\}
+    },
+    .{ .name = "a while-let payload shadows until the loop ends", .out = 8, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let v = 8
+    \\  let mut a: int[] = [1, 2]
+    \\  while let v = a.pop() { }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "a catch binding shadows until the catch ends", .out = 3, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let err = 3
+    \\  try {
+    \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+    \\  } catch err { }
+    \\  get_mut(Out).n = err
+    \\}
+    },
+    .{ .name = "a shadowed persistent string keeps its value", .out = 3, .src =
+    \\resource Out { n: int = 0 }
+    \\resource Names { a: string = "abc" }
+    \\rule r() when resource Out and resource Names {
+    \\  let s = get(Names).a
+    \\  if true { let s = "x" }
+    \\  get_mut(Out).n = s.len()
+    \\}
+    },
+    .{ .name = "a for iteration over a range reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for i in 0..2 {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a for iteration over an array reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for v in [1, 2] {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a for iteration over a map reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  let m = [1: 2, 3: 4]
+    \\  for k, v in m {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a for iteration over a resource array reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\resource R { xs: int[] }
+    \\rule r() when resource Out and resource R {
+    \\  get_mut(R).xs.push(1)
+    \\  get_mut(R).xs.push(2)
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for v in get(R).xs {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a for iteration over a resource map reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\resource R { m: [int: int] }
+    \\rule r() when resource Out and resource R {
+    \\  get_mut(R).m.insert(1, 2)
+    \\  get_mut(R).m.insert(3, 4)
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for k, v in get(R).m {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a while iteration reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  let mut c = 0
+    \\  while c < 2 {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    c += 1
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a loop iteration reads the outer name before its let", .out = 11, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  let mut c = 0
+    \\  loop {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    c += 1
+    \\    if c == 2 { break }
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "a try body's let ends with the try", .out = 1, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let x = 1
+    \\  try {
+    \\    let x = 5
+    \\  } catch err { }
+    \\  get_mut(Out).n = x
+    \\}
+    },
+    .{ .name = "a bare match binding shadows until its arm ends", .out = 41, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let k = 1
+    \\  let r = match 4 { k => k }
+    \\  get_mut(Out).n = r * 10 + k
+    \\}
+    },
+    .{ .name = "a shadow held across an await ends with its iteration", .out = 51, .ticks = 10, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  for i in 0..1 {
+    \\    let x = 5
+    \\    await wait(0.05s)
+    \\    get_mut(Out).n = x
+    \\  }
+    \\  get_mut(Out).n = get(Out).n * 10 + x
+    \\}
+    },
+    .{ .name = "a match arm binding held across an await ends with its arm", .out = 41, .ticks = 10, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  match some(4) {
+    \\    some(x) => {
+    \\      await wait(0.05s)
+    \\      get_mut(Out).n = x
+    \\    },
+    \\    none => {},
+    \\  }
+    \\  get_mut(Out).n = get(Out).n * 10 + x
+    \\}
+    },
+    .{ .name = "an if-let payload held across an await ends with its block", .out = 91, .ticks = 10, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  if let x = some(9) {
+    \\    await wait(0.05s)
+    \\    get_mut(Out).n = x
+    \\  }
+    \\  get_mut(Out).n = get(Out).n * 10 + x
+    \\}
+    },
+    .{ .name = "a continue ends its iteration's scope", .out = 31, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for i in 0..3 {
+    \\    let x = i
+    \\    s += x
+    \\    if i == 1 { continue }
+    \\    await wait(0.05s)
+    \\  }
+    \\  get_mut(Out).n = s * 10 + x
+    \\}
+    },
+    .{ .name = "a block's trailing value is read in the block's scope", .out = 5, .ticks = 10, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  {
+    \\    let y = 5
+    \\    await wait(0.05s)
+    \\    get_mut(Out).n = y
+    \\    y
+    \\  }
+    \\}
+    },
+    .{ .name = "a catch binding reached across an await ends with the catch", .out = 3, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let err = 3
+    \\  try {
+    \\    await wait(0.05s)
+    \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+    \\  } catch err { }
+    \\  get_mut(Out).n = err
+    \\}
+    },
+    .{ .name = "an async for iteration reads the outer name before its let", .out = 11, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for i in 0..2 {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    await wait(0.05s)
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "an async for iteration ended by continue reads the outer name before its let", .out = 11, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  for i in 0..2 {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    if i == 0 { continue }
+    \\    await wait(0.05s)
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "an async for left by break ends its iteration's scope", .out = 1, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  for i in 0..3 {
+    \\    let x = 5
+    \\    await wait(0.05s)
+    \\    break
+    \\  }
+    \\  get_mut(Out).n = x
+    \\}
+    },
+    .{ .name = "an async while iteration reads the outer name before its let", .out = 11, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  let mut c = 0
+    \\  while c < 2 {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    c += 1
+    \\    await wait(0.05s)
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "an async loop iteration reads the outer name before its let", .out = 11, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  let mut s = 0
+    \\  let mut c = 0
+    \\  loop {
+    \\    s = s * 10 + x
+    \\    let x = 5
+    \\    c += 1
+    \\    if c == 2 { break }
+    \\    await wait(0.05s)
+    \\  }
+    \\  get_mut(Out).n = s
+    \\}
+    },
+    .{ .name = "an async try body's binding ends when a throw reaches the catch", .out = 1, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  try {
+    \\    let x = 5
+    \\    await wait(0.05s)
+    \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+    \\  } catch err {
+    \\    get_mut(Out).n = x
+    \\  }
+    \\}
+    },
+    .{ .name = "an async try body's binding ends with the try", .out = 1, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let x = 1
+    \\  try {
+    \\    let x = 5
+    \\    await wait(0.05s)
+    \\  } catch err { }
+    \\  get_mut(Out).n = x
+    \\}
+    },
+    .{ .name = "an async bare match arm's binding ends with the arm", .out = 1, .ticks = 20, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let k = 1
+    \\  match 4 { k => 0 }
+    \\  await wait(0.05s)
+    \\  get_mut(Out).n = k
+    \\}
+    },
+    .{ .name = "a timer body's own binding ends with each firing", .out = 11, .ticks = 8, .src =
+    \\resource Out { n: int = 0, armed: int = 0 }
+    \\rule r() when resource Out {
+    \\  if get(Out).armed == 0 {
+    \\    get_mut(Out).armed = 1
+    \\    let x = 1
+    \\    every(0.05s) {
+    \\      get_mut(Out).n = get(Out).n * 10 + x
+    \\      let x = 7
+    \\    }
+    \\  }
+    \\}
+    },
+};
+
+test "a binding ends with its scope at run time, and the one it shadowed returns" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (scope_runs) |c| {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa, c.src);
+        defer pr.deinit(gpa);
+        try std.testing.expect(pr.diagnostics.len == 0);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        if (diags.items.len != 0) {
+            wrong += 1;
+            for (diags.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+            continue;
+        }
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const report = try interp.runFor(&world, c.ticks);
+        const out = readResourceIntNamed(&world, "Out", "n");
+        if (report.runtime_errors != 0 or out != c.out) {
+            wrong += 1;
+            std.debug.print("{s}: {d} runtime errors, Out.n = {d}, expected {d}\n", .{ c.name, report.runtime_errors, out, c.out });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a binding a nested scope shadows keeps its reference until the scope closes" {
+    const gpa = std.testing.allocator;
+    const block = try persistent.alloc(gpa, persistent.type_string, 1);
+    block[0] = 'a';
+    const held: Value = .{ .string_persistent = .{ .ptr = @intFromPtr(block), .len = 1 } };
+    var locals: Locals = .{};
+    defer locals.deinit(gpa);
+    try locals.put(gpa, 1, held, false);
+    persistent.decref(gpa, block);
+    try locals.enter(gpa);
+    try locals.put(gpa, 1, .{ .int_ = 0 }, false);
+    try std.testing.expectEqual(@as(u32, 1), persistent.refcount(block));
+    locals.leave(gpa);
+    try std.testing.expectEqual(@as(u32, 1), persistent.refcount(block));
+    try std.testing.expectEqual(held, locals.get(1).?);
+}
+
+test "an equality between two kinds of value fails loud when nothing checked it" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\resource Out { n: int = 0 }
+        \\rule r() when resource Out {
+        \\  get_mut(Out).n = if 1 == true { 1 } else { 2 }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "Out", "n"));
 }

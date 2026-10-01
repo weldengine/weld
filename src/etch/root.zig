@@ -65,6 +65,7 @@ comptime {
     _ = @import("interp.zig");
     _ = @import("value.zig");
     _ = @import("ecs_bridge.zig");
+    _ = @import("const_eval.zig");
     // `persistent.zig` lives in Tier 0 (`src/core/memory`) and is pinned by
     // `src/core/memory/root.zig`, reached here via `weld_core.memory` — so it
     // needs no entry of its own below.
@@ -264,110 +265,11 @@ pub fn typeCheck(gpa: std.mem.Allocator, arena: *Ast, diags_out: *std.ArrayListU
     try TypeChecker.check(gpa, arena, diags_out);
 }
 
-/// One source file of a multi-file Etch project, fed to `validateProject`.
-/// `name` is the caller's label (path); the validator does not interpret it.
-pub const ProjectFile = struct {
-    name: []const u8,
-    source: []const u8,
-};
-
-/// Module path of a project file from its `ProjectFile.name` (path under `src/`,
-/// `etch-reference-part1.md` §1.1): strip an optional leading `src/`, strip the
-/// file extension (a typed compound `.scene.etch`/`.prefab.etch`/`.layer.etch`/
-/// `.manifest.etch`/`.d.etch` if present, else plain `.etch`), and map `/`→`.`.
-/// The returned slice is `gpa`-owned. Typed-extension files take their basename
-/// as the module label, and the reason they are not import *targets* differs by
-/// extension — the single justification this comment used to give was true of
-/// only one family:
-///   - `.scene.etch` / `.prefab.etch` / `.layer.etch` / `.manifest.etch` declare
-///     no top-level types (§21.3 bounds them to one scene/prefab plus imports),
-///     so there is nothing to import FROM them.
-///   - `.d.etch` declares nothing BUT top-level constructs (§20.4). It is not an
-///     import target for the opposite reason: a `service` is resolved from the
-///     compiler's global declaration table (`etch-abi-zig.md` §8.3), never
-///     through the per-module export index, so it is never named in an `import`.
-/// Either way the label only identifies the file as a node in the dependency
-/// graph.
-fn deriveModulePath(gpa: std.mem.Allocator, name: []const u8) ![]u8 {
-    var s = name;
-    if (std.mem.startsWith(u8, s, "src/")) s = s["src/".len..];
-    const typed_exts = [_][]const u8{ ".d.etch", ".scene.etch", ".prefab.etch", ".layer.etch", ".manifest.etch" };
-    var stripped = false;
-    for (typed_exts) |ext| {
-        if (std.mem.endsWith(u8, s, ext)) {
-            s = s[0 .. s.len - ext.len];
-            stripped = true;
-            break;
-        }
-    }
-    if (!stripped and std.mem.endsWith(u8, s, ".etch")) s = s[0 .. s.len - ".etch".len];
-    const out = try gpa.dupe(u8, s);
-    for (out) |*c| {
-        if (c.* == '/') c.* = '.';
-    }
-    return out;
-}
-
-/// The dotted module path an `ImportDecl` references (`import a.b.c` → `"a.b.c"`),
-/// joined from its `import_path_segs` run. `gpa`-owned.
-fn joinImportPath(gpa: std.mem.Allocator, a: *const Ast, decl: ast.ImportDecl) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(gpa);
-    var i: u32 = 0;
-    while (i < decl.path_len) : (i += 1) {
-        if (i != 0) try buf.append(gpa, '.');
-        try buf.appendSlice(gpa, a.strings.slice(a.import_path_segs.items[decl.path_start + i]));
-    }
-    return try buf.toOwnedSlice(gpa);
-}
-
-/// Build module `a`'s public exports table: every top-level
-/// symbol-bearing declaration (component / resource / struct / enum / trait /
-/// event / fn / type-alias) keyed by its interned name's bytes →
-/// `{ kind, visibility, arena_index, item_id }`. All-public until `private`
-/// graduates (D-G). Keys reference `a`'s string pool, kept alive by the caller.
-fn buildExports(gpa: std.mem.Allocator, a: *const Ast, arena_index: usize, table: *TypeChecker.ExportTable) !void {
-    const kinds = a.items.items(.kind);
-    const datas = a.items.items(.data);
-    var i: usize = 0;
-    while (i < a.items.len) : (i += 1) {
-        const item_id: NodeId = .{ .category = .item, .index = @intCast(i) };
-        const nk: ?struct { name: StringId, kind: types.SymbolKind } = switch (kinds[i]) {
-            .component_decl => .{ .name = a.component_decls.items[datas[i]].name, .kind = .component },
-            .resource_decl => .{ .name = a.resource_decls.items[datas[i]].name, .kind = .resource },
-            .struct_decl => .{ .name = a.struct_decls.items[datas[i]].name, .kind = .struct_ },
-            .enum_decl => .{ .name = a.enum_decls.items[datas[i]].name, .kind = .enum_ },
-            .trait_decl => .{ .name = a.trait_decls.items[datas[i]].name, .kind = .trait_ },
-            .event_decl => .{ .name = a.event_decls.items[datas[i]].name, .kind = .event_ },
-            .fn_decl => .{ .name = a.fn_decls.items[datas[i]].name, .kind = .fn_ },
-            .type_alias => .{ .name = a.type_alias_decls.items[datas[i]].name, .kind = .type_alias },
-            // a top-level `const` is exportable (always public — a
-            // const cannot carry a `private` prefix). `test` blocks are NOT
-            // listed: they live in a dedicated test-name namespace
-            // (`TypeChecker.test_symbols`) and are
-            // never exported.
-            .const_decl => .{ .name = a.const_decls.items[datas[i]].name, .kind = .const_ },
-            else => null,
-        };
-        if (nk) |e| {
-            // Last decl wins on a same-name dup (an intra-file dup is E0101 in
-            // pass 1); the exports table only needs a single resolvable entry.
-            // read the item's visibility: a `private` declaration_body
-            // is recorded `.private`, which makes the dormant `E0107` check in
-            // `bindImports` reachable when another module imports it.
-            const vis: TypeChecker.Visibility = switch (a.itemVisibility(item_id)) {
-                .public => .public,
-                .private => .private,
-            };
-            try table.put(gpa, a.strings.slice(e.name), .{
-                .kind = e.kind,
-                .visibility = vis,
-                .arena_index = arena_index,
-                .item_id = item_id,
-            });
-        }
-    }
-}
+/// A set of source files parsed and indexed together (`validateProject`, the
+/// project cook).
+pub const project = @import("project.zig");
+/// One source file of a multi-file project.
+pub const ProjectFile = project.ProjectFile;
 
 /// Cross-file scene/prefab validation. Parses every project file,
 /// builds the byte-keyed global prefab-name index and a shared cross-scene
@@ -380,192 +282,19 @@ fn buildExports(gpa: std.mem.Allocator, a: *const Ast, arena_index: usize, table
 ///   - `E1782 DuplicateUUID` (cross-scene) — the same entity/instance UUID in
 ///     two scenes (same or different file).
 ///
-/// Every file's parse + type-check diagnostics accumulate in `diags_out`
-/// (caller-owned; each owns its `primary_message`). Deliberately BOUNDED —
-/// enumerate files, index prefab names + scene UUIDs, resolve the three
-/// references. No general dependency graph, no watch mode, no incremental
-/// invalidation.
+/// The files are checked dependencies first along the import graph, which
+/// also resolves every `import` (E0103 / E0104 / E0107 / E0108). Every file's
+/// parse + type-check diagnostics accumulate in `diags_out` (caller-owned; each
+/// owns its `primary_message`). No watch mode, no incremental invalidation.
 pub fn validateProject(
     gpa: std.mem.Allocator,
     files: []const ProjectFile,
     diags_out: *std.ArrayListUnmanaged(Diagnostic),
 ) !void {
-    // Parse every file up front; the arenas stay alive for the whole pass so
-    // the byte-keyed indexes below can reference their interned strings.
-    var asts: std.ArrayListUnmanaged(Ast) = .empty;
-    defer {
-        for (asts.items) |*a| a.deinit(gpa);
-        asts.deinit(gpa);
-    }
-    try asts.ensureTotalCapacity(gpa, files.len);
-    for (files) |f| {
-        // `ProjectFile.name` is the ONLY place in the tree that holds both the
-        // path and the source, which is why the mode is threaded here and
-        // nowhere else (`parser.parse` takes no filename, and of its call sites
-        // only this one and `scene_cook.zig` know a path at all).
-        const pr = try parser.parseWithMode(gpa, f.source, parser.modeForPath(f.name));
-        // Move each parse diagnostic into diags_out (its gpa-owned message
-        // transfers), then free only the now-vacated backing slice — never
-        // `pr.deinit`, which would double-free the arena we keep below.
-        for (pr.diagnostics) |d| try diags_out.append(gpa, d);
-        gpa.free(pr.diagnostics);
-        asts.appendAssumeCapacity(pr.ast);
-    }
-
-    // Global byte-keyed prefab-name index (E1786 / E1791). Keys reference the
-    // arenas' string pools; the maps free before the arenas (LIFO defers).
-    var prefabs: std.StringHashMapUnmanaged(void) = .empty;
-    defer prefabs.deinit(gpa);
-    for (asts.items) |*a| {
-        const kinds = a.items.items(.kind);
-        const datas = a.items.items(.data);
-        var i: usize = 0;
-        while (i < a.items.len) : (i += 1) {
-            if (kinds[i] != .prefab_decl) continue;
-            const decl = a.prefab_decls.items[datas[i]];
-            try prefabs.put(gpa, a.strings.slice(decl.name), {});
-        }
-    }
-
-    // Shared cross-scene UUID tracker (E1782): the first occurrence of a UUID
-    // is recorded, a later one is the duplicate.
-    var uuids: std.StringHashMapUnmanaged(void) = .empty;
-    defer uuids.deinit(gpa);
-
-    // ── module graph + topological order + cycle detection ──
-    // Derive each file's module path and build module-path → index map.
-    const n = asts.items.len;
-    var module_paths: std.ArrayListUnmanaged([]u8) = .empty;
-    defer {
-        for (module_paths.items) |p| gpa.free(p);
-        module_paths.deinit(gpa);
-    }
-    try module_paths.ensureTotalCapacity(gpa, n);
-    var module_index: std.StringHashMapUnmanaged(usize) = .empty;
-    defer module_index.deinit(gpa);
-    for (files, 0..) |f, idx| {
-        const mp = try deriveModulePath(gpa, f.name);
-        module_paths.appendAssumeCapacity(mp);
-        // A duplicate module path (an out-of-scope edge case) maps to the last
-        // file; the graph only needs a consistent node identity.
-        try module_index.put(gpa, mp, idx);
-    }
-
-    // Build the directed import-dependency graph: edge importer → imported, for
-    // each import whose target module resolves to a file in the set. Targets that
-    // resolve to no file are an import-resolution concern, not a cycle edge.
-    const Edge = struct { to: usize, span: SourceSpan };
-    var adj: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Edge)) = .empty;
-    defer {
-        for (adj.items) |*lst| lst.deinit(gpa);
-        adj.deinit(gpa);
-    }
-    try adj.ensureTotalCapacity(gpa, n);
-    for (0..n) |_| adj.appendAssumeCapacity(.empty);
-    for (asts.items, 0..) |*a, u| {
-        const kinds = a.items.items(.kind);
-        const datas = a.items.items(.data);
-        const spans = a.items.items(.span);
-        var i: usize = 0;
-        while (i < a.items.len) : (i += 1) {
-            if (kinds[i] != .import_decl) continue;
-            const decl = a.import_decls.items[datas[i]];
-            const target_path = try joinImportPath(gpa, a, decl);
-            defer gpa.free(target_path);
-            if (module_index.get(target_path)) |v| {
-                try adj.items[u].append(gpa, .{ .to = v, .span = spans[i] });
-            }
-        }
-    }
-
-    // Iterative DFS: post-order yields a dependencies-first topological order; a
-    // back-edge (to a gray/on-stack node) closes a cycle → E0108 pointing at the
-    // import that closes the loop. White = 0, gray = 1, black = 2.
-    const colors = try gpa.alloc(u8, n);
-    defer gpa.free(colors);
-    @memset(colors, 0);
-    var order: std.ArrayListUnmanaged(usize) = .empty;
-    defer order.deinit(gpa);
-    try order.ensureTotalCapacity(gpa, n);
-    const Frame = struct { node: usize, ei: usize };
-    var stack: std.ArrayListUnmanaged(Frame) = .empty;
-    defer stack.deinit(gpa);
-    var cycle_found = false;
-    for (0..n) |start| {
-        if (colors[start] != 0) continue;
-        colors[start] = 1;
-        stack.clearRetainingCapacity();
-        try stack.append(gpa, .{ .node = start, .ei = 0 });
-        while (stack.items.len > 0) {
-            const frame = &stack.items[stack.items.len - 1];
-            const edges = adj.items[frame.node].items;
-            if (frame.ei < edges.len) {
-                const edge = edges[frame.ei];
-                frame.ei += 1;
-                switch (colors[edge.to]) {
-                    0 => {
-                        colors[edge.to] = 1;
-                        try stack.append(gpa, .{ .node = edge.to, .ei = 0 });
-                    },
-                    1 => {
-                        // Back-edge: `from` imports `to`, already on the stack.
-                        cycle_found = true;
-                        const from_node = frame.node;
-                        const msg = try std.fmt.allocPrint(
-                            gpa,
-                            "import cycle detected: module '{s}' imports '{s}', which closes a cycle back to '{s}'",
-                            .{ module_paths.items[from_node], module_paths.items[edge.to], module_paths.items[edge.to] },
-                        );
-                        errdefer gpa.free(msg);
-                        try diags_out.append(gpa, .{
-                            .code = .import_cycle,
-                            .severity = .error_,
-                            .primary_span = edge.span,
-                            .primary_message = msg,
-                        });
-                    },
-                    else => {}, // black: already finished, no cycle
-                }
-            } else {
-                colors[frame.node] = 2;
-                order.appendAssumeCapacity(frame.node);
-                _ = stack.pop();
-            }
-        }
-    }
-
-    // Per-module exports tables: one byte-keyed table per file, so
-    // `import a.b { X }` resolves X in module `a.b`'s exports SPECIFICALLY — two
-    // modules exporting the same name never collide (unlike the flat global
-    // `prefabs` index, whose names are project-global by design).
-    var exports: std.ArrayListUnmanaged(TypeChecker.ExportTable) = .empty;
-    defer {
-        for (exports.items) |*t| t.deinit(gpa);
-        exports.deinit(gpa);
-    }
-    try exports.ensureTotalCapacity(gpa, n);
-    for (asts.items, 0..) |*a, idx| {
-        var table: TypeChecker.ExportTable = .empty;
-        errdefer table.deinit(gpa);
-        try buildExports(gpa, a, idx, &table);
-        exports.appendAssumeCapacity(table);
-    }
-
-    // Check each file with the project context. Acyclic → topological order so a
-    // module's dependencies are checked first;
-    // on a cycle, fall back to input order (the graph has no valid linearization).
-    const ctx: TypeChecker.ProjectContext = .{
-        .prefabs = &prefabs,
-        .uuids = &uuids,
-        .module_index = &module_index,
-        .exports = exports.items,
-        .arenas = asts.items,
-    };
-    var k: usize = 0;
-    while (k < n) : (k += 1) {
-        const idx = if (cycle_found) k else order.items[k];
-        try TypeChecker.checkProject(gpa, &asts.items[idx], diags_out, &ctx);
-    }
+    var p = try project.Project.init(gpa, files, diags_out);
+    defer p.deinit();
+    const ctx = p.context();
+    for (p.order) |idx| try TypeChecker.checkProject(gpa, &p.arenas.items[idx], diags_out, &ctx);
 }
 
 test "public API builds + serializes a Level-B data descriptor" {

@@ -1,0 +1,17 @@
+// A match on a runtime-built string compares bytes, as an expression and as a
+// statement, in both backends: value 0 -> 1 -> 11 in one tick.
+component Counter {
+  value: int = 0
+}
+
+rule pick(entity: Entity)
+  when entity has Counter
+{
+  let s = "a" + ""
+  entity.get_mut(Counter).value = match s { "a" => 1, _ => 2 }
+  match s {
+    "b" => { entity.get_mut(Counter).value = entity.get(Counter).value + 100 },
+    "a" => { entity.get_mut(Counter).value = entity.get(Counter).value + 10 },
+    _ => { entity.get_mut(Counter).value = 0 },
+  }
+}

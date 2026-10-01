@@ -3,9 +3,10 @@
 //! on a toy service and never on the physics, which is only the first
 //! consumer.
 //!
-//! It is deliberately not physics-shaped: three methods covering the three
-//! things the tree-walker path has to get right — a value comes back, a Zig
-//! error union becomes an Etch `throw`, and a string crosses in both directions.
+//! It is deliberately not physics-shaped: its methods cover what the
+//! tree-walker path has to get right — a value comes back, a Zig error union
+//! becomes an Etch `throw`, a string crosses in both directions, labeled
+//! arguments bind by name, and a float parameter takes no int.
 
 const std = @import("std");
 const services = @import("weld_etch").services;
@@ -47,9 +48,19 @@ pub fn label(ctx: *Ctx, prefix: []const u8) []const u8 {
     return ctx.label_buf[0 .. n + 1];
 }
 
-/// The toy's `ServiceSpec` (`etch-abi-zig.md` §8.1). Parameter NAMES are
-/// declared because Zig carries none; every type and the `throws` flag are
-/// derived from the implementations above.
+/// Returns `a * 10 + b`, so an argument bound to the wrong parameter shows in
+/// the result.
+pub fn pair(ctx: *Ctx, a: i64, b: i64) i64 {
+    ctx.calls += 1;
+    return a * 10 + b;
+}
+
+/// Returns `x / 2`: the one float parameter, which an `int` never reaches.
+pub fn half(ctx: *Ctx, x: f64) f64 {
+    ctx.calls += 1;
+    return x / 2;
+}
+
 /// Payload of the toy event a Tier 1 module publishes to Etch.
 /// `extern` because it crosses a module boundary; the emitter refuses a struct
 /// with no layout guarantee, and the layout is what makes the field ORDER a
@@ -78,6 +89,8 @@ pub const spec = services.ServiceSpec{
         services.method("echo", "Add the service's base to n.", *Ctx, &.{"n"}, echo),
         services.method("risky", "Fail when n is greater than two.", *Ctx, &.{"n"}, risky),
         services.method("label", null, *Ctx, &.{"prefix"}, label),
+        services.method("pair", "Return a times ten plus b.", *Ctx, &.{ "a", "b" }, pair),
+        services.method("half", "Return half of x.", *Ctx, &.{"x"}, half),
     },
 };
 

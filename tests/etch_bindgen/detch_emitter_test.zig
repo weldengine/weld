@@ -36,7 +36,7 @@ test "the committed .d.etch matches what the emitter produces" {
     // NON-VACUITY: the comparison had something to compare. A zero-method spec,
     // or an emitter returning the empty string, would satisfy the assertion
     // above and prove nothing.
-    try std.testing.expectEqual(@as(usize, 3), toy.spec.methods.len);
+    try std.testing.expectEqual(@as(usize, 5), toy.spec.methods.len);
     try std.testing.expect(rendered.len > 100);
     try std.testing.expect(std.mem.indexOf(u8, rendered, emit_detch.header_line) != null);
 }
@@ -134,7 +134,7 @@ test "the emitted artifact is a .d.etch the compiler accepts" {
     try std.testing.expectEqual(@as(usize, 1), pr.ast.service_decls.items.len);
     const decl = pr.ast.service_decls.items[0];
     try std.testing.expectEqualStrings("toy", pr.ast.strings.slice(decl.name));
-    try std.testing.expectEqual(@as(u32, 3), decl.methods_len);
+    try std.testing.expectEqual(@as(u32, 5), decl.methods_len);
 
     // Round trip on the two properties the emitter DERIVES, per method rather
     // than in aggregate: bodyless, and `throws` exactly where the spec says.

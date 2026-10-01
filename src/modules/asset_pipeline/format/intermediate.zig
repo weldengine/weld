@@ -17,9 +17,11 @@
 //! grammar) is frozen; block *contents* are open per asset category.
 //!
 //! This ad-hoc reader/writer avoids a `weld_etch` dependency (the
-//! full Etch parser lives elsewhere). It covers exactly the §21.4 value grammar
-//! minus `@unit(...)` annotations, which the writer does not emit
-//! (adding them is additive). The on-disk text is the frozen contract, not this
+//! full Etch parser lives elsewhere). The reader takes the §21.4 grammar with
+//! the Etch lexical rules of §1 — comments, the string escapes and triple-quoted
+//! strings, `_` digit separators — and the §3 schema. A field annotation
+//! (`@unit(...)`) is parsed and not kept: the document model carries none, and
+//! the writer emits none. The on-disk text is the frozen contract, not this
 //! reader implementation.
 //!
 //! Ownership: `parseEtch` allocates every string/array/object into the
@@ -180,12 +182,17 @@ pub const WriteError = std.Io.Writer.Error;
 
 /// Serialize `doc` as `<type>.asset.etch` text into `out`.
 pub fn writeEtch(doc: AssetDoc, out: *std.Io.Writer) WriteError!void {
-    try out.print("asset \"{s}\" {{\n", .{doc.name});
-    try out.print("  uuid: \"{s}\"\n", .{doc.uuid});
-    try out.print("  type: {s}\n", .{doc.type_name});
+    try out.writeAll("asset ");
+    try writeString(out, doc.name);
+    try out.writeAll(" {\n  uuid: ");
+    try writeString(out, doc.uuid);
+    try out.print("\n  type: {s}\n", .{doc.type_name});
     try out.print("  version: {d}\n", .{doc.version});
-    try out.print("  source: \"{s}\"\n", .{doc.source});
-    try out.print("  source_hash: \"{s}\"\n", .{doc.source_hash});
+    try out.writeAll("  source: ");
+    try writeString(out, doc.source);
+    try out.writeAll("\n  source_hash: ");
+    try writeString(out, doc.source_hash);
+    try out.writeAll("\n");
     try writeBlock(out, "import_settings", doc.import_settings);
     try writeBlock(out, "process_settings", doc.process_settings);
     try writeBlock(out, "cook_settings", doc.cook_settings);
@@ -221,7 +228,7 @@ fn writeValue(out: *std.Io.Writer, v: Value, depth: usize) WriteError!void {
         .int => |i| try out.print("{d}", .{i}),
         .float => |f| try writeFloat(out, f),
         .boolean => |b| try out.writeAll(if (b) "true" else "false"),
-        .string => |s| try out.print("\"{s}\"", .{s}),
+        .string => |s| try writeString(out, s),
         .identifier => |s| try out.writeAll(s),
         .enum_literal => |s| try out.print(".{s}", .{s}),
         .array => |items| {
@@ -246,6 +253,22 @@ fn writeValue(out: *std.Io.Writer, v: Value, depth: usize) WriteError!void {
     }
 }
 
+/// Emit `s` as a string literal: `"`, `\\`, `{` and the line breaks escaped
+/// (`etch-grammar.md` §1.4), so the reader returns the same bytes.
+fn writeString(out: *std.Io.Writer, s: []const u8) WriteError!void {
+    try out.writeAll("\"");
+    for (s) |c| switch (c) {
+        '"' => try out.writeAll("\\\""),
+        '\\' => try out.writeAll("\\\\"),
+        '{' => try out.writeAll("\\{"),
+        '\n' => try out.writeAll("\\n"),
+        '\t' => try out.writeAll("\\t"),
+        '\r' => try out.writeAll("\\r"),
+        else => try out.writeByte(c),
+    };
+    try out.writeAll("\"");
+}
+
 /// Emit a float with a guaranteed decimal point so the reader keeps it a
 /// float (otherwise `1.0` would format as `1` and parse back as an int).
 fn writeFloat(out: *std.Io.Writer, f: f64) WriteError!void {
@@ -265,14 +288,18 @@ pub const ParseError = error{
     OutOfMemory,
     /// Hit end of input mid-construct.
     UnexpectedEnd,
-    /// A character not valid at this position.
+    /// A character not valid at this position, or content after the construct.
     UnexpectedChar,
     /// The document does not start with the `asset` keyword.
     ExpectedAssetKeyword,
-    /// A numeric literal failed to parse.
+    /// A numeric literal failed to parse, overflows, or is not finite.
     InvalidNumber,
     /// The `version` field was absent, non-integer, or out of `u16` range.
     InvalidVersion,
+    /// The document breaks the `engine-asset-pipeline.md` §3 schema: a fixed
+    /// field or block missing, repeated, unknown or of the wrong kind, or a
+    /// `uuid` / hash not in its canonical form.
+    SchemaViolation,
 };
 
 /// Parse `<type>.asset.etch` text into an `AssetDoc`. Every owned slice is
@@ -280,6 +307,14 @@ pub const ParseError = error{
 pub fn parseEtch(arena: std.mem.Allocator, src: []const u8) ParseError!AssetDoc {
     var p = Parser{ .src = src, .arena = arena };
     return p.parseDoc();
+}
+
+/// The `uuid` of an existing intermediate document, which a re-import keeps
+/// (`engine-asset-pipeline.md` §3), or null when `text` is null: there is no
+/// document yet. A document that does not parse is an error, never a reason to
+/// mint another identity.
+pub fn existingUuid(arena: std.mem.Allocator, text: ?[]const u8) ParseError!?[]const u8 {
+    return (try parseEtch(arena, text orelse return null)).uuid;
 }
 
 const Parser = struct {
@@ -294,73 +329,176 @@ const Parser = struct {
         return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
     }
     fn isIdentChar(c: u8) bool {
-        return isIdentStart(c) or (c >= '0' and c <= '9');
+        return isIdentStart(c) or isDigit(c);
+    }
+    fn isDigit(c: u8) bool {
+        return c >= '0' and c <= '9';
     }
 
-    fn skipWs(self: *Parser) void {
-        while (self.pos < self.src.len and isWs(self.src[self.pos])) : (self.pos += 1) {}
+    /// Skip whitespace and comments: `// …` to the end of the line, `/* … */`
+    /// unnested (`etch-grammar.md` §1).
+    fn skipWs(self: *Parser) ParseError!void {
+        while (self.pos < self.src.len) {
+            const c = self.src[self.pos];
+            if (isWs(c)) {
+                self.pos += 1;
+            } else if (std.mem.startsWith(u8, self.src[self.pos..], "//")) {
+                self.pos = std.mem.indexOfScalarPos(u8, self.src, self.pos, '\n') orelse self.src.len;
+            } else if (std.mem.startsWith(u8, self.src[self.pos..], "/*")) {
+                const close = std.mem.indexOfPos(u8, self.src, self.pos + 2, "*/") orelse return error.UnexpectedEnd;
+                self.pos = close + 2;
+            } else return;
+        }
     }
 
     fn peekNonWs(self: *Parser) ParseError!u8 {
-        self.skipWs();
+        try self.skipWs();
         if (self.pos >= self.src.len) return error.UnexpectedEnd;
         return self.src[self.pos];
     }
 
     fn expect(self: *Parser, ch: u8) ParseError!void {
-        self.skipWs();
-        if (self.pos >= self.src.len) return error.UnexpectedEnd;
-        if (self.src[self.pos] != ch) return error.UnexpectedChar;
+        if (try self.peekNonWs() != ch) return error.UnexpectedChar;
         self.pos += 1;
     }
 
+    /// An `IDENT`. `true` and `false` are boolean literals, never identifiers.
     fn parseIdent(self: *Parser) ParseError![]const u8 {
-        self.skipWs();
+        try self.skipWs();
         const start = self.pos;
         if (self.pos >= self.src.len or !isIdentStart(self.src[self.pos])) return error.UnexpectedChar;
         self.pos += 1;
         while (self.pos < self.src.len and isIdentChar(self.src[self.pos])) : (self.pos += 1) {}
-        return self.arena.dupe(u8, self.src[start..self.pos]);
+        const id = self.src[start..self.pos];
+        if (std.mem.eql(u8, id, "true") or std.mem.eql(u8, id, "false")) return error.UnexpectedChar;
+        return self.arena.dupe(u8, id);
     }
 
+    /// A string literal, simple or triple-quoted (`etch-grammar.md` §1.4), with
+    /// its escapes decoded. An unescaped `{` would open an interpolation, which
+    /// a data value has no meaning for, and a simple string does not span lines.
     fn parseString(self: *Parser) ParseError![]const u8 {
         try self.expect('"');
-        const start = self.pos;
-        while (self.pos < self.src.len and self.src[self.pos] != '"') : (self.pos += 1) {}
-        if (self.pos >= self.src.len) return error.UnexpectedEnd;
-        const inner = self.src[start..self.pos];
-        self.pos += 1; // consume closing quote
-        return self.arena.dupe(u8, inner);
+        if (std.mem.startsWith(u8, self.src[self.pos..], "\"\"")) {
+            self.pos += 2;
+            return self.parseTripleString();
+        }
+        var out: std.ArrayList(u8) = .empty;
+        while (true) {
+            if (self.pos >= self.src.len) return error.UnexpectedEnd;
+            const c = self.src[self.pos];
+            self.pos += 1;
+            switch (c) {
+                '"' => return out.toOwnedSlice(self.arena),
+                '\\' => try out.append(self.arena, try self.escaped()),
+                '{', '\n' => return error.UnexpectedChar,
+                else => try out.append(self.arena, c),
+            }
+        }
     }
 
-    fn parseNumber(self: *Parser) ParseError!Value {
-        self.skipWs();
-        const start = self.pos;
-        if (self.pos < self.src.len and (self.src[self.pos] == '-' or self.src[self.pos] == '+')) {
-            self.pos += 1;
-        }
-        var is_float = false;
-        while (self.pos < self.src.len) : (self.pos += 1) {
-            const ch = self.src[self.pos];
-            if (ch >= '0' and ch <= '9') continue;
-            if (ch == '.' or ch == 'e' or ch == 'E') {
-                is_float = true;
+    /// The body of a `"""…"""` literal, after its opening fence: escapes
+    /// decoded and the common indentation of its non-blank lines removed.
+    fn parseTripleString(self: *Parser) ParseError![]const u8 {
+        const body_start = self.pos;
+        const close = std.mem.indexOfPos(u8, self.src, body_start, "\"\"\"") orelse return error.UnexpectedEnd;
+        const body = self.src[body_start..close];
+        self.pos = close + 3;
+        const indent = commonIndentOf(body);
+        var out: std.ArrayList(u8) = .empty;
+        var i: usize = 0;
+        var skip_left = indent;
+        while (i < body.len) {
+            const c = body[i];
+            if (skip_left > 0 and (c == ' ' or c == '\t')) {
+                skip_left -= 1;
+                i += 1;
                 continue;
             }
-            if ((ch == '+' or ch == '-') and self.pos > start) {
-                const prev = self.src[self.pos - 1];
-                if (prev == 'e' or prev == 'E') continue;
+            skip_left = 0;
+            switch (c) {
+                '\\' => {
+                    if (i + 1 >= body.len) return error.UnexpectedChar;
+                    try out.append(self.arena, try escapeByte(body[i + 1]));
+                    i += 2;
+                },
+                '{' => return error.UnexpectedChar,
+                '\n' => {
+                    try out.append(self.arena, '\n');
+                    i += 1;
+                    skip_left = indent;
+                },
+                else => {
+                    try out.append(self.arena, c);
+                    i += 1;
+                },
             }
-            break;
         }
-        const slice = self.src[start..self.pos];
-        if (slice.len == 0) return error.InvalidNumber;
+        return out.toOwnedSlice(self.arena);
+    }
+
+    /// The common leading indentation (spaces and tabs) of the non-blank lines
+    /// of `body`, as `etch-grammar.md` §1.4 strips it.
+    fn commonIndentOf(body: []const u8) usize {
+        var min: ?usize = null;
+        var lines = std.mem.splitScalar(u8, body, '\n');
+        while (lines.next()) |line| {
+            var ws: usize = 0;
+            while (ws < line.len and (line[ws] == ' ' or line[ws] == '\t')) : (ws += 1) {}
+            if (std.mem.trim(u8, line, " \t\r").len == 0) continue;
+            min = if (min) |m| @min(m, ws) else ws;
+        }
+        return min orelse 0;
+    }
+
+    fn escaped(self: *Parser) ParseError!u8 {
+        if (self.pos >= self.src.len) return error.UnexpectedEnd;
+        const b = try escapeByte(self.src[self.pos]);
+        self.pos += 1;
+        return b;
+    }
+
+    /// The byte an escape sequence `\\c` denotes; `etch-grammar.md` §1.4 admits
+    /// exactly six.
+    fn escapeByte(c: u8) ParseError!u8 {
+        return switch (c) {
+            '"' => '"',
+            '\\' => '\\',
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            '{' => '{',
+            else => error.UnexpectedChar,
+        };
+    }
+
+    /// `INT_LITERAL` or `FLOAT_LITERAL` (`etch-grammar.md` §1.4): an optional
+    /// `-`, a digit, digits and `_`, and a fraction only where `.` is followed by
+    /// a digit. No `+`, no exponent.
+    fn parseNumber(self: *Parser) ParseError!Value {
+        try self.skipWs();
+        const start = self.pos;
+        if (self.pos < self.src.len and self.src[self.pos] == '-') self.pos += 1;
+        if (self.pos >= self.src.len or !isDigit(self.src[self.pos])) return error.InvalidNumber;
+        self.skipDigits();
+        var is_float = false;
+        if (self.pos + 1 < self.src.len and self.src[self.pos] == '.' and isDigit(self.src[self.pos + 1])) {
+            is_float = true;
+            self.pos += 1;
+            self.skipDigits();
+        }
+        var digits: std.ArrayList(u8) = .empty;
+        for (self.src[start..self.pos]) |c| if (c != '_') try digits.append(self.arena, c);
         if (is_float) {
-            const f = std.fmt.parseFloat(f64, slice) catch return error.InvalidNumber;
+            const f = std.fmt.parseFloat(f64, digits.items) catch return error.InvalidNumber;
+            if (!std.math.isFinite(f)) return error.InvalidNumber;
             return .{ .float = f };
         }
-        const i = std.fmt.parseInt(i64, slice, 10) catch return error.InvalidNumber;
-        return .{ .int = i };
+        return .{ .int = std.fmt.parseInt(i64, digits.items, 10) catch return error.InvalidNumber };
+    }
+
+    fn skipDigits(self: *Parser) void {
+        while (self.pos < self.src.len and (isDigit(self.src[self.pos]) or self.src[self.pos] == '_')) : (self.pos += 1) {}
     }
 
     fn parseArray(self: *Parser) ParseError!Value {
@@ -391,7 +529,8 @@ const Parser = struct {
         return .{ .object = try self.parseFields() };
     }
 
-    /// Parse a `{ key: value … }` block and return its fields.
+    /// Parse a `{ key: value … }` block and return its fields:
+    /// `asset_field = [ annotation ] , IDENT , ":" , asset_value , [ "," ]`.
     fn parseFields(self: *Parser) ParseError![]const Field {
         try self.expect('{');
         var fields: std.ArrayList(Field) = .empty;
@@ -401,12 +540,42 @@ const Parser = struct {
                 self.pos += 1;
                 break;
             }
+            if (c == '@') try self.skipAnnotation();
             const key = try self.parseIdent();
             try self.expect(':');
             const value = try self.parseValue();
             try fields.append(self.arena, .{ .key = key, .value = value });
+            if (try self.peekNonWs() == ',') self.pos += 1;
         }
         return fields.toOwnedSlice(self.arena);
+    }
+
+    /// `annotation = "@" , IDENT , [ "(" , [ annotation_args ] , ")" ]`, with each
+    /// argument an asset value, optionally named.
+    fn skipAnnotation(self: *Parser) ParseError!void {
+        try self.expect('@');
+        _ = try self.parseIdent();
+        if (try self.peekNonWs() != '(') return;
+        self.pos += 1;
+        while (true) {
+            if (try self.peekNonWs() == ')') {
+                self.pos += 1;
+                return;
+            }
+            if (isIdentStart(self.src[self.pos])) {
+                const save = self.pos;
+                const ident_ok = if (self.parseIdent()) |_| true else |err| switch (err) {
+                    error.UnexpectedChar => false,
+                    else => return err,
+                };
+                if (!(ident_ok and try self.peekNonWs() == ':')) self.pos = save else self.pos += 1;
+            }
+            _ = try self.parseValue();
+            const d = try self.peekNonWs();
+            if (d == ',') {
+                self.pos += 1;
+            } else if (d != ')') return error.UnexpectedChar;
+        }
     }
 
     fn parseValue(self: *Parser) ParseError!Value {
@@ -419,15 +588,25 @@ const Parser = struct {
                 self.pos += 1; // consume '.'
                 return .{ .enum_literal = try self.parseIdent() };
             },
-            '-', '+', '0'...'9' => return self.parseNumber(),
+            '-', '0'...'9' => return self.parseNumber(),
             else => {
                 if (!isIdentStart(c)) return error.UnexpectedChar;
-                const id = try self.parseIdent();
-                if (std.mem.eql(u8, id, "true")) return .{ .boolean = true };
-                if (std.mem.eql(u8, id, "false")) return .{ .boolean = false };
-                return .{ .identifier = id };
+                if (self.boolLiteral()) |b| return .{ .boolean = b };
+                return .{ .identifier = try self.parseIdent() };
             },
         }
+    }
+
+    /// Consumes `true` or `false` when it stands as a whole identifier.
+    fn boolLiteral(self: *Parser) ?bool {
+        const rest = self.src[self.pos..];
+        inline for (.{ .{ "true", true }, .{ "false", false } }) |lit| {
+            if (std.mem.startsWith(u8, rest, lit[0]) and (rest.len == lit[0].len or !isIdentChar(rest[lit[0].len]))) {
+                self.pos += lit[0].len;
+                return lit[1];
+            }
+        }
+        return null;
     }
 
     fn parseDoc(self: *Parser) ParseError!AssetDoc {
@@ -435,6 +614,8 @@ const Parser = struct {
         if (!std.mem.eql(u8, keyword, "asset")) return error.ExpectedAssetKeyword;
         const name = try self.parseString();
         const fields = try self.parseFields();
+        try self.skipWs();
+        if (self.pos != self.src.len) return error.UnexpectedChar;
 
         var doc = AssetDoc{
             .name = name,
@@ -444,57 +625,76 @@ const Parser = struct {
             .source = "",
             .source_hash = "",
         };
+        const Fixed = enum { uuid, type, version, source, source_hash, import_settings, process_settings, cook_settings, extracted };
+        var seen = std.EnumSet(Fixed).initEmpty();
         for (fields) |f| {
-            if (std.mem.eql(u8, f.key, "uuid")) {
-                doc.uuid = switch (f.value) {
-                    .string => |s| s,
-                    else => return error.UnexpectedChar,
-                };
-            } else if (std.mem.eql(u8, f.key, "type")) {
-                doc.type_name = switch (f.value) {
+            const which = std.meta.stringToEnum(Fixed, f.key) orelse return error.SchemaViolation;
+            if (seen.contains(which)) return error.SchemaViolation;
+            seen.insert(which);
+            switch (which) {
+                .uuid => doc.uuid = try canonical(stringOf(f.value), isUuid),
+                .type => doc.type_name = switch (f.value) {
                     .identifier => |s| s,
-                    .string => |s| s,
-                    else => return error.UnexpectedChar,
-                };
-            } else if (std.mem.eql(u8, f.key, "version")) {
-                doc.version = switch (f.value) {
+                    else => return error.SchemaViolation,
+                },
+                .version => doc.version = switch (f.value) {
                     .int => |i| std.math.cast(u16, i) orelse return error.InvalidVersion,
                     else => return error.InvalidVersion,
-                };
-            } else if (std.mem.eql(u8, f.key, "source")) {
-                doc.source = switch (f.value) {
-                    .string => |s| s,
-                    else => return error.UnexpectedChar,
-                };
-            } else if (std.mem.eql(u8, f.key, "source_hash")) {
-                doc.source_hash = switch (f.value) {
-                    .string => |s| s,
-                    else => return error.UnexpectedChar,
-                };
-            } else if (std.mem.eql(u8, f.key, "import_settings")) {
-                doc.import_settings = switch (f.value) {
-                    .object => |o| o,
-                    else => return error.UnexpectedChar,
-                };
-            } else if (std.mem.eql(u8, f.key, "process_settings")) {
-                doc.process_settings = switch (f.value) {
-                    .object => |o| o,
-                    else => return error.UnexpectedChar,
-                };
-            } else if (std.mem.eql(u8, f.key, "cook_settings")) {
-                doc.cook_settings = switch (f.value) {
-                    .object => |o| o,
-                    else => return error.UnexpectedChar,
-                };
-            } else if (std.mem.eql(u8, f.key, "extracted")) {
-                doc.extracted = switch (f.value) {
-                    .object => |o| o,
-                    else => return error.UnexpectedChar,
-                };
+                },
+                .source => doc.source = stringOf(f.value) orelse return error.SchemaViolation,
+                .source_hash => doc.source_hash = try canonical(stringOf(f.value), isHash128),
+                .import_settings => doc.import_settings = try objectOf(f.value),
+                .process_settings => doc.process_settings = try objectOf(f.value),
+                .cook_settings => doc.cook_settings = try objectOf(f.value),
+                .extracted => doc.extracted = try objectOf(f.value),
             }
-            // Unknown top-level keys are ignored (forward-compatibility).
         }
+        if (!seen.eql(std.EnumSet(Fixed).initFull())) return error.SchemaViolation;
+        _ = try canonical(doc.blobHash(), isHash128);
         return doc;
+    }
+
+    fn stringOf(v: Value) ?[]const u8 {
+        return switch (v) {
+            .string => |s| s,
+            else => null,
+        };
+    }
+
+    fn objectOf(v: Value) ParseError![]const Field {
+        return switch (v) {
+            .object => |o| o,
+            else => error.SchemaViolation,
+        };
+    }
+
+    /// `s` when present and of the canonical form `form` checks.
+    fn canonical(s: ?[]const u8, comptime form: fn ([]const u8) bool) ParseError![]const u8 {
+        const v = s orelse return error.SchemaViolation;
+        if (!form(v)) return error.SchemaViolation;
+        return v;
+    }
+
+    /// A UUID in its canonical `8-4-4-4-12` lowercase hexadecimal form.
+    fn isUuid(s: []const u8) bool {
+        if (s.len != 36) return false;
+        for (s, 0..) |c, i| {
+            const dash = i == 8 or i == 13 or i == 18 or i == 23;
+            if (dash != (c == '-')) return false;
+            if (!dash and !isLowerHex(c)) return false;
+        }
+        return true;
+    }
+
+    /// A 128-bit hash as 32 lowercase hexadecimal digits.
+    fn isHash128(s: []const u8) bool {
+        if (s.len != 32) return false;
+        for (s) |c| if (!isLowerHex(c)) return false;
+        return true;
+    }
+
+    fn isLowerHex(c: u8) bool {
+        return isDigit(c) or (c >= 'a' and c <= 'f');
     }
 };
 
@@ -526,7 +726,7 @@ test "intermediate doc round-trips through etch text" {
         .{ .key = "vertex_count", .value = .{ .int = 24 } },
         .{ .key = "bounds", .value = .{ .object = &bounds } },
         .{ .key = "materials", .value = .{ .array = &materials } },
-        .{ .key = "blob", .value = .{ .string = "a3f2b1c98d" } }, // mandatory
+        .{ .key = "blob", .value = .{ .string = "a3f2b1c98d0011223344556677889900" } }, // mandatory
     };
 
     const original = AssetDoc{
@@ -535,7 +735,7 @@ test "intermediate doc round-trips through etch text" {
         .type_name = "StaticMesh",
         .version = 1,
         .source = "cube.gltf",
-        .source_hash = "abc123",
+        .source_hash = "abc12300112233445566778899aabbcc",
         .import_settings = &import_settings,
         .process_settings = &process_settings,
         .cook_settings = &cook_settings,
@@ -555,11 +755,11 @@ test "intermediate doc round-trips through etch text" {
     try std.testing.expectEqual(@as(u16, 1), parsed.version);
     try std.testing.expectEqual(@as(usize, 4), parsed.extracted.len);
     try std.testing.expectEqual(@as(usize, 1), parsed.cook_settings.len);
-    try std.testing.expectEqualStrings("a3f2b1c98d", original.blobHash().?);
-    try std.testing.expectEqualStrings("a3f2b1c98d", parsed.blobHash().?);
+    try std.testing.expectEqualStrings("a3f2b1c98d0011223344556677889900", original.blobHash().?);
+    try std.testing.expectEqualStrings("a3f2b1c98d0011223344556677889900", parsed.blobHash().?);
     // Field accessors used by the cookers.
     try std.testing.expectEqual(@as(i64, 24), fieldInt(parsed.extracted, "vertex_count").?);
-    try std.testing.expectEqualStrings("a3f2b1c98d", fieldStr(parsed.extracted, "blob").?);
+    try std.testing.expectEqualStrings("a3f2b1c98d0011223344556677889900", fieldStr(parsed.extracted, "blob").?);
     try std.testing.expectEqual(@as(?i64, null), fieldInt(parsed.extracted, "bounds")); // not an int
 }
 
@@ -592,13 +792,16 @@ test "intermediate float keeps its decimal point through a round-trip" {
     const import_settings = [_]Field{
         .{ .key = "scale", .value = .{ .float = 1.0 } },
     };
+    const extracted = [_]Field{.{ .key = "blob", .value = .{ .string = "00112233445566778899aabbccddeeff" } }};
     const doc = AssetDoc{
         .name = "x",
+        .uuid = "0190b3f0-1c2d-7e4a-8b6c-0123456789ab",
         .type_name = "Texture2D",
         .version = 1,
         .source = "x.png",
-        .source_hash = "0",
+        .source_hash = "00112233445566778899aabbccddeeff",
         .import_settings = &import_settings,
+        .extracted = &extracted,
     };
     const text = try writeAlloc(gpa, doc);
     defer gpa.free(text);
@@ -614,4 +817,175 @@ test "intermediate parse rejects input without the asset keyword" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.ExpectedAssetKeyword, parseEtch(arena.allocator(), "widget \"x\" {}"));
+}
+
+/// A canonical document, one line per field, for the reader tests to vary.
+const minimal_doc =
+    \\asset "a" {
+    \\  uuid: "0190b3f0-1c2d-7e4a-8b6c-0123456789ab"
+    \\  type: StaticMesh
+    \\  version: 1
+    \\  source: "a.gltf"
+    \\  source_hash: "00112233445566778899aabbccddeeff"
+    \\  import_settings: { }
+    \\  process_settings: { }
+    \\  cook_settings: { }
+    \\  extracted: { blob: "00112233445566778899aabbccddeeff" }
+    \\}
+    \\
+;
+
+/// Parses `src` into a fresh arena and returns the parse result.
+fn parseText(arena: *std.heap.ArenaAllocator, src: []const u8) ParseError!AssetDoc {
+    return parseEtch(arena.allocator(), src);
+}
+
+/// `minimal_doc` with the text of `old` replaced by `new`.
+fn variant(arena: *std.heap.ArenaAllocator, old: []const u8, new: []const u8) ![]const u8 {
+    const out = try std.mem.replaceOwned(u8, arena.allocator(), minimal_doc, old, new);
+    try std.testing.expect(!std.mem.eql(u8, out, minimal_doc));
+    return out;
+}
+
+test "the canonical document parses" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    _ = try parseText(&arena, minimal_doc);
+}
+
+test "a comma between fields is accepted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const src = try variant(&arena, "  import_settings: { }", "  import_settings: { a: 1, b: 2, },");
+    const doc = try parseText(&arena, src);
+    try std.testing.expectEqual(@as(usize, 2), doc.import_settings.len);
+}
+
+test "an annotation on a field is accepted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const src = try variant(&arena, "  process_settings: { }", "  process_settings: { @unit(.meters) min_fragment_size: 0.05 }");
+    const doc = try parseText(&arena, src);
+    try std.testing.expectEqualStrings("min_fragment_size", doc.process_settings[0].key);
+}
+
+test "comments are accepted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const src = try variant(&arena, "  cook_settings: { }", "  // per platform\n  cook_settings: { /* none yet */ }");
+    _ = try parseText(&arena, src);
+}
+
+test "a string with escapes round-trips through the writer" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const base = try parseText(&arena, minimal_doc);
+    var doc = base;
+    doc.source = "dir\\a \"b\" {c}\nd";
+    const text = try writeAlloc(gpa, doc);
+    defer gpa.free(text);
+    const back = try parseText(&arena, text);
+    try std.testing.expectEqualStrings(doc.source, back.source);
+}
+
+test "an unknown escape is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.UnexpectedChar, parseText(&arena, try variant(&arena, "\"a.gltf\"", "\"a\\q.gltf\"")));
+}
+
+test "an unescaped brace in a string is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.UnexpectedChar, parseText(&arena, try variant(&arena, "\"a.gltf\"", "\"a{1}.gltf\"")));
+}
+
+test "a triple-quoted string loses its common indentation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const src = try variant(&arena, "  import_settings: { }", "  import_settings: { note: \"\"\"\n    one\n      two\n    \"\"\" }");
+    const doc = try parseText(&arena, src);
+    try std.testing.expectEqualStrings("\none\n  two\n", doc.import_settings[0].value.string);
+}
+
+test "digit separators are accepted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const doc = try parseText(&arena, try variant(&arena, "  import_settings: { }", "  import_settings: { n: 1_000_, f: 1_0.2_5 }"));
+    try std.testing.expectEqual(@as(i64, 1000), doc.import_settings[0].value.int);
+    try std.testing.expectEqual(@as(f64, 10.25), doc.import_settings[1].value.float);
+}
+
+test "a numeric form outside the grammar is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "+5", "1e5", "1.", ".5x", "1" ++ "0" ** 400 ++ ".0", "9223372036854775808" }) |n| {
+        const field = try std.fmt.allocPrint(arena.allocator(), "  import_settings: {{ n: {s} }}", .{n});
+        if (parseText(&arena, try variant(&arena, "  import_settings: { }", field))) |_| {
+            std.debug.print("accepted: {s}\n", .{n});
+            return error.TestExpectedError;
+        } else |_| {}
+    }
+}
+
+test "content after the construct is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.UnexpectedChar, parseText(&arena, minimal_doc ++ "junk\n"));
+}
+
+test "a boolean literal is not a field name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.UnexpectedChar, parseText(&arena, try variant(&arena, "  import_settings: { }", "  import_settings: { true: 1 }")));
+}
+
+test "a string asset type is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.SchemaViolation, parseText(&arena, try variant(&arena, "type: StaticMesh", "type: \"StaticMesh\"")));
+}
+
+test "a missing fixed field is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.SchemaViolation, parseText(&arena, try variant(&arena, "  source: \"a.gltf\"\n", "")));
+}
+
+test "a repeated fixed field is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.SchemaViolation, parseText(&arena, try variant(&arena, "  source: \"a.gltf\"", "  source: \"a.gltf\"\n  source: \"b.gltf\"")));
+}
+
+test "an unknown top-level field is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.SchemaViolation, parseText(&arena, try variant(&arena, "  version: 1", "  version: 1\n  extra: 2")));
+}
+
+test "a uuid not in canonical form is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.SchemaViolation, parseText(&arena, try variant(&arena, "0190b3f0-1c2d-7e4a-8b6c-0123456789ab", "not-a-uuid")));
+}
+
+test "an extracted block without its blob is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.SchemaViolation, parseText(&arena, try variant(&arena, "extracted: { blob: \"00112233445566778899aabbccddeeff\" }", "extracted: { }")));
+}
+
+test "an existing document keeps its uuid, and none yields none" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqual(@as(?[]const u8, null), try existingUuid(arena.allocator(), null));
+    try std.testing.expectEqualStrings("0190b3f0-1c2d-7e4a-8b6c-0123456789ab", (try existingUuid(arena.allocator(), minimal_doc)).?);
+}
+
+test "an existing document that does not parse is an error, not a new identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.UnexpectedChar, existingUuid(arena.allocator(), minimal_doc ++ "junk"));
 }

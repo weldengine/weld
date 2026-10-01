@@ -154,12 +154,14 @@ pub const Accessor = struct {
 
     // ── Entity Extensions region (SHAPE A) ──
     //
-    // `@ extensions_offset`, three self-delimiting sub-tables in order:
+    // `@ extensions_offset`, four self-delimiting sub-tables in order, the last
+    // ending at `crossrefs_offset`:
     //   Entity Extensions Table — `ext_count:u32` then per entity
     //     `{ uuid_ordinal:u32, extension_count:u32, extension_ids:[…]u32 }`
     //   Prefab ID Table — `prefab_id_count:u32` then `[…]u32` string-table offsets
     //   Hooks — `hook_count:u32` then `[…]{ on_attach_ref:u32, on_detach_ref:u32 }`
     //     (string-table offsets; 0 = absent). `hook_count ∈ {0,1}`.
+    //   Requires — `requires_count:u32` then `[…]u32` string-table offsets.
 
     /// A view over one Entity Extensions Table entry.
     pub const ExtEntry = struct {
@@ -240,10 +242,24 @@ pub const Accessor = struct {
         };
     }
 
+    /// File offset of the requires table's `requires_count` (past the hooks).
+    fn requiresStart(self: Accessor) usize {
+        return self.hooksStart() + 4 + @as(usize, self.hookCount()) * 8;
+    }
+
+    pub fn requiresCount(self: Accessor) u32 {
+        return self.readU32(self.requiresStart());
+    }
+
+    /// The `i`-th component name an `extends` prefab requires, in source order.
+    pub fn requiredName(self: Accessor, i: u32) []const u8 {
+        return self.stringAt(self.readU32(self.requiresStart() + 4 + @as(usize, i) * 4));
+    }
+
     // ── Cross-references Table ──
 
     /// Number of entity→entity cross-reference entries (`0` for a scene with no
-    /// `Entity` field references, and for every v1 file).
+    /// `Entity` field references).
     pub fn crossrefsCount(self: Accessor) u32 {
         return self.readU32(self.header.crossrefs_offset);
     }

@@ -58,17 +58,12 @@ pub const FieldKind = registry_mod.FieldKind;
 /// `src/modules/asset_pipeline/format/runtime_bin.zig`).
 pub const magic = [4]u8{ 'W', 'S', 'C', 'N' };
 
-/// `.scene.bin` binary format version (the codec/layout version — bumped on any
-/// breaking layout change). Distinct from `content_version` (the authored
-/// scene's `version:` field, opaque to the codec).
-///
-/// **2**: the reserved sections became real — the cross-references table
-/// and the `extensions_offset` region (Entity Extensions Table + Prefab ID Table
-/// + hooks) went from bare count-placeholders (`[0]`) to full structures. A break
-/// vs v1: a v1 file fails `BadVersion` and must be re-cooked
-/// (`.scene.bin`/`.prefab.bin` are deterministic build artifacts, no prod files
-/// anywhere).
-pub const format_version: u16 = 2;
+/// `.scene.bin` / `.prefab.bin` binary format version (the codec/layout version —
+/// bumped on any breaking layout change). Distinct from `content_version` (the
+/// authored scene's `version:` field, opaque to the codec). A file of another
+/// version fails `BadVersion` and is re-cooked: both are deterministic build
+/// artifacts.
+pub const format_version: u16 = 3;
 
 /// `SceneHeader` size — the fixed 64-byte (cache-line) prefix every file opens
 /// with. All section offsets in the header are relative to the file start.
@@ -369,6 +364,10 @@ pub const CookModel = struct {
     /// `extends` prefab hooks — `hook_count ∈ {0,1}`. Empty for a
     /// scene and for `of`/standalone prefabs. Serialized to the hooks sub-section.
     hooks: []const HookSet = &.{},
+    /// An `extends` prefab's `requires` names, as `CookModel.strings` indices in
+    /// source order. Empty for a scene and for `of`/standalone prefabs.
+    /// Serialized to the requires table, the extensions region's last.
+    requires: []const u32 = &.{},
     /// The authored scene's `version:` field (0 if absent). Propagated to
     /// `SceneHeader.content_version` — opaque to the codec, for the game's own
     /// scene-versioning/migration.
@@ -400,7 +399,7 @@ test "CookModel arena round-trips an empty model" {
 
 test "format magic + version constants are stable" {
     try std.testing.expectEqualSlices(u8, "WSCN", &magic);
-    try std.testing.expectEqual(@as(u16, 2), format_version);
+    try std.testing.expectEqual(@as(u16, 3), format_version);
 }
 
 test "SceneHeader writeTo/read round-trips little-endian" {
@@ -430,6 +429,13 @@ test "SceneHeader.read rejects bad magic, short input, bad version" {
     try std.testing.expectError(error.BadMagic, SceneHeader.read(&buf));
     (SceneHeader{}).writeTo(&buf);
     std.mem.writeInt(u16, buf[4..6], 999, .little);
+    try std.testing.expectError(error.BadVersion, SceneHeader.read(&buf));
+}
+
+test "SceneHeader.read refuses a file of the previous format version" {
+    var buf: [header_size]u8 = undefined;
+    (SceneHeader{}).writeTo(&buf);
+    std.mem.writeInt(u16, buf[4..6], 2, .little);
     try std.testing.expectError(error.BadVersion, SceneHeader.read(&buf));
 }
 

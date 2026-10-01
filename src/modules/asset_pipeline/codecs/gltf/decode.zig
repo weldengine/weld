@@ -127,9 +127,12 @@ pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Mesh {
         try sequentialIndices(gpa, vertex_count);
     errdefer gpa.free(indices);
 
+    // The intermediate document has no literal for a non-finite float.
+    for (positions) |v| if (!std.math.isFinite(v)) return error.MalformedGltf;
     var bmin: [3]f32 = .{ 0, 0, 0 };
     var bmax: [3]f32 = .{ 0, 0, 0 };
     computeBounds(try accessorAt(doc, pos_index), positions, &bmin, &bmax);
+    for (bmin, bmax) |lo, hi| if (!std.math.isFinite(lo) or !std.math.isFinite(hi)) return error.MalformedGltf;
 
     return .{
         .positions = positions,
@@ -315,6 +318,23 @@ test "decode static cube glTF extracts positions, normals, uvs, indices" {
     try std.testing.expectEqual(@as(f32, -1), mesh.positions[0]);
     // First triangle references vertices 0,1,2.
     try std.testing.expectEqual([3]u32{ 0, 1, 2 }, mesh.indices[0..3].*);
+}
+
+test "a bound that is not finite is refused" {
+    const gpa = std.testing.allocator;
+    const src = try std.mem.replaceOwned(u8, gpa, cube_gltf, "\"max\":[1,1,1]", "\"max\":[1,1,1e40]");
+    defer gpa.free(src);
+    try std.testing.expect(!std.mem.eql(u8, src, cube_gltf));
+    try std.testing.expectError(error.MalformedGltf, decode(gpa, src));
+}
+
+test "a position that is not finite is refused under finite bounds" {
+    const gpa = std.testing.allocator;
+    // One vertex whose x is +inf; the accessor's own bounds are finite.
+    const src =
+        \\{"buffers":[{"byteLength":12,"uri":"data:application/octet-stream;base64,AACAfwAAAAAAAAAA"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":12}],"accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"VEC3","min":[0,0,0],"max":[1,1,1]}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]}
+    ;
+    try std.testing.expectError(error.MalformedGltf, decode(gpa, src));
 }
 
 test "decode rejects non-glTF json" {

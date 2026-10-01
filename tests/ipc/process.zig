@@ -1,14 +1,9 @@
-//! Process tests — `platform.process.spawnProcess` + `waitNonblock`
-//! + `isAlive` against the real `/bin/true` and `/bin/sleep` binaries
-//! (POSIX-gated). Plus `quoteArg`, the Windows command-line quoter, tested
-//! cross-platform through golden cases and a round-trip against a reference
-//! `CommandLineToArgvW` parser — so no Windows is needed to exercise it.
-
 const std = @import("std");
 const builtin = @import("builtin");
 
 const weld_core = @import("weld_core");
 const process = weld_core.platform.process;
+const child_process = @import("child_process");
 
 const is_posix = builtin.os.tag == .linux or builtin.os.tag == .macos;
 
@@ -37,22 +32,13 @@ test "spawn true(1) and reap with waitNonblock returns exit 0" {
     const argv = [_][]const u8{true_path};
 
     var proc = try process.spawnProcess(gpa, true_path, &argv);
-
-    // Poll up to ~1 s for the child to exit. /bin/true is near-
-    // instant; the loop bound exists to keep the test from hanging
-    // if the binary is missing or the spawn fails silently.
-    var attempts: usize = 0;
-    while (attempts < 100) : (attempts += 1) {
-        if (try process.waitNonblock(&proc)) |code| {
-            try std.testing.expectEqual(@as(i32, 0), code);
-            return;
-        }
-        sleepMs(10);
-    }
-    return error.ChildNeverExited;
+    const code = try child_process.waitExit(&proc) orelse return error.ChildNeverExited;
+    try std.testing.expectEqual(@as(i32, 0), code);
 }
 
 extern "c" fn getpid() i32;
+extern "c" fn unlink(path: [*:0]const u8) c_int;
+extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
 
 test "isAlive returns true for current pid, false for impossible pid" {
     if (!is_posix) return error.SkipZigTest;
@@ -71,48 +57,33 @@ test "spawn-then-kill terminates a long-running child" {
     if (!is_posix) return error.SkipZigTest;
 
     const gpa = std.testing.allocator;
-    const argv = [_][]const u8{ "/bin/sleep", "30" };
+    var ready_buf: [64]u8 = undefined;
+    const ready = try std.fmt.bufPrintZ(&ready_buf, "/tmp/weld-test-kill-ready-{d}", .{getpid()});
+    _ = unlink(ready.ptr);
+    defer _ = unlink(ready.ptr);
+    const script = try std.fmt.allocPrint(gpa, ": > {s}; exec /bin/sleep 600", .{ready});
+    defer gpa.free(script);
+    // The sleep outlasts what `child_process.exit_polls` allow, so a kill that
+    // did nothing cannot pass for the child's own exit.
+    const argv = [_][]const u8{ "/bin/sh", "-c", script };
 
-    var proc = try process.spawnProcess(gpa, "/bin/sleep", &argv);
-    // Give the child a moment to actually become alive in the kernel
-    // table — without this, `kill(pid, SIGKILL)` can race against
-    // the spawn returning before the child is reapable on macOS.
-    sleepMs(20);
-    // Don't actually wait 30 s — kill and reap.
+    var proc = try process.spawnProcess(gpa, "/bin/sh", &argv);
+    while (access(ready.ptr, 0) != 0) sleepMs(1);
     try process.kill(&proc);
-
-    var attempts: usize = 0;
-    while (attempts < 100) : (attempts += 1) {
-        if (try process.waitNonblock(&proc)) |_| return;
-        sleepMs(10);
-    }
-    return error.ChildNeverDied;
+    const code = try child_process.waitExit(&proc) orelse return error.ChildNeverDied;
+    try std.testing.expectEqual(@as(i32, -9), code);
 }
 
 test "spawnProcess runs a Windows binary and reaps exit 0" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    // Anti-regression: the first real Windows run hit `CreateProcessW` →
-    // `error.SpawnFailed`. The path is exercised with a binary guaranteed
-    // present, `cmd.exe /c exit 0`.
     const gpa = std.testing.allocator;
     const exe = "C:\\Windows\\System32\\cmd.exe";
     const argv = [_][]const u8{ exe, "/c", "exit 0" };
 
     var proc = try process.spawnProcess(gpa, exe, &argv);
-    var attempts: usize = 0;
-    while (attempts < 200) : (attempts += 1) {
-        if (try process.waitNonblock(&proc)) |code| {
-            try std.testing.expectEqual(@as(i32, 0), code);
-            return;
-        }
-        sleepMs(10);
-    }
-    return error.ChildNeverExited;
+    const code = try child_process.waitExit(&proc) orelse return error.ChildNeverExited;
+    try std.testing.expectEqual(@as(i32, 0), code);
 }
-
-// ------------------------------------------------------- quoteArg tests --
-//
-// `quoteArg` is pure and cross-platform, so these run on every host.
 
 /// Reference re-implementation of `CommandLineToArgvW`, UTF-8 (the
 /// metacharacters are all ASCII). Used to prove `quoteArg` output parses

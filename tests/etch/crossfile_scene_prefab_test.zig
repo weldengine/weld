@@ -32,17 +32,24 @@ fn deinitDiags(gpa: std.mem.Allocator, diags: *std.ArrayListUnmanaged(etch.Diagn
     diags.deinit(gpa);
 }
 
+/// `diags` holds `n` diagnostics, every one `code`.
+fn expectOnly(diags: []const etch.Diagnostic, code: DiagnosticCode, n: usize) !void {
+    try std.testing.expectEqual(n, diags.len);
+    try std.testing.expectEqual(n, countCode(diags, code));
+}
+
 test "E1786 cross-file prefab ref" {
     const gpa = std.testing.allocator;
     const files = [_]etch.ProjectFile{
-        .{ .name = "prefabs.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "markers.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "wall_torch.prefab.etch", .source =
+        \\import markers { Marker }
         \\prefab "WallTorch" {
         \\  entity "torch" { Marker { id: 1 } }
         \\}
         },
-        .{ .name = "level.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "level.scene.etch", .source =
+        \\import markers { Marker }
         \\scene "Level" {
         \\  instance of "WallTorch" "t1" { Marker { id: 2 } }
         \\  instance of "Ghost" "t2" { Marker { id: 3 } }
@@ -54,23 +61,27 @@ test "E1786 cross-file prefab ref" {
     try validate(gpa, &files, &diags);
     // `WallTorch` resolves across files (no error); `Ghost` exists nowhere →
     // exactly one cross-file E1786.
-    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .prefab_ref_not_found));
+    try expectOnly(diags.items, .prefab_ref_not_found, 1);
 }
 
 test "E1791 cross-file prefab base" {
     const gpa = std.testing.allocator;
     const files = [_]etch.ProjectFile{
-        .{ .name = "base.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "markers.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "base.prefab.etch", .source =
+        \\import markers { Marker }
         \\prefab "Base" {
         \\  entity "e" { Marker { id: 0 } }
         \\}
         },
-        .{ .name = "derived.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "derived.prefab.etch", .source =
+        \\import markers { Marker }
         \\prefab "Derived" of "Base" {
         \\  entity "e" { Marker { id: 1 } }
         \\}
+        },
+        .{ .name = "orphan.prefab.etch", .source =
+        \\import markers { Marker }
         \\prefab "Orphan" of "MissingBase" {
         \\  entity "e" { Marker { id: 2 } }
         \\}
@@ -81,14 +92,15 @@ test "E1791 cross-file prefab base" {
     try validate(gpa, &files, &diags);
     // `Derived of Base` resolves across files; `Orphan of MissingBase` does not
     // → exactly one cross-file E1791.
-    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .prefab_base_not_found));
+    try expectOnly(diags.items, .prefab_base_not_found, 1);
 }
 
 test "E1782 cross-scene duplicate uuid" {
     const gpa = std.testing.allocator;
     const files = [_]etch.ProjectFile{
-        .{ .name = "scene_a.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "markers.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "scene_a.scene.etch", .source =
+        \\import markers { Marker }
         \\scene "SceneA" {
         \\  entity "e1" {
         \\    uuid: "11111111-1111-1111-1111-111111111111"
@@ -96,8 +108,8 @@ test "E1782 cross-scene duplicate uuid" {
         \\  }
         \\}
         },
-        .{ .name = "scene_b.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "scene_b.scene.etch", .source =
+        \\import markers { Marker }
         \\scene "SceneB" {
         \\  entity "e2" {
         \\    uuid: "11111111-1111-1111-1111-111111111111"
@@ -110,20 +122,21 @@ test "E1782 cross-scene duplicate uuid" {
     defer deinitDiags(gpa, &diags);
     try validate(gpa, &files, &diags);
     // Same UUID in two scenes across files → exactly one cross-scene E1782.
-    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .duplicate_uuid));
+    try expectOnly(diags.items, .duplicate_uuid, 1);
 }
 
 test "cross-file project green path resolves clean" {
     const gpa = std.testing.allocator;
     const files = [_]etch.ProjectFile{
-        .{ .name = "prefabs.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "markers.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "wall_torch.prefab.etch", .source =
+        \\import markers { Marker }
         \\prefab "WallTorch" {
         \\  entity "torch" { Marker { id: 1 } }
         \\}
         },
-        .{ .name = "level.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "level.scene.etch", .source =
+        \\import markers { Marker }
         \\scene "Level" {
         \\  entity "light" {
         \\    uuid: "aaaaaaaa-0000-0000-0000-000000000001"
@@ -142,4 +155,201 @@ test "cross-file project green path resolves clean" {
     // Prefab resolves cross-file, UUIDs unique, entities have components → no
     // diagnostic of any severity.
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+/// The E0858 count of `files`, which carry no other diagnostic.
+fn e0858Count(files: []const etch.ProjectFile) !usize {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try validate(gpa, files, &diags);
+    const n = countCode(diags.items, .typed_extension_mismatch);
+    try std.testing.expectEqual(n, diags.items.len);
+    return n;
+}
+
+test "E0858 on a type declared in a scene file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/level.scene.etch", .source =
+        \\component Marker { id: int = 0 }
+        \\scene "Level" { entity "e" { Marker { id: 1 } } }
+        },
+    }));
+}
+
+test "E0858 on a scene in a plain source file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/combat.etch", .source =
+        \\component Marker { id: int = 0 }
+        \\scene "Level" { entity "e" { Marker { id: 1 } } }
+        },
+    }));
+}
+
+test "E0858 on two prefabs in one prefab file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/marker.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "src/two.prefab.etch", .source =
+        \\import marker { Marker }
+        \\prefab "A" { entity "e" { Marker { id: 1 } } }
+        \\prefab "B" { entity "e" { Marker { id: 2 } } }
+        },
+    }));
+}
+
+test "E0858 on a scene file holding no scene" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/marker.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "src/empty.scene.etch", .source = "import marker { Marker }" },
+    }));
+}
+
+test "no E0858 on a scene file holding one scene and its imports" {
+    try std.testing.expectEqual(@as(usize, 0), try e0858Count(&.{
+        .{ .name = "src/marker.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "src/level.scene.etch", .source =
+        \\import marker { Marker }
+        \\scene "Level" { entity "e" { Marker { id: 1 } } }
+        },
+    }));
+}
+
+test "no E0858 on a layer file holding one scene and its imports" {
+    try std.testing.expectEqual(@as(usize, 0), try e0858Count(&.{
+        .{ .name = "src/marker.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "src/gameplay.layer.etch", .source =
+        \\import marker { Marker }
+        \\scene "Gameplay" { entity "e" { Marker { id: 1 } } }
+        },
+    }));
+}
+
+const settings: etch.ProjectFile = .{ .name = "src/settings.etch", .source = "resource Clock { hz: int = 60 }\ncomponent Marker { id: int = 0 }" };
+const torch: etch.ProjectFile = .{ .name = "src/torch.prefab.etch", .source = "import settings { Marker }\nprefab \"Torch\" { entity \"t\" { Marker { id: 1 } } }" };
+
+const PopulationCase = struct { name: []const u8, file: etch.ProjectFile, e0858: usize };
+const population_cases = [_]PopulationCase{
+    .{ .name = "manifest scene holding an entity", .e0858 = 1, .file = .{ .name = "src/village.manifest.etch", .source = "import settings { Clock, Marker }\nscene \"Village\" { resources { Clock { hz: 30 } } entity \"e\" { Marker { id: 1 } } }" } },
+    .{ .name = "manifest scene holding an instance", .e0858 = 1, .file = .{ .name = "src/village.manifest.etch", .source = "import settings { Clock, Marker }\nscene \"Village\" { resources { Clock { hz: 30 } } instance of \"Torch\" \"t1\" { Marker { id: 2 } } }" } },
+    .{ .name = "manifest scene holding two entities", .e0858 = 2, .file = .{ .name = "src/village.manifest.etch", .source = "import settings { Marker }\nscene \"Village\" { entity \"a\" { Marker { id: 1 } } entity \"b\" { Marker { id: 2 } } }" } },
+    .{ .name = "manifest scene holding resources alone", .e0858 = 0, .file = .{ .name = "src/village.manifest.etch", .source = "import settings { Clock }\nscene \"Village\" { resources { Clock { hz: 30 } } }" } },
+    .{ .name = "layer scene holding an entity", .e0858 = 0, .file = .{ .name = "src/gameplay.layer.etch", .source = "import settings { Clock, Marker }\nscene \"Gameplay\" { resources { Clock { hz: 30 } } entity \"e\" { Marker { id: 1 } } }" } },
+};
+
+test "E0858 on each entity or instance a manifest's scene holds" {
+    var wrong: usize = 0;
+    for (population_cases) |c| {
+        const n = try e0858Count(&.{ settings, torch, c.file });
+        if (n != c.e0858) {
+            wrong += 1;
+            std.debug.print("{s}: {d} E0858, expected {d}\n", .{ c.name, n, c.e0858 });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "no E1780 on a manifest file whose scene holds resources alone" {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try validate(gpa, &.{
+        .{ .name = "src/settings.etch", .source = "resource Clock { hz: int = 60 }" },
+        .{ .name = "src/village.manifest.etch", .source =
+        \\import settings { Clock }
+        \\scene "Village" { resources { Clock { hz: 30 } } }
+        },
+    }, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+test "E1780 on a layer file whose scene holds no entity" {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try validate(gpa, &.{.{ .name = "src/gameplay.layer.etch", .source = "scene \"Gameplay\" { }" }}, &diags);
+    try expectOnly(diags.items, .scene_empty_entities, 1);
+}
+
+test "E0858 on a type declared in a layer file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/gameplay.layer.etch", .source =
+        \\component Marker { id: int = 0 }
+        \\scene "Gameplay" { entity "e" { Marker { id: 1 } } }
+        },
+    }));
+}
+
+test "E0858 twice on a layer file holding a component and no scene" {
+    try std.testing.expectEqual(@as(usize, 2), try e0858Count(&.{
+        .{ .name = "src/gameplay.layer.etch", .source = "component Marker { id: int = 0 }" },
+    }));
+}
+
+test "E0858 on an empty manifest file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/village.manifest.etch", .source = "" },
+    }));
+}
+
+const MessageCase = struct { name: []const u8, file: etch.ProjectFile, message: []const u8 };
+const e0858_messages = [_]MessageCase{
+    .{ .name = "no scene", .file = .{ .name = "src/village.manifest.etch", .source = "" }, .message = "a .manifest.etch file holds exactly one scene" },
+    .{ .name = "a second scene", .file = .{ .name = "src/gameplay.layer.etch", .source = "scene \"A\" { entity \"a\" { } }\nscene \"B\" { entity \"b\" { } }" }, .message = "a .layer.etch file holds exactly one scene" },
+    .{ .name = "another construct", .file = .{ .name = "src/gameplay.layer.etch", .source = "component Marker { id: int = 0 }\nscene \"A\" { entity \"a\" { } }" }, .message = "'component_decl' is not allowed in a .layer.etch file, which holds one scene and its imports" },
+};
+
+test "E0858 on a layer or manifest file names the scene it holds" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (e0858_messages) |c| {
+        var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+        defer deinitDiags(gpa, &diags);
+        try validate(gpa, &.{c.file}, &diags);
+        var found = false;
+        for (diags.items) |d| {
+            if (d.code == .typed_extension_mismatch) {
+                if (found or !std.mem.eql(u8, d.primary_message, c.message)) {
+                    wrong += 1;
+                    std.debug.print("{s}: '{s}'\n", .{ c.name, d.primary_message });
+                }
+                found = true;
+            }
+        }
+        if (!found) {
+            wrong += 1;
+            std.debug.print("{s}: no E0858\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "E0858 on two scenes in one layer file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/marker.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "src/gameplay.layer.etch", .source =
+        \\import marker { Marker }
+        \\scene "A" { entity "a" { Marker { id: 1 } } }
+        \\scene "B" { entity "b" { Marker { id: 2 } } }
+        },
+    }));
+}
+
+/// Check `files`, requiring exactly two diagnostics: the parse error of a
+/// construct that does not exist, and E0858 for the scene the file lacks.
+fn expectNoSuchConstruct(files: []const etch.ProjectFile) !void {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try validate(gpa, files, &diags);
+    try std.testing.expectEqual(@as(usize, 2), diags.items.len);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .parse_error));
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .typed_extension_mismatch));
+}
+
+test "a layer construct in a layer file is a parse error" {
+    try expectNoSuchConstruct(&.{.{ .name = "src/gameplay.layer.etch", .source = "layer \"Gameplay\" { }" }});
+}
+
+test "a world construct in a manifest file is a parse error" {
+    try expectNoSuchConstruct(&.{.{ .name = "src/village.manifest.etch", .source = "world \"Village\" { }" }});
 }

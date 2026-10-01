@@ -4,20 +4,8 @@ name: Bench
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'briefs/**'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'briefs/**'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
 
 concurrency:
   group: bench-${{ github.ref }}
@@ -29,15 +17,56 @@ permissions:
 env:
   ZIG_VERSION: "0.16.0"
   ZIG_CPU: "baseline"
+  ZIG_CACHE_CAP: "10737418240"
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+      reason: ${{ steps.detect.outputs.reason }}
+      week: ${{ steps.week.outputs.week }}
+    steps:
+      - name: Compute the lineage window
+        id: week
+        shell: bash
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: weldengine/setup-zig@v0.1.0
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - name: Decide whether this tree needs a run
+        id: detect
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          zig run tools/ci_verdict/main.zig -- decide --event "$EVENT" --base "$BASE" --head "$HEAD" \
+            --tested HEAD --repo "${{ github.repository }}" --check bench-gate >> "$GITHUB_OUTPUT"
+
   bench-ecs-smoke:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -50,12 +79,12 @@ jobs:
           use-cache: false
 
       - name: Restore Zig cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: .zig-cache
-          key: zig-v2-${{ github.job }}-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ github.job }}-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
 
       - name: zig build bench-ecs -- --smoke
         run: zig build bench-ecs -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }} -- --smoke
@@ -66,6 +95,30 @@ jobs:
       - name: zig build bench-ecs-hybrid (crossover sweep)
         run: zig build bench-ecs-hybrid -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }}
 
+      - name: Measure the Zig cache before the save
+        if: always()
+        id: cache-size
+        shell: bash
+        run: |
+          set -euo pipefail
+          limit="$ZIG_CACHE_CAP"
+          bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
+          bytes=$((bytes * 1024))
+          echo "zig cache: $bytes bytes (cap $limit)"
+          if [ "$bytes" -gt "$limit" ]; then
+            echo "::warning::Zig cache is $bytes bytes, over the $limit cap — SKIPPING the save."
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save Zig cache
+        if: always() && github.event_name == 'push' && steps.cache-size.outputs.save == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: .zig-cache
+          key: zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+
       - name: Archive the crossover measurement
         uses: actions/upload-artifact@v6
         with:
@@ -73,3 +126,29 @@ jobs:
           path: bench/results/ecs_hybrid_crossover.md
           if-no-files-found: error
           retention-days: 90
+
+  # The verdict `changes` inherits: green when the bench ran green or was skipped
+  # because the same code already was.
+  bench-gate:
+    needs: [changes, bench-ecs-smoke]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate the bench results
+        shell: bash
+        env:
+          REASON: ${{ needs.changes.outputs.reason }}
+        run: |
+          set -euo pipefail
+          changes="${{ needs.changes.result }}"
+          bench="${{ needs.bench-ecs-smoke.result }}"
+          echo "changes=$changes bench-ecs-smoke=$bench"
+          echo "::notice::$REASON"
+          if [ "$changes" != "success" ]; then
+            echo "::error::changes job did not succeed ($changes)"; exit 1
+          fi
+          case "$bench" in
+            success|skipped) : ;;
+            *) echo "::error::bench-ecs-smoke is $bench"; exit 1 ;;
+          esac

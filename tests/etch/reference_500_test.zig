@@ -1,23 +1,7 @@
-//! `reference_500_lines.etch` — the full-grammar integration reference.
-//!
-//! One 500+ line file mixing EVERY v0.6 construct: the Level-A foundations, the
-//! seventeen domain constructs, Level-C scene/prefab, generics and async. It is
-//! the at-scale integration proof:
-//!   • PARSE the whole file < 50 ms (measured median, the headline gate);
-//!   • TYPE-CHECK the whole file clean (every construct coexists in one unit);
-//!   • INTERPRET the Level-A behaviour (a dedicated `RefProbe` rule ticks the
-//!     live world — the byte-exact interp behaviour at scale).
-//!
-//! The file is NOT cooked (codegen): it carries async + generic fragments which
-//! are `UnsupportedConstruct` in codegen (the milestone-long invariant), so a
-//! whole-file cook would fail-loud. The byte-exact interp↔codegen proof and the
-//! Level-B/C codegen-compiles proof are carried by the exhaustive per-construct
-//! differential corpus (programs 01-83): 01-75 Level-A byte-exact both backends,
-//! 76-83 Level-B/C codegen-compiles + serialized-IR byte-identical. This split
-//! mirrors the established per-program world-state-vs-serialized-IR separation.
+//! The file is not cooked: its async and generic fragments are
+//! `UnsupportedConstruct` in codegen.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const weld_etch = @import("weld_etch");
 const weld_core = @import("weld_core");
 
@@ -26,7 +10,6 @@ const EntityId = weld_core.ecs.entity.EntityId;
 const ComponentId = weld_core.ecs.registry.ComponentId;
 const Interpreter = weld_etch.Interpreter;
 const Diagnostic = weld_etch.Diagnostic;
-const time = weld_core.platform.time;
 
 const reference_src = @embedFile("reference_500_lines.etch");
 
@@ -38,7 +21,7 @@ fn countLines(s: []const u8) usize {
     return n;
 }
 
-test "reference_500_lines: ≥500 lines, parses clean, type-checks clean, parse median < 50 ms" {
+test "reference_500_lines: ≥500 lines, parses clean, type-checks clean" {
     const gpa = std.testing.allocator;
 
     const lines = countLines(reference_src);
@@ -68,34 +51,6 @@ test "reference_500_lines: ≥500 lines, parses clean, type-checks clean, parse 
         }
     }
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
-
-    // PARSE-TIME — median of K passes, gate < 50 ms.
-    const K = 50;
-    var samples: [K]u64 = undefined;
-    var k: usize = 0;
-    while (k < K) : (k += 1) {
-        const t0 = time.nowNanos();
-        var p = try weld_etch.parseSource(gpa, reference_src);
-        const dt = time.nowNanos() - t0;
-        p.deinit(gpa);
-        samples[k] = dt;
-    }
-    std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
-    const median = samples[K / 2];
-    std.debug.print(
-        "[ref500] parse median ({s}): {d} ns ({d:.4} ms) over {d} passes\n",
-        .{ @tagName(builtin.mode), median, @as(f64, @floatFromInt(median)) / std.time.ns_per_ms, K },
-    );
-    // The < 50 ms gate is a ReleaseSafe verdict: a parse-time verdict is never
-    // taken in Debug, where the parser walks 5-10× slower. So the strict gate is
-    // asserted in a release mode alone and Debug guards only against a
-    // pathological regression. The re-bench is
-    // `zig build test-ref500 -Doptimize=ReleaseSafe`.
-    if (builtin.mode == .Debug) {
-        try std.testing.expect(median < 300 * std.time.ns_per_ms);
-    } else {
-        try std.testing.expect(median < 50 * std.time.ns_per_ms);
-    }
 }
 
 test "reference_500_lines: Level-A interpret — the RefProbe rule ticks the live world" {

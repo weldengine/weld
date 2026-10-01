@@ -161,9 +161,7 @@ pub const UuidMap = std.AutoHashMapUnmanaged([16]u8, EntityId);
 /// lifetime is the caller's to end (`engine-scene-serialization.md` §4).
 ///
 /// Ownership: the caller ends the load's life with `deinit` (frees `spawned`,
-/// the map, and closes `mmap` if present). Loaded resource `string` blocks are
-/// refcounted and owned by their `StringSlot`s, not by the
-/// `LoadResult` — the resource owner reclaims them at teardown.
+/// the map, and closes `mmap` if present).
 pub const LoadResult = struct {
     spawned: []EntityId,
     uuid_to_entity: UuidMap,
@@ -171,10 +169,8 @@ pub const LoadResult = struct {
 
     /// Free the loader-owned allocations and close the backing mmap (if any).
     /// Does **not** despawn the loaded entities — they belong to the `World` —
-    /// and does **not** free the loaded resource `string` blocks: those are
-    /// refcounted, owned by the resources' `StringSlot`s, and reclaimed by
-    /// the resource owner's teardown exactly like interp-written resource
-    /// strings (`interp.zig` deinit). Teardown parity — no new mechanism.
+    /// and does **not** free the loaded resource `string` blocks, which
+    /// `World.deinit` releases like every other resource payload.
     pub fn deinit(self: *LoadResult, gpa: std.mem.Allocator) void {
         gpa.free(self.spawned);
         self.uuid_to_entity.deinit(gpa);
@@ -235,8 +231,7 @@ fn decrefResourceStrings(world: *const World, gpa: std.mem.Allocator, cid: Compo
 /// Commit the loader's resource writes. For each resource that
 /// REPLACED a prior value, decref the old string blocks the snapshot captured —
 /// they are no longer referenced (the live slot holds the new block). The new
-/// blocks stay live, owned by the resource slots (freed by the resource owner's
-/// teardown — parity with interp-written strings). Frees each snapshot and the
+/// blocks stay live, owned by the resource slots. Frees each snapshot and the
 /// journal. Infallible.
 fn commitResources(world: *const World, gpa: std.mem.Allocator, journal: *ResourceJournal) void {
     for (journal.items) |edit| {
@@ -428,7 +423,11 @@ fn instantiate(
         // Per-block component ids (constant across the block's entities).
         const ids = try gpa.alloc(ComponentId, cc);
         defer gpa.free(ids);
-        for (0..cc) |c| ids[c] = remap[block.schemaIndex(c)];
+        for (0..cc) |c| {
+            ids[c] = remap[block.schemaIndex(c)];
+            // A resource is no entity column, whatever the file says.
+            if (world.registry.componentKind(ids[c]) == .resource) return error.SchemaMismatch;
+        }
 
         // Per-slot payload views, reused each slot.
         const payloads = try gpa.alloc([]const u8, cc);
@@ -503,12 +502,15 @@ fn resolveCrossRefs(world: *World, acc: Accessor, remap: []const ComponentId, uu
 /// active extensions** (so an extension-free scene needs no resolver). The
 /// `on_attach` hook EXECUTION runs inside the registered seam's callback
 /// (the Etch bridge); here `dispatchOnAttach` fires it with the cooked hook text.
+/// Every activation is checked first (`preflightExtensions`), so no hook runs
+/// when one would be refused.
 fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to_entity: UuidMap, ext_resolver: ?ExtensionResolver) !void {
     const count = acc.extensionsCount();
     if (count == 0) return;
     const ucount = uuidCount(acc);
     const resolver = ext_resolver orelse return error.MissingExtensionResolver;
     const pid_count = acc.prefabIdCount();
+    try preflightExtensions(world, gpa, acc, uuid_to_entity, resolver);
 
     var i: u32 = 0;
     while (i < count) : (i += 1) {
@@ -522,6 +524,36 @@ fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to
             const name = acc.prefabName(pid);
             const ext_bytes = resolver.resolve(name) orelse return error.UnknownExtension;
             try activateExtension(world, gpa, entity, name, ext_bytes);
+        }
+    }
+}
+
+/// Every activation of the Entity Extensions Table, checked before the first
+/// runs: the extension resolves and opens, its requirements are met by the
+/// entity or by an extension listed before it on that entity, and the world's
+/// hook check accepts its hooks.
+fn preflightExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to_entity: UuidMap, resolver: ExtensionResolver) !void {
+    const ucount = uuidCount(acc);
+    const pid_count = acc.prefabIdCount();
+    var provided: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer provided.deinit(gpa);
+    var i: u32 = 0;
+    while (i < acc.extensionsCount()) : (i += 1) {
+        const e = acc.extension(i);
+        if (e.uuid_ordinal >= ucount) return error.MalformedScene;
+        const entity = uuid_to_entity.get(acc.uuidAt(e.uuid_ordinal).*) orelse return error.MalformedScene;
+        provided.clearRetainingCapacity();
+        var j: u32 = 0;
+        while (j < e.extension_count) : (j += 1) {
+            const pid = e.extensionId(j);
+            if (pid >= pid_count) return error.MalformedScene;
+            const name = acc.prefabName(pid);
+            const ext = try openVerified(resolver.resolve(name) orelse return error.UnknownExtension);
+            _ = try extEntityArchetype(ext);
+            if (!requiresMet(world, entity, ext, provided.items)) return error.RequiresNotSatisfied;
+            try checkHooks(world, gpa, entity, name, ext, true);
+            var s: u32 = 0;
+            while (s < ext.schemaCount()) : (s += 1) try provided.append(gpa, ext.schema(s).name);
         }
     }
 }
@@ -554,8 +586,10 @@ fn extEntityArchetype(ext: Accessor) !Accessor.Archetype {
 ///      (`error.ExtensionAlreadyActive` — closes the hook-only
 ///      re-activation gap); resolve the strict mono-entity archetype
 ///      (`extEntityArchetype`: `total == 0`/`> 1` rejected).
-///   1. Prevalidate with ZERO mutation: resolve every `ComponentId`; size-check;
-///      conflict-check each against the entity.
+///   1. Prevalidate with ZERO mutation: resolve every `ComponentId`; check its
+///      size, alignment and kind; conflict-check each against the entity; check
+///      the entity carries every component the extension requires; fire the
+///      world's hook check on both hooks.
 ///   2. Reserve the extension-record capacity (fallible, no observable mutation).
 ///   3. Grouped add — the SINGLE fallible component mutation, itself atomic
 ///      (`world.addComponentsDynamic`): at most ONE archetype migration, never
@@ -591,11 +625,19 @@ pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId
     while (c < comp_count) : (c += 1) {
         const sch = ext.schema(arch.schemaIndex(c));
         const cid = world.componentId(sch.name) orelse return error.UnknownComponent;
-        if (sch.size != world.registry.componentSize(cid)) return error.SchemaMismatch;
+        if (sch.size != world.registry.componentSize(cid) or
+            sch.alignment != world.registry.componentAlignment(cid))
+        {
+            return error.SchemaMismatch;
+        }
+        // A resource is no entity column, whatever the file says.
+        if (world.registry.componentKind(cid) == .resource) return error.SchemaMismatch;
         if (world.componentBytes(entity, cid) != null) return error.ExtensionComponentConflict;
         cids[c] = cid;
         values[c] = arch.componentSlot(c, 0);
     }
+    if (!requiresMet(world, entity, ext, &.{})) return error.RequiresNotSatisfied;
+    try checkHooks(world, gpa, entity, name, ext, true);
 
     // Step 2 — reserve the extension-record capacity (fallible, no observable
     // mutation). `owned` is freed if we abort before committing it.
@@ -615,13 +657,56 @@ pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId
     try world.dispatchOnAttach(entity, name, on_attach_text);
 }
 
+/// Whether every component the extension `ext` requires is carried by `entity`
+/// or named in `provided`.
+fn requiresMet(world: *World, entity: EntityId, ext: Accessor, provided: []const []const u8) bool {
+    var ri: u32 = 0;
+    next: while (ri < ext.requiresCount()) : (ri += 1) {
+        const name = ext.requiredName(ri);
+        for (provided) |p| if (std.mem.eql(u8, p, name)) continue :next;
+        const cid = world.componentId(name) orelse return false;
+        if (world.componentBytes(entity, cid) == null) return false;
+    }
+    return true;
+}
+
+/// Fire the world's hook check on the hooks of `ext` — its `on_attach` only
+/// when `with_attach` — in the scope of its own components and its requires.
+/// The hook the activation or deactivation dispatches is refused when no seam
+/// would run it.
+fn checkHooks(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext: Accessor, with_attach: bool) !void {
+    if (ext.hookCount() == 0) return;
+    const hook = ext.hook(0);
+    if (with_attach and hook.on_attach != null and world.attach_hook == null) return error.ExtensionHookUnbound;
+    if (!with_attach and hook.on_detach != null and world.detach_hook == null) return error.ExtensionHookUnbound;
+    const scope = try gpa.alloc([]const u8, ext.schemaCount() + ext.requiresCount());
+    defer gpa.free(scope);
+    var n: usize = 0;
+    var s: u32 = 0;
+    while (s < ext.schemaCount()) : (s += 1) {
+        scope[n] = ext.schema(s).name;
+        n += 1;
+    }
+    var r: u32 = 0;
+    while (r < ext.requiresCount()) : (r += 1) {
+        scope[n] = ext.requiredName(r);
+        n += 1;
+    }
+    try world.dispatchExtensionCheck(entity, name, .{
+        .on_attach = if (with_attach) hook.on_attach else null,
+        .on_detach = hook.on_detach,
+        .scope = scope,
+    });
+}
+
 /// Runtime extension activation entry, reached from Etch
 /// `entity.activate_extension("X")` (the interpreter resolves the name through
 /// the bridge's `ExtensionResolver`). Reuses the shared `activateExtension`
 /// path (atomic prevalidate → reserve → grouped add → record → `on_attach`).
 /// Unknown name → `error.UnknownExtension`; a component the entity already
 /// carries → `error.ExtensionComponentConflict` (the normative additive-conflict
-/// reject policy — see `engine-scene-serialization.md`).
+/// reject policy — see `engine-scene-serialization.md`); a required component
+/// the entity lacks → `error.RequiresNotSatisfied`.
 pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, resolver: ExtensionResolver) !void {
     const bytes = resolver.resolve(name) orelse return error.UnknownExtension;
     try activateExtension(world, gpa, entity, name, bytes);
@@ -634,7 +719,8 @@ pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, 
 /// Prepare/commit order — the hook-ordering guarantee is REAL:
 ///   1. Prevalidate with ZERO mutation: extension active (`ExtensionNotActive`),
 ///      bytes valid, strict mono-entity archetype, declared components resolvable;
-///      collect the ones currently present.
+///      collect the ones currently present; fire the world's hook check on
+///      `on_detach`.
 ///   2. PREPARE the grouped remove — all the fallible work (target archetype,
 ///      capacity, reserved dst slot), no observable mutation yet.
 ///   3. Fire `on_detach` FIRST (it still reads the present components). If it
@@ -669,6 +755,7 @@ pub fn deactivateExtension(world: *World, gpa: std.mem.Allocator, entity: Entity
             n += 1;
         }
     }
+    try checkHooks(world, gpa, entity, name, ext, false);
 
     const on_detach_text: ?[]const u8 = if (ext.hookCount() > 0) ext.hook(0).on_detach else null;
 
@@ -702,12 +789,11 @@ pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId
 
 /// Load the resources block — the load-side mirror of the non-POD
 /// resource path, following the `ecs_bridge` write discipline:
-/// for each resource, snapshot its current bytes, install the POD `data`
-/// (string-field slots are zeroed on disk), then for each `string` field intern
-/// the cooked value into the **Tier-0 persistent heap** as a **refcounted** block
+/// for each resource, snapshot its current bytes, install the POD `data` with
+/// every `string` slot zeroed, then for each `string` field intern the cooked
+/// value into the **Tier-0 persistent heap** as a **refcounted** block
 /// (`persistent.alloc`, not immortal) and write its `StringSlot`. The new blocks
-/// are owned by the slot, reclaimed by the resource owner's teardown (parity with
-/// interp-written strings); the old blocks the snapshot captured are decreffed at
+/// are owned by the slot; the old blocks the snapshot captured are decreffed at
 /// commit. Each touched resource is recorded in `journal` so the load is
 /// transactional. An empty string keeps the zeroed slot (`ptr == 0`).
 ///
@@ -728,6 +814,9 @@ fn loadResources(
     while (i < count) : (i += 1) {
         const r = acc.resource(i);
         const cid = remap[r.schema_index];
+        // Only a type registered as a resource is installed as one: a component
+        // named in the resource section is refused rather than turned into one.
+        if (world.registry.componentKind(cid) != .resource) return error.SchemaMismatch;
 
         // The loader reconstructs POD + interned `string` resource fields
         // only. A collection field (`.array_`/`.map_`/`.set_`) on disk is a zeroed
@@ -748,8 +837,7 @@ fn loadResources(
         // after the resource is mutated (reserve-then-mutate).
         try journal.ensureUnusedCapacity(gpa, 1);
 
-        // Install the POD image (string slots zeroed on disk), capturing the
-        // pre-write snapshot. For an existing resource the snapshot holds the old
+        // Install the POD image, capturing the pre-write snapshot. For an existing resource the snapshot holds the old
         // string slots (decreffed at commit / restored at rollback); for a fresh
         // one the snapshot is null (rollback removes it).
         // Capture the pre-write dirty bit BEFORE `getMutResource`
@@ -772,6 +860,13 @@ fn loadResources(
         // Journal the edit BEFORE the fallible string writes, so a mid-field OOM
         // rolls the whole resource back (decref partial new blocks + restore).
         journal.appendAssumeCapacity(.{ .cid = cid, .snapshot = snapshot, .dirty_before = dirty_before });
+
+        // A string slot of `data` is the file's bytes, and the rollback and the
+        // world decref whatever a slot holds: zero them all before any
+        // allocation can fail.
+        for (world.registry.componentFields(cid)) |fd| {
+            if (fd.kind == .string_) @memset(dst[fd.offset..][0..@sizeOf(persistent.StringSlot)], 0);
+        }
 
         // Per string field: alloc a REFCOUNTED block owned by the slot, copy
         // the cooked value, write the new `StringSlot`.
@@ -871,6 +966,7 @@ fn registerStringResource(gpa: std.mem.Allocator, reg: *Registry, name: []const 
         .fields = &[_]registry_mod.FieldDesc{
             .{ .name = "v", .offset = 0, .kind = .string_ },
         },
+        .kind = .resource,
     });
 }
 
@@ -885,6 +981,7 @@ fn registerArrayResource(gpa: std.mem.Allocator, reg: *Registry, name: []const u
         .fields = &[_]registry_mod.FieldDesc{
             .{ .name = "xs", .offset = 0, .kind = .array_ },
         },
+        .kind = .resource,
     });
 }
 
@@ -904,6 +1001,31 @@ fn buildStringResourceScene(gpa: std.mem.Allocator, reg: *const Registry, res_ci
     }});
     var model: format.CookModel = .{
         .strings = strings,
+        .uuids = &.{},
+        .resources = resources,
+        .archetypes = &.{},
+        .arena = arena,
+    };
+    defer model.deinit();
+    return try writer.write(gpa, model, reg);
+}
+
+/// Test helper: cook a scene whose string resource carries `garbage` in its
+/// slot bytes and no string-table entry for them.
+fn buildGarbageStringSlotScene(gpa: std.mem.Allocator, reg: *const Registry, res_cid: ComponentId, garbage: u64) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const data = try a.alloc(u8, 16);
+    @memset(data, 0);
+    @memcpy(data[0..8], std.mem.asBytes(&garbage));
+    @memcpy(data[8..12], std.mem.asBytes(&@as(u32, 5)));
+    const resources = try a.dupe(format.ResourceEntry, &.{.{
+        .schema_id = res_cid,
+        .data = data,
+        .string_fields = &.{},
+    }});
+    var model: format.CookModel = .{
+        .strings = &.{},
         .uuids = &.{},
         .resources = resources,
         .archetypes = &.{},
@@ -1144,10 +1266,21 @@ test "resource strings outlive LoadResult.deinit" {
     try testing.expect(ss.ptr != 0);
     const loaded: [*]const u8 = @ptrFromInt(ss.ptr);
     try testing.expectEqualStrings("Verdant Keep", loaded[0..ss.len]);
+}
 
-    // Owner teardown (parity with the interp's resource-string deinit): release
-    // the slot's refcounted block so the testing allocator sees no leak.
-    decrefResourceStrings(&world, gpa, settings, buf);
+test "a string slot's bytes in a scene file never reach the store" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const settings = try registerStringResource(gpa, &world.registry, "Settings");
+
+    const bytes = try buildGarbageStringSlotScene(gpa, &world.registry, settings, 0xDEAD_BEE0);
+    defer gpa.free(bytes);
+    var result = try loadFromBytes(&world, gpa, bytes, null);
+    result.deinit(gpa);
+
+    const buf = world.resources.getResource(settings).?;
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 16), buf[0..16]);
 }
 
 test "loading over an existing resource string releases the previous block" {
@@ -1174,8 +1307,6 @@ test "loading over an existing resource string releases the previous block" {
     @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
     const loaded: [*]const u8 = @ptrFromInt(ss.ptr);
     try testing.expectEqualStrings("second", loaded[0..ss.len]);
-
-    decrefResourceStrings(&world, gpa, settings, buf); // release "second"
 }
 
 test "a failed load leaves the world unchanged" {
@@ -1210,8 +1341,6 @@ test "a failed load leaves the world unchanged" {
     @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
     const held: [*]const u8 = @ptrFromInt(ss.ptr);
     try testing.expectEqualStrings("old", held[0..ss.len]);
-
-    decrefResourceStrings(&world, gpa, settings, buf); // release "old"
 }
 
 test "rollback restores across duplicate resource entries" {
@@ -1241,8 +1370,6 @@ test "rollback restores across duplicate resource entries" {
     @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
     const held: [*]const u8 = @ptrFromInt(ss.ptr);
     try testing.expectEqualStrings("pre", held[0..ss.len]); // pre-load value restored
-
-    decrefResourceStrings(&world, gpa, settings, buf); // release "pre"
 }
 
 /// Test helper: cook a 2-archetype (`A` then `B`), one-entity-each `.scene.bin`.
@@ -1454,6 +1581,55 @@ fn buildExtPrefab(gpa: std.mem.Allocator) ![]u8 {
     return writer.write(gpa, model, &reg);
 }
 
+/// Build a mono-entity extension `.prefab.bin` carrying one zeroed component
+/// `name` of the given layout, as a cook with that registry would write it.
+fn buildOneComponentExt(gpa: std.mem.Allocator, name: []const u8, size: u16, alignment: u16) ![]u8 {
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const id = try registerRaw(gpa, &reg, name, size, alignment);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const names = try a.dupe([]const u8, &.{try a.dupe(u8, "ext_entity")});
+    const uuids = try a.dupe([16]u8, &.{[_]u8{9} ** 16});
+    const col = try a.alloc(u8, size);
+    @memset(col, 0);
+    const ids = try a.dupe(ComponentId, &.{id});
+    const cols = try a.dupe([]u8, &.{col});
+    const ents = try a.dupe(format.EntityEntry, &.{.{ .name = 0, .uuid = 0, .parent_uuid = format.no_parent }});
+    const blocks = try a.dupe(format.ArchetypeBlock, &.{.{ .component_ids = ids, .entity_count = 1, .columns = cols, .entities = ents }});
+    var model: format.CookModel = .{ .strings = names, .uuids = uuids, .resources = &.{}, .archetypes = blocks, .arena = arena };
+    defer model.deinit();
+    return writer.write(gpa, model, &reg);
+}
+
+test "activateExtension refuses an extension naming a resource" {
+    const gpa = testing.allocator;
+    const ext_bytes = try buildOneComponentExt(gpa, "Settings", 16, 8);
+    defer gpa.free(ext_bytes);
+    var world = World.init();
+    defer world.deinit(gpa);
+    const base = try registerRaw(gpa, &world.registry, "ExtBase", 4, 4);
+    const settings = try registerStringResource(gpa, &world.registry, "Settings");
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{base});
+    try testing.expectError(error.SchemaMismatch, activateExtension(&world, gpa, e, "Forged", ext_bytes));
+    try testing.expect(world.componentBytes(e, settings) == null);
+    try testing.expect(!world.hasEntityExtension(e, "Forged"));
+}
+
+test "activateExtension refuses a component whose alignment differs" {
+    const gpa = testing.allocator;
+    const ext_bytes = try buildOneComponentExt(gpa, "ExtX", 4, 4);
+    defer gpa.free(ext_bytes);
+    var world = World.init();
+    defer world.deinit(gpa);
+    const base = try registerRaw(gpa, &world.registry, "ExtBase", 4, 4);
+    const x = try registerRaw(gpa, &world.registry, "ExtX", 4, 2);
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{base});
+    try testing.expectError(error.SchemaMismatch, activateExtension(&world, gpa, e, "Forged", ext_bytes));
+    try testing.expect(world.componentBytes(e, x) == null);
+    try testing.expect(!world.hasEntityExtension(e, "Forged"));
+}
+
 test "activateExtension is all-or-nothing under injected OOM" {
     const backing = testing.allocator;
     const ext_bytes = try buildExtPrefab(backing);
@@ -1629,4 +1805,50 @@ test "activateExtension rejects re-activation, including a hook-only extension (
     try activateExtension(&world, backing, e2, "HookOnly", hook_only);
     try testing.expect(world.hasEntityExtension(e2, "HookOnly"));
     try testing.expectError(error.ExtensionAlreadyActive, activateExtension(&world, backing, e2, "HookOnly", hook_only));
+}
+
+test "an archetype naming a type registered as a resource is refused" {
+    const gpa = testing.allocator;
+    var cook_reg = Registry.init();
+    defer cook_reg.deinit(gpa);
+    const pos_cook = try registerRaw(gpa, &cook_reg, "Pos", 8, 4);
+    const bytes = try buildOneCompScene(gpa, &cook_reg, pos_cook);
+    defer gpa.free(bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{
+        .name = "Pos",
+        .size = 8,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 8,
+        .fields = &.{},
+        .kind = .resource,
+    });
+    try testing.expectError(error.SchemaMismatch, loadFromBytes(&world, gpa, bytes, null));
+    try testing.expectEqual(@as(usize, 0), world.entityCount());
+}
+
+test "a resource section naming a type registered as a component is refused" {
+    const gpa = testing.allocator;
+    var cook_reg = Registry.init();
+    defer cook_reg.deinit(gpa);
+    const res = try registerStringResource(gpa, &cook_reg, "Settings");
+    const bytes = try buildStringResourceScene(gpa, &cook_reg, res, "x");
+    defer gpa.free(bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    const cid = try world.registry.registerComponentRaw(gpa, .{
+        .name = "Settings",
+        .size = 16,
+        .alignment = 8,
+        .default_bytes = &[_]u8{0} ** 16,
+        .fields = &[_]registry_mod.FieldDesc{
+            .{ .name = "v", .offset = 0, .kind = .string_ },
+        },
+    });
+    try testing.expectError(error.SchemaMismatch, loadFromBytes(&world, gpa, bytes, null));
+    try testing.expect(!world.resources.contains(cid));
+    try testing.expectEqual(registry_mod.TypeKind.component, world.registry.componentKind(cid));
 }

@@ -915,6 +915,15 @@ fn freeCodes(gpa: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8)) 
     list.deinit(gpa);
 }
 
+test "@storage(none) is a value outside the domain, not a non-constant" {
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, "@storage(none)\ncomponent C { x: int = 0 }", &codes);
+    try std.testing.expectEqual(@as(usize, 1), codes.items.len);
+    try std.testing.expectEqualStrings("E0503", codes.items[0]);
+}
+
 // `E1216` IS RETIRED, AND THIS FAMILY IS ITS RECORD.
 //
 // A STATIC refusal of a dead `@requires` removal refused CORRECT CODE five
@@ -1129,10 +1138,32 @@ const src_p3_masking =
     \\    when entity has Mesh and entity has Link
     \\{
     \\    let l = entity.get(Link)
-    \\    let entity = l.target
-    \\    entity.remove(Transform)
+    \\    if true {
+    \\        let entity = l.target
+    \\        entity.remove(Transform)
+    \\    }
     \\}
 ;
+
+const src_p3_rebound_here =
+    \\component Link { target: Entity }
+    \\
+    \\rule strip(entity: Entity)
+    \\    when entity has Link
+    \\{
+    \\    let l = entity.get(Link)
+    \\    let entity = l.target
+    \\}
+;
+
+test "P3: the parameter rebound in its own scope is E0101" {
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p3_rebound_here, &codes);
+    try std.testing.expectEqual(@as(usize, 1), codes.items.len);
+    try std.testing.expectEqualStrings("E0101", codes.items[0]);
+}
 
 test "P3: a REBOUND name is not the selected identity" {
     // The receiver test compares a `StringId`, so a `let` that rebinds the

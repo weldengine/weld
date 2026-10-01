@@ -5,14 +5,14 @@
 //! metadata for the rest of the ECS (dynamic archetype storage, runtime
 //! queries, the Etch bridge) to operate on raw bytes.
 //!
-//! Two registration paths share the same backing storage:
+//! Every registration becomes an entry through `prepareEntry`:
 //!
 //! - `registerComponent(gpa, comptime T) ComponentId` — for types known at
 //!   Zig compile time. The descriptor is derived from `@typeInfo(T)`.
-//! - `registerComponentRaw(gpa, desc) ComponentId` — for types discovered
-//!   at runtime (the Etch bridge consumes this path from the parsed AST:
-//!   component names, field names, default bytes come from the source
-//!   file).
+//! - `registerComponentRaw(gpa, desc) ComponentId` — for one type described
+//!   at runtime.
+//! - `prepareEntry`, `reserve`, `commitPrepared` — for a batch that must be
+//!   registered whole or not at all, as an Etch compile registers its types.
 //!
 //! Coexists with the comptime `(Transform, Velocity)` archetype defined
 //! in `world.zig` — additive, never replaces it. The struct stores no
@@ -25,6 +25,7 @@ const std = @import("std");
 /// Imported only for `FieldKind.fromZigType`; `entity.zig` imports
 /// nothing of `registry.zig`, so this is acyclic.
 const EntityId = @import("entity.zig").EntityId;
+const persistent = @import("../memory/persistent.zig");
 
 /// Stable identifier assigned at registration. The first registered
 /// component gets `ComponentId(0)`; subsequent registrations get the next
@@ -54,6 +55,11 @@ pub const StorageKind = enum {
     }
 };
 
+/// Whether a registered type is attached to entities or held once by the world.
+/// A resource is no entity column, so it is neither a requisite nor a requirer
+/// (`engine-ecs-internals.md` §3).
+pub const TypeKind = enum { component, resource };
+
 /// Coarse-grained tag for primitive fields, telling the interpreter how to read
 /// or write raw bytes. The Etch subset exercises only `int_`, `float_`, `bool_`.
 ///
@@ -68,14 +74,8 @@ pub const FieldKind = enum {
     u32_,
     f32_,
     f64_,
-    /// A `string` field slot: `{ ptr: u64, len: u32 }` (16 bytes, 8-aligned)
-    /// pointing into the Tier-0 persistent heap (`src/core/memory/persistent.zig`,
-    /// `StringSlot`). **Resource-only by construction**: the Etch
-    /// validator rejects `string` on `component` and `fieldKindFromTypeName`
-    /// only emits this kind for the `.resource` origin, so no component can ever
-    /// carry it — the component SoA/POD invariant (`ARCH-004`) is
-    /// untouched. Tier-0 stays string-agnostic: it stores/copies the 16 raw
-    /// slot bytes; the Etch runtime owns the pointed-to bytes' lifetime.
+    /// A `string` field slot: a `persistent.StringSlot` (16 bytes, 8-aligned).
+    /// Etch admits it on resources only.
     string_,
     /// An enum field slot: the variant's declaration-order index as a `u32`
     /// discriminant (4 bytes, 4-aligned). POD — no persistent heap, no decref,
@@ -95,8 +95,8 @@ pub const FieldKind = enum {
     entity_,
     /// A dynamic-array field slot (`T[]`): a `CollectionSlot` (`{ ptr: u64 }`,
     /// 8 bytes, 8-aligned) holding the persistent-heap pointer of the owned
-    /// container block. **Resource-only by construction** like `.string_`. Tier 0
-    /// copies the 8 raw slot bytes; the Etch runtime owns the container.
+    /// container block. Etch admits it on resources only. Tier 0 copies the 8 raw
+    /// slot bytes.
     array_,
     /// A map field slot (`[K: V]`). Same 8-byte `CollectionSlot`
     /// discipline and resource-only gating as `.array_`.
@@ -185,19 +185,30 @@ pub const ComponentDesc = struct {
     /// computed once by `finalizeRequires` and read per add, never re-walked per
     /// add (`engine-ecs-internals.md` §3).
     requires: []const []const u8 = &.{},
+    /// Identity the other inputs of `schemaDigestOf` cannot express:
+    /// `TagTable.contentDigest` on the builtin `TagSet`, `0` everywhere else.
+    content_digest: u64 = 0,
+    /// Component or resource. A host that makes an id a resource through
+    /// `World.addResource` records the kind there.
+    kind: TypeKind = .component,
 };
 
 /// The 64-bit schema identity of `desc` (`engine-ecs-internals.md` §13), over
-/// `(name, size, alignment, [(field name, kind, offset) in declaration order])`.
+/// `(name, size, alignment, [(field name, kind, offset) in declaration order],
+/// content_digest)`.
 ///
 /// - **Derived at REGISTRATION, not at `comptime`.** A component declared in
 ///   Etch has no Zig type when the engine is compiled.
 /// - **Size and alignment are IN the tuple**, not only the fields: a component
-///   with no named field — the builtin `TagSet`, an opaque block sized by the
-///   program's tag table — is discriminated by nothing else.
+///   with no named field and a zero `content_digest` is discriminated by
+///   nothing else.
 /// - **Storage mode is OUT of it.** `table` or `sparse` is a property of this
 ///   registry and not of the layout (`ARCH-005`), so changing it provokes
 ///   neither refusal nor migration.
+/// - **`requires` is OUT of it too**: it changes no layout, so hashing it would
+///   refuse a reload as a layout change that did not happen. A reload editing
+///   only `@requires` passes, and nothing re-checks live entities against a newly
+///   added requisite.
 ///
 /// Sensitive to a field added in EXISTING padding, since offsets enter the hash.
 ///
@@ -215,6 +226,7 @@ pub fn schemaDigestOf(desc: ComponentDesc) u64 {
         h.update(std.mem.asBytes(&k));
         h.update(std.mem.asBytes(&f.offset));
     }
+    h.update(std.mem.asBytes(&desc.content_digest));
     return h.final();
 }
 
@@ -222,11 +234,13 @@ pub fn schemaDigestOf(desc: ComponentDesc) u64 {
 /// and `registerAlias`; lookup paths never fail (return `?T`).
 pub const RegistryError = error{
     DuplicateComponent,
+    FieldOutOfBounds,
+    CollectionDefaultNotEmpty,
     OutOfMemory,
 };
 
-/// One owned entry. `name`, `default_bytes`, and `fields` are duplicated
-/// at registration time so the caller can free its inputs immediately.
+/// One registered type: the descriptor `prepareEntry` copied, and what the
+/// registry derives from it.
 const Entry = struct {
     desc: ComponentDesc,
     /// The TRANSITIVE closure of `desc.requires`, flattened to ids, computed
@@ -238,6 +252,118 @@ const Entry = struct {
     /// Schema identity, derived at registration — beside the descriptor for the
     /// same reason `closure` is.
     schema_digest: u64 = 0,
+    /// The blocks `desc.default_bytes` points at, destroyed with the entry, so
+    /// every copy of the default bytes — a resource store slot included — stays
+    /// valid for the registry's lifetime.
+    owned_blocks: []const [*]u8 = &.{},
+};
+
+/// Point every `.string_` slot of `out` whose slot in `src` is non-empty at an
+/// immortal copy of that string, and write every other one as `{ptr=0,len=0}`,
+/// returning the copies. Immortal because a store slot seeded from the default
+/// bytes holds one, and `decref` must leave it alone. Reads only `src`, which
+/// `out` copies. On error no copy survives.
+fn copyStringDefaults(gpa: std.mem.Allocator, fields: []const FieldDesc, src: []const u8, out: []u8) error{OutOfMemory}![]const [*]u8 {
+    const Slot = persistent.StringSlot;
+    var n: usize = 0;
+    for (fields) |f| {
+        if (f.kind != .string_) continue;
+        const ss = std.mem.bytesToValue(Slot, src[f.offset..][0..@sizeOf(Slot)]);
+        if (ss.ptr != 0 and ss.len != 0) n += 1;
+    }
+    const blocks: [][*]u8 = if (n == 0) &.{} else try gpa.alloc([*]u8, n);
+    var made: usize = 0;
+    errdefer {
+        for (blocks[0..made]) |b| persistent.destroy(gpa, b);
+        if (n != 0) gpa.free(blocks);
+    }
+    for (fields) |f| {
+        if (f.kind != .string_) continue;
+        const ss = std.mem.bytesToValue(Slot, src[f.offset..][0..@sizeOf(Slot)]);
+        var ptr: u64 = 0;
+        var len: u32 = 0;
+        if (ss.ptr != 0 and ss.len != 0) {
+            const block = try persistent.allocImmortal(gpa, persistent.type_string, ss.len);
+            @memcpy(block[0..ss.len], @as([*]const u8, @ptrFromInt(ss.ptr))[0..ss.len]);
+            blocks[made] = block;
+            made += 1;
+            ptr = @intFromPtr(block);
+            len = ss.len;
+        }
+        const slot = out[f.offset..][0..@sizeOf(Slot)];
+        @memcpy(slot[@offsetOf(Slot, "ptr")..][0..@sizeOf(u64)], std.mem.asBytes(&ptr));
+        @memcpy(slot[@offsetOf(Slot, "len")..][0..@sizeOf(u32)], std.mem.asBytes(&len));
+    }
+    return blocks;
+}
+
+/// Free every allocation an entry owns.
+fn freeEntry(gpa: std.mem.Allocator, e: *Entry) void {
+    gpa.free(e.desc.name);
+    gpa.free(e.desc.default_bytes);
+    for (e.desc.fields) |f| gpa.free(f.name);
+    gpa.free(e.desc.fields);
+    for (e.desc.requires) |r| gpa.free(r);
+    gpa.free(e.desc.requires);
+    if (e.closure.len != 0) gpa.free(e.closure);
+    for (e.owned_blocks) |b| persistent.destroy(gpa, b);
+    if (e.owned_blocks.len != 0) gpa.free(e.owned_blocks);
+}
+
+/// A registration built in full and not yet visible: `Registry.prepareEntry`
+/// makes every allocation it needs, so `Registry.commitPrepared` cannot fail.
+pub const PreparedEntry = struct {
+    entry: Entry,
+
+    /// Release an entry that was never committed, its owned blocks included.
+    pub fn deinit(self: *PreparedEntry, gpa: std.mem.Allocator) void {
+        freeEntry(gpa, &self.entry);
+        self.* = undefined;
+    }
+
+    pub fn name(self: *const PreparedEntry) []const u8 {
+        return self.entry.desc.name;
+    }
+
+    pub fn schemaDigest(self: *const PreparedEntry) u64 {
+        return self.entry.schema_digest;
+    }
+
+    pub fn fields(self: *const PreparedEntry) []const FieldDesc {
+        return self.entry.desc.fields;
+    }
+
+    pub fn defaultBytes(self: *const PreparedEntry) []const u8 {
+        return self.entry.desc.default_bytes;
+    }
+
+    pub fn size(self: *const PreparedEntry) u16 {
+        return self.entry.desc.size;
+    }
+
+    pub fn kind(self: *const PreparedEntry) TypeKind {
+        return self.entry.desc.kind;
+    }
+
+    pub fn requires(self: *const PreparedEntry) []const []const u8 {
+        return self.entry.desc.requires;
+    }
+
+    pub fn alignment(self: *const PreparedEntry) u16 {
+        return self.entry.desc.alignment;
+    }
+};
+
+/// Transitive `@requires` closures computed apart from the registry, one per
+/// id, by `Registry.stageClosures`; `Registry.commitClosures` adopts them.
+pub const StagedClosures = struct {
+    closures: [][]const ComponentId,
+
+    pub fn deinit(self: *StagedClosures, gpa: std.mem.Allocator) void {
+        for (self.closures) |c| if (c.len != 0) gpa.free(c);
+        gpa.free(self.closures);
+        self.* = undefined;
+    }
 };
 
 /// Runtime registry of component (and resource) type descriptions.
@@ -264,15 +390,7 @@ pub const Registry = struct {
     }
 
     pub fn deinit(self: *Registry, gpa: std.mem.Allocator) void {
-        for (self.entries.items) |*e| {
-            gpa.free(e.desc.name);
-            gpa.free(e.desc.default_bytes);
-            for (e.desc.fields) |f| gpa.free(f.name);
-            gpa.free(e.desc.fields);
-            for (e.desc.requires) |r| gpa.free(r);
-            gpa.free(e.desc.requires);
-            if (e.closure.len != 0) gpa.free(e.closure);
-        }
+        for (self.entries.items) |*e| freeEntry(gpa, e);
         self.entries.deinit(gpa);
         self.by_name.deinit(gpa);
         for (self.aliases.items) |a| gpa.free(a);
@@ -280,17 +398,44 @@ pub const Registry = struct {
         self.* = undefined;
     }
 
-    /// Register a component described at runtime. The registry duplicates
-    /// `desc.name`, `desc.default_bytes`, and each `FieldDesc.name`.
+    /// Register a component described at runtime, on `prepareEntry`'s terms.
     pub fn registerComponentRaw(self: *Registry, gpa: std.mem.Allocator, desc: ComponentDesc) RegistryError!ComponentId {
+        var prepared = try self.prepareEntry(gpa, desc);
+        errdefer prepared.deinit(gpa);
+        try self.reserve(gpa, 1);
+        return self.commitPrepared(prepared);
+    }
+
+    /// Copy `desc` into an entry `commitPrepared` can adopt, without touching
+    /// the registry. The entry copies every input, the string a `.string_`
+    /// default slot names included (`len` readable bytes at `ptr`, when both are
+    /// non-zero): the caller keeps all it passed. Refuses a name already
+    /// registered, a field reaching past `desc.default_bytes`, and a collection
+    /// field whose default slot is not zero.
+    pub fn prepareEntry(self: *const Registry, gpa: std.mem.Allocator, desc: ComponentDesc) RegistryError!PreparedEntry {
         if (self.by_name.contains(desc.name)) return RegistryError.DuplicateComponent;
-        const id: ComponentId = @intCast(self.entries.items.len);
+        for (desc.fields) |f| {
+            if (@as(usize, f.offset) + f.kind.sizeBytes() > desc.default_bytes.len) return RegistryError.FieldOutOfBounds;
+            switch (f.kind) {
+                .array_, .map_, .set_ => {
+                    const slot = desc.default_bytes[f.offset..][0..@sizeOf(persistent.CollectionSlot)];
+                    if (std.mem.bytesToValue(persistent.CollectionSlot, slot).ptr != 0) return RegistryError.CollectionDefaultNotEmpty;
+                },
+                else => {},
+            }
+        }
 
         const name_owned = try gpa.dupe(u8, desc.name);
         errdefer gpa.free(name_owned);
 
         const default_owned = try gpa.dupe(u8, desc.default_bytes);
         errdefer gpa.free(default_owned);
+
+        const blocks_owned = try copyStringDefaults(gpa, desc.fields, desc.default_bytes, default_owned);
+        errdefer {
+            for (blocks_owned) |b| persistent.destroy(gpa, b);
+            if (blocks_owned.len != 0) gpa.free(blocks_owned);
+        }
 
         const fields_owned = try gpa.alloc(FieldDesc, desc.fields.len);
         errdefer gpa.free(fields_owned);
@@ -316,7 +461,7 @@ pub const Registry = struct {
             dup_req += 1;
         }
 
-        try self.entries.append(gpa, .{
+        return .{ .entry = .{
             .desc = .{
                 .name = name_owned,
                 .size = desc.size,
@@ -325,13 +470,35 @@ pub const Registry = struct {
                 .fields = fields_owned,
                 .storage = desc.storage,
                 .requires = requires_owned,
+                .content_digest = desc.content_digest,
+                .kind = desc.kind,
             },
             .schema_digest = schemaDigestOf(desc),
-        });
-        errdefer _ = self.entries.pop();
+            .owned_blocks = blocks_owned,
+        } };
+    }
 
-        try self.by_name.put(gpa, name_owned, id);
+    /// Make room for `n` more entries, so that many `commitPrepared` calls
+    /// cannot fail. Changes nothing a reader of the registry can observe.
+    pub fn reserve(self: *Registry, gpa: std.mem.Allocator, n: usize) error{OutOfMemory}!void {
+        try self.entries.ensureUnusedCapacity(gpa, n);
+        try self.by_name.ensureUnusedCapacity(gpa, @intCast(n));
+    }
+
+    /// Adopt `prepared` under the next id and return that id. Cannot fail:
+    /// requires room from `reserve` and a name registered neither before nor by
+    /// another entry committed since `prepareEntry`.
+    pub fn commitPrepared(self: *Registry, prepared: PreparedEntry) ComponentId {
+        const id: ComponentId = @intCast(self.entries.items.len);
+        self.entries.appendAssumeCapacity(prepared.entry);
+        self.by_name.putAssumeCapacityNoClobber(prepared.entry.desc.name, id);
         return id;
+    }
+
+    /// The immortal blocks entry `id` owns, which its default bytes point into.
+    pub fn ownedBlocks(self: *const Registry, id: ComponentId) []const [*]u8 {
+        if (id >= self.entries.items.len) return &.{};
+        return self.entries.items[id].owned_blocks;
     }
 
     /// The schema identity recorded for `id` at registration, or `null` when `id`
@@ -397,44 +564,105 @@ pub const Registry = struct {
     /// reduce it to a two-colour visited set: that cannot tell a cycle from a
     /// diamond (`A requires B, C`; `B requires D`; `C requires D`), and a
     /// diamond is legal.
+    ///
+    /// A requisite that is a resource, and a resource with requisites, are
+    /// errors too: a resource is no entity column.
+    ///
+    /// On error every closure keeps its previous value.
     pub fn finalizeRequires(self: *Registry, gpa: std.mem.Allocator) !void {
-        const n = self.entries.items.len;
+        const staged = try self.stageClosures(gpa, &.{});
+        self.commitClosures(gpa, staged);
+    }
+
+    /// Compute the closure of every committed entry and of every `pending`
+    /// entry, `pending[i]` standing at id `componentCount() + i` as if already
+    /// committed in order. Every allocation and every refusal happen here and
+    /// the registry is left untouched.
+    pub fn stageClosures(
+        self: *const Registry,
+        gpa: std.mem.Allocator,
+        pending: []const PreparedEntry,
+    ) error{ OutOfMemory, RequiresCycle, UnknownRequisite, RequisiteIsResource, RequiresOnResource }!StagedClosures {
+        const graph: Graph = .{ .registry = self, .pending = pending };
+        const n = graph.count();
+        const out = try gpa.alloc([]const ComponentId, n);
+        for (out) |*c| c.* = &.{};
+        var staged: StagedClosures = .{ .closures = out };
+        errdefer staged.deinit(gpa);
+
         const colour = try gpa.alloc(Colour, n);
         defer gpa.free(colour);
         @memset(colour, .white);
-
-        for (self.entries.items, 0..) |*e, i| {
-            if (e.closure.len != 0) {
-                gpa.free(e.closure);
-                e.closure = &.{};
-            }
-            _ = i;
-        }
         for (0..n) |i| {
             if (colour[i] == .black) continue;
-            try self.closeOne(gpa, @intCast(i), colour);
+            try closeOne(gpa, graph, @intCast(i), colour, out);
         }
+        return staged;
     }
+
+    /// Adopt `staged` as the closures of every entry, then free the closures it
+    /// replaces. Cannot fail: requires the pending entries it was staged over to
+    /// have been committed since, and nothing else.
+    pub fn commitClosures(self: *Registry, gpa: std.mem.Allocator, staged: StagedClosures) void {
+        std.debug.assert(staged.closures.len == self.entries.items.len);
+        for (self.entries.items, staged.closures) |*e, c| {
+            if (e.closure.len != 0) gpa.free(e.closure);
+            e.closure = c;
+        }
+        gpa.free(staged.closures);
+    }
+
+    /// The committed entries followed by the pending ones, under one id space.
+    const Graph = struct {
+        registry: *const Registry,
+        pending: []const PreparedEntry,
+
+        fn count(g: Graph) usize {
+            return g.registry.entries.items.len + g.pending.len;
+        }
+
+        fn requiresOf(g: Graph, id: ComponentId) []const []const u8 {
+            const base = g.registry.entries.items.len;
+            if (id < base) return g.registry.entries.items[id].desc.requires;
+            return g.pending[id - base].entry.desc.requires;
+        }
+
+        fn kindOf(g: Graph, id: ComponentId) TypeKind {
+            const base = g.registry.entries.items.len;
+            if (id < base) return g.registry.entries.items[id].desc.kind;
+            return g.pending[id - base].entry.desc.kind;
+        }
+
+        fn idOf(g: Graph, name: []const u8) ?ComponentId {
+            if (g.registry.by_name.get(name)) |id| return id;
+            for (g.pending, 0..) |p, i| {
+                if (std.mem.eql(u8, p.entry.desc.name, name)) return @intCast(g.registry.entries.items.len + i);
+            }
+            return null;
+        }
+    };
 
     /// Sorts the closure ASCENDING by id: the add path applies it in that order, so
     /// the order must be a pure function of the program and never of the walk.
-    fn closeOne(self: *Registry, gpa: std.mem.Allocator, id: ComponentId, colour: []Colour) !void {
+    fn closeOne(gpa: std.mem.Allocator, graph: Graph, id: ComponentId, colour: []Colour, out: [][]const ComponentId) !void {
         if (colour[id] == .black) return;
         if (colour[id] == .grey) return error.RequiresCycle;
         colour[id] = .grey;
+        if (graph.kindOf(id) == .resource and graph.requiresOf(id).len != 0) return error.RequiresOnResource;
 
         var acc: std.ArrayListUnmanaged(ComponentId) = .empty;
         errdefer acc.deinit(gpa);
-        for (self.entries.items[id].desc.requires) |req_name| {
-            const req = self.by_name.get(req_name) orelse return error.UnknownRequisite;
+        for (graph.requiresOf(id)) |req_name| {
+            const req = graph.idOf(req_name) orelse return error.UnknownRequisite;
             if (req == id) return error.RequiresCycle;
-            try self.closeOne(gpa, req, colour);
+            if (graph.kindOf(req) == .resource) return error.RequisiteIsResource;
+            try closeOne(gpa, graph, req, colour, out);
             try appendUnique(gpa, &acc, req);
-            for (self.entries.items[req].closure) |t| try appendUnique(gpa, &acc, t);
+            for (out[req]) |t| try appendUnique(gpa, &acc, t);
         }
         const flat = try acc.toOwnedSlice(gpa);
         std.mem.sort(ComponentId, flat, {}, std.sort.asc(ComponentId));
-        self.entries.items[id].closure = flat;
+        out[id] = flat;
         colour[id] = .black;
     }
 
@@ -494,6 +722,29 @@ pub const Registry = struct {
         return self.entries.items[id].desc.storage;
     }
 
+    /// The direct `@requires` names `id` was registered with.
+    pub fn componentRequires(self: *const Registry, id: ComponentId) []const []const u8 {
+        return self.entries.items[id].desc.requires;
+    }
+
+    /// Component or resource, as registered or as `markResource` set it.
+    pub fn componentKind(self: *const Registry, id: ComponentId) TypeKind {
+        return self.entries.items[id].desc.kind;
+    }
+
+    /// Refuses making `id` a resource when a closure requires it or it has
+    /// requisites. Mutates nothing, so `markResource` may follow a later
+    /// fallible step.
+    pub fn checkResource(self: *const Registry, id: ComponentId) error{ RequisiteIsResource, RequiresOnResource }!void {
+        if (self.entries.items[id].desc.requires.len != 0) return error.RequiresOnResource;
+        for (self.entries.items) |e| for (e.closure) |t| if (t == id) return error.RequisiteIsResource;
+    }
+
+    /// Records `id` as a resource. `checkResource` must have admitted it.
+    pub fn markResource(self: *Registry, id: ComponentId) void {
+        self.entries.items[id].desc.kind = .resource;
+    }
+
     /// Lookup a field on a component by name. Returns `null` if the name
     /// is not declared.
     pub fn findField(self: *const Registry, id: ComponentId, field_name: []const u8) ?FieldDesc {
@@ -535,15 +786,8 @@ pub const Registry = struct {
 };
 
 test "the digest is blind to the default bytes" {
-    // A DEPENDENT RESTS ON THIS. `interp.schemaDigestFor` passes `&.{}` for
-    // `default_bytes` so the hot-reload pre-validation pass can confront every
-    // declared schema WITHOUT materialising a single default — materialising them
-    // allocates immortal persistent blocks, which a pass that may refuse must not
-    // do. That shortcut is only sound while this property holds.
-    //
-    // If a future change makes the digest read the defaults, this test fires and
-    // names where to go: `schemaDigestFor` must then be given the real bytes, and
-    // the pre-pass must materialise them and own their rollback.
+    // `interp.schemaDigestFor` passes `&.{}` for `default_bytes`, so a reload
+    // confronts a declaration without evaluating its defaults.
     const fields = [_]FieldDesc{.{ .name = "v", .offset = 0, .kind = .int_ }};
     const a: ComponentDesc = .{
         .name = "T",
@@ -687,4 +931,100 @@ test "registerComponentRaw and findField roundtrip" {
     try std.testing.expectEqual(@as(u16, 8), f.offset);
     try std.testing.expectEqual(FieldKind.float_, f.kind);
     try std.testing.expect(reg.findField(id, "missing") == null);
+}
+
+test "registerComponentRaw copies a string default, so the caller may free its own" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const host = try gpa.dupe(u8, "hello");
+    var default_bytes = [_]u8{0} ** 16;
+    @memcpy(default_bytes[0..8], std.mem.asBytes(&@as(u64, @intFromPtr(host.ptr))));
+    @memcpy(default_bytes[8..12], std.mem.asBytes(&@as(u32, @intCast(host.len))));
+    const id = try reg.registerComponentRaw(gpa, .{
+        .name = "Titled",
+        .size = 16,
+        .alignment = 8,
+        .default_bytes = &default_bytes,
+        .fields = &[_]FieldDesc{.{ .name = "title", .offset = 0, .kind = .string_ }},
+    });
+    @memset(host, 'x');
+    gpa.free(host);
+
+    const kept = std.mem.bytesToValue(persistent.StringSlot, reg.componentDefaultBytes(id)[0..16]);
+    try std.testing.expectEqualStrings("hello", @as([*]const u8, @ptrFromInt(kept.ptr))[0..kept.len]);
+}
+
+test "registerComponentRaw refuses a collection default that names a container" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const default_bytes = std.mem.toBytes(@as(u64, 0x1000));
+    for ([_]FieldKind{ .array_, .map_, .set_ }) |kind| {
+        try std.testing.expectError(RegistryError.CollectionDefaultNotEmpty, reg.registerComponentRaw(gpa, .{
+            .name = "Listed",
+            .size = 8,
+            .alignment = 8,
+            .default_bytes = &default_bytes,
+            .fields = &[_]FieldDesc{.{ .name = "xs", .offset = 0, .kind = kind }},
+        }));
+    }
+}
+
+test "registerComponentRaw writes an empty string default as {0,0} and owns nothing for it" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    var default_bytes = [_]u8{0} ** 16;
+    @memcpy(default_bytes[0..8], std.mem.asBytes(&@as(u64, 0x1000)));
+    const id = try reg.registerComponentRaw(gpa, .{
+        .name = "Blank",
+        .size = 16,
+        .alignment = 8,
+        .default_bytes = &default_bytes,
+        .fields = &[_]FieldDesc{.{ .name = "title", .offset = 0, .kind = .string_ }},
+    });
+    const kept = std.mem.bytesToValue(persistent.StringSlot, reg.componentDefaultBytes(id)[0..16]);
+    try std.testing.expectEqual(@as(u64, 0), kept.ptr);
+    try std.testing.expectEqual(@as(usize, 0), reg.ownedBlocks(id).len);
+}
+
+test "overlapping string slots in a raw default copy exactly the strings the input names" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const host = "hello";
+    var default_bytes = [_]u8{0} ** 20;
+    @memcpy(default_bytes[0..8], std.mem.asBytes(&@as(u64, @intFromPtr(host.ptr))));
+    @memcpy(default_bytes[8..12], std.mem.asBytes(&@as(u32, host.len)));
+    const id = try reg.registerComponentRaw(gpa, .{
+        .name = "Overlapped",
+        .size = 20,
+        .alignment = 4,
+        .default_bytes = &default_bytes,
+        .fields = &[_]FieldDesc{
+            .{ .name = "a", .offset = 0, .kind = .string_ },
+            .{ .name = "b", .offset = 4, .kind = .string_ },
+        },
+    });
+    try std.testing.expectEqual(@as(usize, 1), reg.ownedBlocks(id).len);
+}
+
+test "registerComponentRaw refuses a field reaching past its default bytes" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const default_bytes = [_]u8{0} ** 8;
+    try std.testing.expectError(RegistryError.FieldOutOfBounds, reg.registerComponentRaw(gpa, .{
+        .name = "Short",
+        .size = 16,
+        .alignment = 8,
+        .default_bytes = &default_bytes,
+        .fields = &[_]FieldDesc{.{ .name = "title", .offset = 0, .kind = .string_ }},
+    }));
 }

@@ -268,21 +268,7 @@ fn typeRefOf(comptime T: type) TypeRef {
 fn argToZig(comptime T: type, a: Arg) !T {
     return switch (T) {
         i64 => if (a == .int_) a.int_ else error.ServiceArgTypeMismatch,
-        f64 => switch (a) {
-            .float_ => |f| f,
-            // An `int` argument reaching a `float` parameter widens here — and
-            // NOT on the path a rule takes: `interp.valueToArg` has already
-            // widened it, so from `callService` this arm never runs. It is
-            // reached only through `Registry.call`, which this file records
-            // below as having no production caller. What has no second home is
-            // the ABSENCE of a check: `checkServiceCall` synthesises each
-            // argument and DISCARDS the type (`_ = try synthExprE`), so nothing
-            // compares an argument against its declared parameter and the
-            // widening is accepted with no diagnostic. Delete this arm and the
-            // language does not change; delete `valueToArg`'s and it does.
-            .int_ => |i| @floatFromInt(i),
-            else => error.ServiceArgTypeMismatch,
-        },
+        f64 => if (a == .float_) a.float_ else error.ServiceArgTypeMismatch,
         bool => if (a == .bool_) a.bool_ else error.ServiceArgTypeMismatch,
         []const u8 => if (a == .string_) a.string_ else error.ServiceArgTypeMismatch,
         u64 => if (a == .entity_) a.entity_ else error.ServiceArgTypeMismatch,
@@ -569,11 +555,9 @@ test "a registered service calls through and its error union comes back intact" 
     try std.testing.expectError(error.ServiceArgCountMismatch, reg.call("toy", "echo", &.{}));
     try std.testing.expectError(error.ServiceArgTypeMismatch, reg.call("toy", "echo", &.{.{ .bool_ = true }}));
 
-    // An `int` argument widens into a `float` parameter — the rule Etch already
-    // applies at every other numeric boundary — and the reverse does NOT hold,
-    // which is what makes the widening a decision rather than a loose check.
+    // Neither numeric kind converts into the other, as nowhere in Etch.
     try std.testing.expectEqual(Ret{ .float_ = 2.5 }, try reg.call("toy", "half", &.{.{ .float_ = 5.0 }}));
-    try std.testing.expectEqual(Ret{ .float_ = 2.5 }, try reg.call("toy", "half", &.{.{ .int_ = 5 }}));
+    try std.testing.expectError(error.ServiceArgTypeMismatch, reg.call("toy", "half", &.{.{ .int_ = 5 }}));
     try std.testing.expectError(error.ServiceArgTypeMismatch, reg.call("toy", "echo", &.{.{ .float_ = 5.0 }}));
 }
 

@@ -22,9 +22,11 @@ pub fn build(b: *std.Build) void {
 
     // Dependency on the Weld engine (local path in the monolithic
     // repo, three levels up — same rationale as `examples/triangle`).
+    const physics_f64 = b.option(bool, "physics_f64", "Build the engine's forge_3d in f64 precision") orelse false;
     const weld = b.dependency("weld", .{
         .target = target,
         .optimize = optimize,
+        .physics_f64 = physics_f64,
     });
 
     // Cook the committed corpus through the parent's installed `etch_cook`
