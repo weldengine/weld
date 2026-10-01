@@ -306,11 +306,25 @@ pub const ClosureType = struct {
     pub const no_env = std.math.maxInt(u32);
 };
 
-/// `ResolvedType` is the type-checker's internal type representation.
+/// A declaration, identified across the files of a project.
+pub const DeclRef = struct {
+    arena: *const AstArena,
+    item: NodeId,
+
+    pub fn eql(a: DeclRef, b: DeclRef) bool {
+        return a.arena == b.arena and std.meta.eql(a.item, b.item);
+    }
+};
+
+/// `ResolvedType` is the type-checker's internal type representation. A
+/// declared type carries its declaration, so two files naming it differently
+/// name one type, and two declarations of one name are two types.
 pub const ResolvedType = union(enum) {
     builtin: BuiltinType,
-    component: StringId, // user-declared component type name
-    resource: StringId, // user-declared resource type name
+    component: DeclRef,
+    resource: DeclRef,
+    /// An engine resource of `builtin_resources`, which no declaration backs.
+    builtin_resource: *const BuiltinResource,
     /// `start..end` range; payload is the (integer) element type. Only
     /// consumed by `for-in`.
     range: BuiltinType,
@@ -325,18 +339,13 @@ pub const ResolvedType = union(enum) {
     set_t: *const ResolvedType,
     /// A closure value; its return type is inferred at each call.
     closure: ClosureType,
-    /// A `struct` value. Payload is the struct type name. A
-    /// struct is a by-value type (not registered with the world); its fields
-    /// and inherent methods resolve by name through the symbol table.
-    struct_t: StringId,
-    /// A C-like `enum` value. Payload is the enum
-    /// type name; variants resolve by name against the declaration.
-    enum_t: StringId,
-    /// An `event` value — the implicit `event` binding of an
-    /// `@on_event(T)` observer rule. Payload is the event type name; fields
-    /// resolve by name against the event declaration (POD struct of fields,
-    /// like a component/resource). Self-style binding, no declared param.
-    event_t: StringId,
+    /// A `struct` value, by value and not registered with the world.
+    struct_t: DeclRef,
+    /// A C-like `enum` value.
+    enum_t: DeclRef,
+    /// An `event` value, such as the implicit `event` binding of an
+    /// `@on_event(T)` observer rule.
+    event_t: DeclRef,
     /// A generic type variable in scope. Payload is the type-
     /// parameter name. Opaque within a generic body (operations are permissive,
     /// like `unknown`); resolved to a concrete type by inference at the call site.
@@ -363,17 +372,18 @@ pub const ResolvedType = union(enum) {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
             .builtin => |bt| bt == b.builtin,
-            .component => |id| id == b.component,
-            .resource => |id| id == b.resource,
+            .component => |r| r.eql(b.component),
+            .resource => |r| r.eql(b.resource),
+            .builtin_resource => |r| r == b.builtin_resource,
             .range => |bt| bt == b.range,
             .array_fixed => |info| info.elem.eql(b.array_fixed.elem.*) and info.len == b.array_fixed.len,
             .array_dyn => |elem| elem.eql(b.array_dyn.*),
             .map_t => |info| info.key.eql(b.map_t.key.*) and info.value.eql(b.map_t.value.*),
             .set_t => |elem| elem.eql(b.set_t.*),
             .closure => |c| std.meta.eql(c.literal, b.closure.literal),
-            .struct_t => |id| id == b.struct_t,
-            .enum_t => |id| id == b.enum_t,
-            .event_t => |id| id == b.event_t,
+            .struct_t => |r| r.eql(b.struct_t),
+            .enum_t => |r| r.eql(b.enum_t),
+            .event_t => |r| r.eql(b.event_t),
             .generic => |id| id == b.generic,
             .optional => |p| p.eql(b.optional.*),
             .test_world => true,
@@ -578,9 +588,9 @@ pub const TypeChecker = struct {
     /// message). Test names are never referenced by code and never exported.
     test_symbols: std.AutoHashMapUnmanaged(StringId, void) = .empty,
     /// Inherent `impl` methods, keyed by `methodKey(type_name,
-    /// method_name)` → index into `arena.impl_methods`. Drives the inherent
-    /// (kind 1, `etch-resolver-types.md §5.1`) dispatch of `recv.method()` and
-    /// the associated-fn dispatch of `Type.assoc()`.
+    /// method_name)` → index into `arena.impl_methods`: E0218 on a second
+    /// method of one name on one written type name (`etch-resolver-types.md`
+    /// §7.5).
     methods: std.AutoHashMapUnmanaged(u64, u32) = .empty,
     /// Trait impls (`impl Trait for Type [when …]`),
     /// in declaration order. The kind-2 trait dispatch (`etch-resolver-types.md
@@ -604,6 +614,8 @@ pub const TypeChecker = struct {
     /// The `.variant` shorthands synthesized with no expected type that no enum,
     /// or several, name; reported once the file is checked.
     unresolved_shorthands: std.AutoArrayHashMapUnmanaged(u32, void) = .empty,
+    /// The enum each resolved `.variant` shorthand names.
+    shorthand_enums: std.AutoHashMapUnmanaged(u32, DeclRef) = .empty,
     /// Set while `valueCompares` runs: the value is compared with the slot, not
     /// stored in it, so it is never wrapped.
     comparing: bool = false,
@@ -734,8 +746,7 @@ pub const TypeChecker = struct {
     /// Empty in single-file mode.
     imported_symbols: std.AutoHashMapUnmanaged(StringId, ExportEntry) = .empty,
     /// Module aliases from `import a.b as m` / bare `import a.b`:
-    /// local alias `StringId` → target file index. Qualified `m.Type` resolution
-    /// is deferred; the binding is recorded so the later walk is purely additive.
+    /// local alias `StringId` → target file index.
     imported_aliases: std.AutoHashMapUnmanaged(StringId, usize) = .empty,
     /// Every `service` reachable from this check, keyed by NAME BYTES. Byte-keyed and
     /// not `StringId`-keyed for the reason the exports index does: a
@@ -835,6 +846,7 @@ pub const TypeChecker = struct {
     /// existing single-arena path through `symbols`, and nothing about it moves.
     pub const ForeignEvent = struct {
         arena: *const AstArena,
+        item: NodeId,
         decl: ast_mod.EventDecl,
     };
 
@@ -869,6 +881,7 @@ pub const TypeChecker = struct {
         self.foreign_events.deinit(self.gpa);
         self.range_reported.deinit(self.gpa);
         self.unresolved_shorthands.deinit(self.gpa);
+        self.shorthand_enums.deinit(self.gpa);
         for (self.payloads.items) |p| self.gpa.destroy(p);
         self.payloads.deinit(self.gpa);
         self.payload_slots.deinit(self.gpa);
@@ -932,8 +945,7 @@ pub const TypeChecker = struct {
     /// the runtime keying both by name in one registry.
     fn checkComponentIdentities(self: *TypeChecker) !void {
         const project = self.project orelse return;
-        const Owner = struct { arena: *const AstArena, item: u32 };
-        var owners: std.StringHashMapUnmanaged(Owner) = .empty;
+        var owners: std.StringHashMapUnmanaged(RuntimeOwner) = .empty;
         defer owners.deinit(self.gpa);
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -951,25 +963,43 @@ pub const TypeChecker = struct {
         while (i < self.arena.items.len) : (i += 1) {
             if (kinds[i] != .import_decl) continue;
             const decl = self.arena.import_decls.items[datas[i]];
+            if (decl.items_len == 0) {
+                const alias = if (decl.module_alias != 0) decl.module_alias else self.arena.import_path_segs.items[decl.path_start + decl.path_len - 1];
+                const target = self.imported_aliases.get(alias) orelse continue;
+                var it = project.exports[target].iterator();
+                while (it.next()) |e| {
+                    if (e.value_ptr.visibility == .private) continue;
+                    try self.claimRuntimeName(&owners, e.value_ptr.*, spans[i]);
+                }
+                continue;
+            }
             var j: u32 = 0;
             while (j < decl.items_len) : (j += 1) {
                 const item = self.arena.import_items.items[decl.items_start + j];
                 const entry = self.importedBinding(importLocalName(item)) orelse continue;
-                const decl_arena = &project.arenas[entry.arena_index];
-                const name_id = switch (entry.kind) {
-                    .component => decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)].name,
-                    .resource => decl_arena.resource_decls.items[decl_arena.itemData(entry.item_id)].name,
-                    else => continue,
-                };
-                const name = decl_arena.strings.slice(name_id);
-                const owner: Owner = .{ .arena = decl_arena, .item = entry.item_id.index };
-                const gop = try owners.getOrPut(self.gpa, name);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = owner;
-                } else if (!std.meta.eql(gop.value_ptr.*, owner)) {
-                    try self.emit(.duplicate_symbol, .error_, spans[i], "two components or resources named '{s}' reach this file, and the runtime identifies both by name", .{name});
-                }
+                try self.claimRuntimeName(&owners, entry, spans[i]);
             }
+        }
+    }
+
+    const RuntimeOwner = struct { arena: *const AstArena, item: u32 };
+
+    /// Record the component or resource `entry` names under its runtime name,
+    /// E0101 when another declaration holds that name.
+    fn claimRuntimeName(self: *TypeChecker, owners: *std.StringHashMapUnmanaged(RuntimeOwner), entry: ExportEntry, span: SourceSpan) !void {
+        const decl_arena = &self.project.?.arenas[entry.arena_index];
+        const name_id = switch (entry.kind) {
+            .component => decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)].name,
+            .resource => decl_arena.resource_decls.items[decl_arena.itemData(entry.item_id)].name,
+            else => return,
+        };
+        const name = decl_arena.strings.slice(name_id);
+        const owner: RuntimeOwner = .{ .arena = decl_arena, .item = entry.item_id.index };
+        const gop = try owners.getOrPut(self.gpa, name);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = owner;
+        } else if (!std.meta.eql(gop.value_ptr.*, owner)) {
+            try self.emit(.duplicate_symbol, .error_, span, "two components or resources named '{s}' reach this file, and the runtime identifies both by name", .{name});
         }
     }
 
@@ -1078,6 +1108,42 @@ pub const TypeChecker = struct {
         try self.validateShaderDecls();
         try self.validateSceneDecls();
         try self.checkCollectionKeysIn(0, @intCast(self.arena.type_nodes.len));
+        try self.validatePathTypesIn(0, @intCast(self.arena.type_nodes.len));
+    }
+
+    /// E0102, E0104 or E0107 on each qualified type `m.T` of the type nodes
+    /// `from..to` that names no type: the one report for the node, whatever
+    /// position holds it.
+    fn validatePathTypesIn(self: *TypeChecker, from: u32, to: u32) TypeError!void {
+        var i = from;
+        while (i < to) : (i += 1) {
+            const node: NodeId = .{ .category = .type_node, .index = @intCast(i) };
+            if (self.arena.typeNodeKind(node) != .path) continue;
+            const path = self.arena.path_types.items[self.arena.typeNodeData(node)];
+            const span = self.arena.typeNodeSpan(node);
+            switch (self.resolvePathTypeNode(node)) {
+                .resolved => {},
+                .member_absent => try self.emit(.unknown_export, .error_, span, "'{s}' is not exported by the aliased module", .{self.arena.strings.slice(path.member)}),
+                .member_private => try self.emit(.import_private_item, .error_, span, "'{s}' is private to the aliased module", .{self.arena.strings.slice(path.member)}),
+                .alias_unresolved => try self.emit(.undefined_symbol, .error_, span, "'{s}' is not a module alias in scope", .{self.arena.strings.slice(path.alias)}),
+                .not_a_type => try self.emit(.undefined_symbol, .error_, span, "'{s}' is not a type", .{self.arena.strings.slice(path.member)}),
+            }
+        }
+    }
+
+    /// Whether type node `node` holds a qualified type `validatePathTypesIn`
+    /// reports.
+    fn holdsUnresolvedPath(self: *TypeChecker, node: NodeId) bool {
+        if (node.isNone()) return false;
+        const data = self.arena.typeNodeData(node);
+        return switch (self.arena.typeNodeKind(node)) {
+            .path => self.resolvePathTypeNode(node) != .resolved,
+            .optional => self.holdsUnresolvedPath(@bitCast(data)),
+            .array, .slice => self.holdsUnresolvedPath(self.arena.array_types.items[data].elem),
+            .set_type => self.holdsUnresolvedPath(self.arena.set_types.items[data].elem),
+            .map_type => self.holdsUnresolvedPath(self.arena.map_types.items[data].key) or self.holdsUnresolvedPath(self.arena.map_types.items[data].value),
+            else => false,
+        };
     }
 
     /// E0601 on each map type of the type nodes `from..to` whose key, and each
@@ -1241,6 +1307,7 @@ pub const TypeChecker = struct {
         tc.unresolved_shorthands.clearRetainingCapacity();
         try tc.checkLiteralRangesIn(.{ .indices = .{ .expr_from = run.expr_from, .expr_to = run.expr_to, .type_from = run.type_from, .type_to = run.type_to } });
         try tc.checkCollectionKeysIn(run.type_from, run.type_to);
+        try tc.validatePathTypesIn(run.type_from, run.type_to);
         var names: std.AutoHashMapUnmanaged(StringId, void) = .empty;
         defer names.deinit(gpa);
         for (scope) |name| if (arena.strings.find(name)) |id| try names.put(gpa, id, {});
@@ -1455,7 +1522,7 @@ pub const TypeChecker = struct {
                     try self.emit(.duplicate_symbol, .error_, span, "duplicate declared event '{s}'", .{name});
                     continue;
                 }
-                gop.value_ptr.* = .{ .arena = a, .decl = decl };
+                gop.value_ptr.* = .{ .arena = a, .item = .{ .category = .item, .index = @intCast(i) }, .decl = decl };
             }
         }
     }
@@ -1583,12 +1650,18 @@ pub const TypeChecker = struct {
         );
     }
 
-    /// A type written in arena `a`, as this file names it. A declaration `a`
-    /// names, its own or one it imports, resolves when this file binds the
-    /// same name, through an import, to that same declaration, and is unknown
-    /// otherwise; a builtin and a `string` resolve anywhere, and a collection or
-    /// an optional when its payloads do.
+    /// A type written in arena `a`: the declaration it names there, its own or
+    /// one it imports, or the builtin of its name. An `Error` or an `ErrorCode`
+    /// is this file's builtin, each file carrying its own.
     fn foreignType(self: *TypeChecker, a: *const AstArena, type_node: NodeId) ResolvedType {
+        return self.foreignTypeAt(a, type_node, 0);
+    }
+
+    /// Aliases a foreign type goes through before the chain is taken for a
+    /// cycle, which the alias's own file reports.
+    const max_alias_depth = 64;
+
+    fn foreignTypeAt(self: *TypeChecker, a: *const AstArena, type_node: NodeId, depth: u32) ResolvedType {
         if (a == self.arena) return self.namedTypeToResolved(type_node);
         switch (a.typeNodeKind(type_node)) {
             .named, .generic => {
@@ -1597,39 +1670,72 @@ pub const TypeChecker = struct {
                 const bytes = a.strings.slice(resolved);
                 if (std.mem.eql(u8, bytes, "string")) return .{ .builtin = .string_ };
                 if (BuiltinType.fromName(bytes)) |bt| return .{ .builtin = bt };
-                const local = self.arena.strings.find(bytes) orelse return .unknown;
-                const have = self.declNamed(local) orelse return .unknown;
-                const want = self.declNamedIn(a, resolved) orelse return .unknown;
-                if (!have.eql(want)) return .unknown;
-                return switch (self.kindNamed(local).?) {
-                    .component => .{ .component = local },
-                    .resource => .{ .resource = local },
-                    .struct_ => .{ .struct_t = local },
-                    .enum_ => .{ .enum_t = local },
-                    .event_ => .{ .event_t = local },
-                    else => .unknown,
-                };
+                if (resolved == a.error_type_name and resolved != 0) return self.nominalNamed(self.arena.error_type_name) orelse .unknown;
+                if (resolved == a.errorcode_type_name and resolved != 0) return self.nominalNamed(self.arena.errorcode_type_name) orelse .unknown;
+                const ref = self.declNamedIn(a, resolved) orelse return .unknown;
+                return self.declaredType(ref, depth);
+            },
+            .path => {
+                const entry = self.qualifiedExportIn(a, a.path_types.items[a.typeNodeData(type_node)]) orelse return .unknown;
+                return self.declaredType(exportRef(self.project.?, entry), depth);
+            },
+            .array => {
+                const at = a.array_types.items[a.typeNodeData(type_node)];
+                const elem = self.foreignTypeAt(a, at.elem, depth);
+                if (elem == .unknown) return .unknown;
+                const len = constArrayLenIn(a, at.size) orelse return .unknown;
+                return .{ .array_fixed = .{ .elem = self.internedPayload(a, type_node, 0, elem), .len = len } };
             },
             .slice => {
-                const elem = self.foreignType(a, a.array_types.items[a.typeNodeData(type_node)].elem);
+                const elem = self.foreignTypeAt(a, a.array_types.items[a.typeNodeData(type_node)].elem, depth);
                 if (elem == .unknown) return .unknown;
                 return .{ .array_dyn = self.internedPayload(a, type_node, 0, elem) };
             },
             .set_type => {
-                const elem = self.foreignType(a, a.set_types.items[a.typeNodeData(type_node)].elem);
+                const elem = self.foreignTypeAt(a, a.set_types.items[a.typeNodeData(type_node)].elem, depth);
                 if (elem == .unknown) return .unknown;
                 return .{ .set_t = self.internedPayload(a, type_node, 0, elem) };
             },
             .map_type => {
                 const mt = a.map_types.items[a.typeNodeData(type_node)];
-                const k = self.foreignType(a, mt.key);
-                const v = self.foreignType(a, mt.value);
+                const k = self.foreignTypeAt(a, mt.key, depth);
+                const v = self.foreignTypeAt(a, mt.value, depth);
                 if (k == .unknown or v == .unknown) return .unknown;
                 return .{ .map_t = .{ .key = self.internedPayload(a, type_node, 0, k), .value = self.internedPayload(a, type_node, 1, v) } };
             },
-            .optional => return self.internedOptional(a, type_node, self.foreignType(a, @bitCast(a.typeNodeData(type_node)))),
+            .optional => return self.internedOptional(a, type_node, self.foreignTypeAt(a, @bitCast(a.typeNodeData(type_node)), depth)),
             else => return .unknown,
         }
+    }
+
+    /// The type declaration `ref` denotes, through a `type` alias read in the
+    /// arena declaring it.
+    fn declaredType(self: *TypeChecker, ref: DeclRef, depth: u32) ResolvedType {
+        if (nominalOf(ref)) |t| return t;
+        if (ref.arena.itemKind(ref.item) != .type_alias or depth == max_alias_depth) return .unknown;
+        return self.foreignTypeAt(ref.arena, ref.arena.type_alias_decls.items[ref.arena.itemData(ref.item)].target, depth + 1);
+    }
+
+    fn exportRef(project: *const ProjectContext, entry: ExportEntry) DeclRef {
+        return .{ .arena = &project.arenas[entry.arena_index], .item = entry.item_id };
+    }
+
+    /// The public export `path`, written in arena `a`, names through a
+    /// whole-module import of `a`.
+    fn qualifiedExportIn(self: *TypeChecker, a: *const AstArena, path: ast_mod.PathTypeNode) ?ExportEntry {
+        const project = self.project orelse return null;
+        const alias = a.strings.slice(path.alias);
+        for (a.items.items(.kind), a.items.items(.data)) |kind, data| {
+            if (kind != .import_decl) continue;
+            const decl = a.import_decls.items[data];
+            if (decl.items_len != 0) continue;
+            const alias_id = if (decl.module_alias != 0) decl.module_alias else a.import_path_segs.items[decl.path_start + decl.path_len - 1];
+            if (!std.mem.eql(u8, a.strings.slice(alias_id), alias)) continue;
+            const target = moduleOf(project, a, decl) orelse return null;
+            const entry = project.exports[target].get(a.strings.slice(path.member)) orelse return null;
+            return if (entry.visibility == .private) null else entry;
+        }
+        return null;
     }
 
     /// The export of arena `a` named `bytes`.
@@ -1658,24 +1764,17 @@ pub const TypeChecker = struct {
         while (i < self.arena.items.len) : (i += 1) {
             if (kinds[i] != .type_alias) continue;
             const decl = self.arena.type_alias_decls.items[datas[i]];
-            // a qualified `.path` target (`type HA = m.Member`) is
-            // the use site for the whole-module import: unlike selective import
-            // (diagnosed at the `import { … }` binding), a whole-module import
-            // names no members, so E0104 (absent) / E0107 (private) fire HERE.
-            // A resolved component/resource is a valid alias target (selective
-            // parity); struct/enum/non-type resolve to E0102 exactly as a
-            // selective `type HB = ImportedStruct` does today.
+            // A qualified target that resolves must be a component or a
+            // resource, as a named one must; one naming no type is reported by
+            // `validatePathTypesIn`.
             if (self.arena.typeNodeKind(decl.target) == .path) {
-                const path = self.arena.path_types.items[self.arena.typeNodeData(decl.target)];
                 const tspan = self.arena.typeNodeSpan(decl.target);
                 switch (self.resolvePathTypeNode(decl.target)) {
                     .resolved => |t| switch (t) {
                         .component, .resource => {},
                         else => try self.emit(.undefined_symbol, .error_, tspan, "type alias '{s}' does not resolve to a known type", .{self.arena.strings.slice(decl.name)}),
                     },
-                    .member_absent => try self.emit(.unknown_export, .error_, tspan, "'{s}' is not exported by the aliased module", .{self.arena.strings.slice(path.member)}),
-                    .member_private => try self.emit(.import_private_item, .error_, tspan, "'{s}' is private to the aliased module", .{self.arena.strings.slice(path.member)}),
-                    .alias_unresolved => try self.emit(.undefined_symbol, .error_, tspan, "'{s}' is not a module alias in scope", .{self.arena.strings.slice(path.alias)}),
+                    else => {},
                 }
                 continue;
             }
@@ -2580,16 +2679,6 @@ pub const TypeChecker = struct {
         return self.imported_symbols.get(name);
     }
 
-    /// A declaration, identified across the files of a project.
-    const DeclRef = struct {
-        arena: *const AstArena,
-        item: NodeId,
-
-        fn eql(a: DeclRef, b: DeclRef) bool {
-            return a.arena == b.arena and std.meta.eql(a.item, b.item);
-        }
-    };
-
     /// The declaration `name` names in this file.
     fn declNamed(self: *TypeChecker, name: StringId) ?DeclRef {
         if (self.importedBinding(name)) |entry| return .{ .arena = &self.project.?.arenas[entry.arena_index], .item = entry.item_id };
@@ -2605,6 +2694,69 @@ pub const TypeChecker = struct {
         const bytes = a.strings.slice(name);
         const entry = self.exportIn(a, bytes) orelse importedIn(project, a, bytes) orelse return null;
         return .{ .arena = &project.arenas[entry.arena_index], .item = entry.item_id };
+    }
+
+    /// The type declaration `ref` names, null when it declares none.
+    fn nominalOf(ref: DeclRef) ?ResolvedType {
+        return switch (ref.arena.itemKind(ref.item)) {
+            .component_decl => .{ .component = ref },
+            .resource_decl => .{ .resource = ref },
+            .struct_decl => .{ .struct_t = ref },
+            .enum_decl => .{ .enum_t = ref },
+            .event_decl => .{ .event_t = ref },
+            else => null,
+        };
+    }
+
+    /// The name a type declaration declares, in its own arena's pool.
+    fn declName(ref: DeclRef) StringId {
+        const a = ref.arena;
+        const d = a.itemData(ref.item);
+        return switch (a.itemKind(ref.item)) {
+            .component_decl => a.component_decls.items[d].name,
+            .resource_decl => a.resource_decls.items[d].name,
+            .struct_decl => a.struct_decls.items[d].name,
+            .enum_decl => a.enum_decls.items[d].name,
+            .event_decl => a.event_decls.items[d].name,
+            .trait_decl => a.trait_decls.items[d].name,
+            .type_alias => a.type_alias_decls.items[d].name,
+            else => unreachable,
+        };
+    }
+
+    fn declBytes(ref: DeclRef) []const u8 {
+        return ref.arena.strings.slice(declName(ref));
+    }
+
+    fn structOf(ref: DeclRef) StructRef {
+        return .{ .arena = ref.arena, .decl = ref.arena.struct_decls.items[ref.arena.itemData(ref.item)] };
+    }
+
+    fn enumOf(ref: DeclRef) EnumRef {
+        return .{ .arena = ref.arena, .decl = ref.arena.enum_decls.items[ref.arena.itemData(ref.item)] };
+    }
+
+    fn componentOf(ref: DeclRef) ComponentRef {
+        return .{ .arena = ref.arena, .decl = ref.arena.component_decls.items[ref.arena.itemData(ref.item)] };
+    }
+
+    fn resourceOf(ref: DeclRef) ResourceRef {
+        return .{ .arena = ref.arena, .decl = ref.arena.resource_decls.items[ref.arena.itemData(ref.item)] };
+    }
+
+    fn eventOf(ref: DeclRef) ForeignEvent {
+        return .{ .arena = ref.arena, .item = ref.item, .decl = ref.arena.event_decls.items[ref.arena.itemData(ref.item)] };
+    }
+
+    /// The type `name` names in this file, through its declaration.
+    fn nominalNamed(self: *TypeChecker, name: StringId) ?ResolvedType {
+        return nominalOf(self.declNamed(name) orelse return null);
+    }
+
+    /// Whether `name` names the declaration `ref` in this file.
+    fn namesDecl(self: *TypeChecker, name: StringId, ref: DeclRef) bool {
+        const d = self.declNamed(name) orelse return false;
+        return d.eql(ref);
     }
 
     /// The public export a selective import of arena `a` binds `bytes` to.
@@ -2772,11 +2924,11 @@ pub const TypeChecker = struct {
         if (self.importedBinding(name)) |entry| {
             if (entry.kind != .event_) return null;
             const decl_arena = &self.project.?.arenas[entry.arena_index];
-            return .{ .arena = decl_arena, .decl = decl_arena.event_decls.items[decl_arena.itemData(entry.item_id)] };
+            return .{ .arena = decl_arena, .item = entry.item_id, .decl = decl_arena.event_decls.items[decl_arena.itemData(entry.item_id)] };
         }
         const sym = self.symbols.get(name) orelse return null;
         if (sym.kind != .event_) return null;
-        return .{ .arena = self.arena, .decl = self.arena.event_decls.items[self.arena.itemData(sym.item_id)] };
+        return .{ .arena = self.arena, .item = sym.item_id, .decl = self.arena.event_decls.items[self.arena.itemData(sym.item_id)] };
     }
 
     /// The kind of what `name` names, an import included.
@@ -4590,6 +4742,7 @@ pub const TypeChecker = struct {
                         try self.emit(.undefined_symbol, .error_, spans[i], "impl target '{s}' is not a struct, component, or resource", .{tname});
                     } else {
                         try self.checkImportedMethodDuplicates(impl, spans[i]);
+                        try self.checkAliasedMethodDuplicates(impl, i, spans[i]);
                     }
                 } else {
                     try self.emit(.undefined_symbol, .error_, spans[i], "impl target type '{s}' is not declared", .{tname});
@@ -4612,6 +4765,28 @@ pub const TypeChecker = struct {
                 if (self.inherentMethodIn(a, target, name) == null) continue;
                 try self.emit(.ambiguous_inherent_method, .error_, span, "duplicate method '{s}' on type '{s}'", .{ name, self.arena.strings.slice(impl.type_name) });
                 break;
+            }
+        }
+    }
+
+    /// E0218 for each method of the inherent `impl` at item `at` that an earlier
+    /// inherent impl of this file gives the same type under another name.
+    fn checkAliasedMethodDuplicates(self: *TypeChecker, impl: ast_mod.ImplDecl, at: u28, span: SourceSpan) !void {
+        const target = self.implTargetIn(self.arena, impl.type_name) orelse return;
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var j: u28 = 0;
+        while (j < at) : (j += 1) {
+            if (kinds[j] != .impl_decl) continue;
+            const earlier = self.arena.impl_decls.items[datas[j]];
+            if (earlier.trait_name != 0 or earlier.type_name == impl.type_name) continue;
+            const t = self.implTargetIn(self.arena, earlier.type_name) orelse continue;
+            if (!t.eql(target)) continue;
+            var i: u32 = 0;
+            while (i < impl.methods_len) : (i += 1) {
+                const name = self.arena.strings.slice(self.arena.impl_methods.items[impl.methods_start + i].name);
+                if (methodIn(self.arena, earlier.methods_start, earlier.methods_len, name) == null) continue;
+                try self.emit(.ambiguous_inherent_method, .error_, span, "duplicate method '{s}' on type '{s}'", .{ name, self.arena.strings.slice(impl.type_name) });
             }
         }
     }
@@ -4685,11 +4860,10 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Look up the declaration-order index of `variant` within the enum named
-    /// `enum_name`, or `null` if `enum_name` is not
-    /// a declared enum or has no such variant.
-    fn enumVariantIndex(self: *TypeChecker, enum_name: StringId, variant: StringId) ?u32 {
-        const e = self.enumNamed(enum_name) orelse return null;
+    /// The declaration-order index of `variant` in the enum `enum_ref`, null
+    /// when it has no such variant.
+    fn enumVariantIndex(self: *TypeChecker, enum_ref: DeclRef, variant: StringId) ?u32 {
+        const e = enumOf(enum_ref);
         var i: u32 = 0;
         while (i < e.decl.variants_len) : (i += 1) {
             if (self.sameName(e.arena, e.arena.enum_variants.items[e.decl.variants_start + i].name, variant)) return i;
@@ -4700,15 +4874,14 @@ pub const TypeChecker = struct {
     /// The inherent method `method_name` of the type `type_name` names
     /// (§5.1): this file's own, else the one a file it imports defines. Two
     /// imported files defining it is E0218 (§7.5).
-    fn lookupMethod(self: *TypeChecker, type_name: StringId, method_name: StringId, span: SourceSpan) TypeError!?FnRef {
-        if (self.methods.get(methodKey(type_name, method_name))) |idx| return .{ .arena = self.arena, .decl = self.arena.impl_methods.items[idx] };
-        const target = self.implTargetIn(self.arena, type_name) orelse return null;
+    fn lookupMethod(self: *TypeChecker, target: ImplTarget, method_name: StringId, span: SourceSpan) TypeError!?FnRef {
         const bytes = self.arena.strings.slice(method_name);
+        if (self.inherentMethodIn(self.arena, target, bytes)) |m| return .{ .arena = self.arena, .decl = m };
         var found: ?FnRef = null;
         for (self.import_arenas.items) |a| {
             const m = self.inherentMethodIn(a, target, bytes) orelse continue;
             if (found != null) {
-                try self.emit(.ambiguous_inherent_method, .error_, span, "ambiguous method '{s}' on type '{s}' — two imported modules define it", .{ bytes, self.arena.strings.slice(type_name) });
+                try self.emit(.ambiguous_inherent_method, .error_, span, "ambiguous method '{s}' on type '{s}' — two imported modules define it", .{ bytes, implTargetBytes(target) });
                 break;
             }
             found = .{ .arena = a, .decl = m };
@@ -4783,6 +4956,11 @@ pub const TypeChecker = struct {
             // and fixed `T[N]`) are not part of the component/resource
             // surface — fields stay scalar POD.
             const tspan = self.arena.typeNodeSpan(field.type_node);
+            if (self.arena.typeNodeKind(field.type_node) == .path) {
+                try self.checkQualifiedFieldType(field.type_node, origin, tspan);
+                if (!field.default_value.isNone()) try self.checkFieldDefault(field.default_value, field.type_node);
+                continue;
+            }
             const field_type_name = self.arena.namedTypeName(field.type_node) orelse {
                 // A struct field may be optional, of any payload (`Error.source:
                 // Error?`, part1 §10.2); a stored field's optional needs a slot
@@ -4909,6 +5087,29 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// A field typed `m.T`, judged by what it resolves to as a field named in
+    /// this file is. A path that resolves to nothing is reported by
+    /// `validatePathTypesIn`.
+    fn checkQualifiedFieldType(self: *TypeChecker, node: NodeId, origin: FieldDeclOrigin, span: SourceSpan) !void {
+        const t = switch (self.resolvePathTypeNode(node)) {
+            .resolved => |t| t,
+            else => return,
+        };
+        const accepted = switch (t) {
+            .builtin => |b| b != .string_ or origin != .component_like,
+            .enum_t => origin != .component_like,
+            .struct_t => origin == .struct_,
+            else => false,
+        };
+        if (accepted) return;
+        const name = self.arena.strings.slice(self.arena.path_types.items[self.arena.typeNodeData(node)].member);
+        if (t == .struct_t and origin == .event_) {
+            try self.emit(.undefined_symbol, .error_, span, "an event field cannot be of struct type '{s}'", .{name});
+        } else {
+            try self.emit(.undefined_symbol, .error_, span, "type '{s}' is not in the S3 POD builtin set", .{name});
+        }
+    }
+
     /// Validate a resource collection field's element type is in
     /// the supported set {POD scalar builtin, `string`, enum} — the exact
     /// resource scalar-field surface. A nested collection, or any other
@@ -4946,7 +5147,7 @@ pub const TypeChecker = struct {
             }
         } else {
             if (std.mem.eql(u8, tname, "string")) return .string;
-            if (self.declaredEnumName(resolved)) return .{ .enum_ = resolved };
+            if (self.declaredEnumName(resolved)) return .{ .enum_ = self.declNamed(resolved).? };
         }
         try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element type '{s}' is not supported — must be a scalar POD, string, or enum", .{tname});
         return null;
@@ -4956,7 +5157,7 @@ pub const TypeChecker = struct {
     const CollectionElem = union(enum) {
         builtin: BuiltinType,
         string,
-        enum_: StringId,
+        enum_: DeclRef,
     };
 
     /// A `T[]` field default: an array literal whose every element is a
@@ -5021,7 +5222,7 @@ pub const TypeChecker = struct {
             .enum_ => |ename| {
                 if (self.arena.exprKind(e) == .tag_path) {
                     _ = try self.checkEnumShorthand(e, ename);
-                } else try self.emit(.type_mismatch, .error_, span, "a '{s}' element must be a variant of that enum", .{self.arena.strings.slice(ename)});
+                } else try self.emit(.type_mismatch, .error_, span, "a '{s}' element must be a variant of that enum", .{declBytes(ename)});
             },
             .string => if (self.arena.exprKind(e) != .string_lit) {
                 try self.emit(.type_mismatch, .error_, span, "a string element must be a string literal", .{});
@@ -5315,7 +5516,7 @@ pub const TypeChecker = struct {
             return actual.array_fixed.len == 3 and actual.array_fixed.elem.* == .builtin and actual.array_fixed.elem.builtin.isNumeric();
         if ((declared == .builtin) != (actual == .builtin)) return false;
         if (std.meta.activeTag(declared) != std.meta.activeTag(actual) and !(isArray(declared) and isArray(actual))) return false;
-        if (isNominal(declared)) return self.sameDeclaration(declared, actual);
+        if (isNominal(declared)) return ResolvedType.eql(declared, actual);
         return self.elementsFit(declared, value, actual);
     }
 
@@ -5442,14 +5643,6 @@ pub const TypeChecker = struct {
         return bt == .string_;
     }
 
-    /// Whether two nominal types of one kind name one declaration, whatever
-    /// local name each carries.
-    fn sameDeclaration(self: *TypeChecker, a: ResolvedType, b: ResolvedType) bool {
-        const x = self.declarationOf(a) orelse return ResolvedType.eql(a, b);
-        const y = self.declarationOf(b) orelse return ResolvedType.eql(a, b);
-        return x.arena == y.arena and x.name == y.name;
-    }
-
     /// A loop a `break` can target; `yields` for a `loop`, whose value is its
     /// breaks'.
     const BreakFrame = struct {
@@ -5460,17 +5653,6 @@ pub const TypeChecker = struct {
 
     /// A value one branch of an `if`, a `match` or a loop's `break`s yields.
     const Branch = struct { node: NodeId, t: ResolvedType, span: SourceSpan };
-
-    const Declaration = struct { arena: *const AstArena, name: StringId };
-
-    fn declarationOf(self: *TypeChecker, t: ResolvedType) ?Declaration {
-        return switch (t) {
-            .component => |n| if (self.componentNamed(n)) |c| .{ .arena = c.arena, .name = c.decl.name } else null,
-            .resource => |n| if (self.resourceNamed(n)) |r| .{ .arena = r.arena, .name = r.decl.name } else null,
-            .event_t => |n| if (self.eventNamed(n) orelse self.declaredEvent(n)) |e| .{ .arena = e.arena, .name = e.decl.name } else null,
-            else => null,
-        };
-    }
 
     /// The loop an unlabeled `break` leaves is the innermost one of any kind,
     /// a labeled one the `loop` carrying its label.
@@ -5547,7 +5729,7 @@ pub const TypeChecker = struct {
 
     fn isNominal(t: ResolvedType) bool {
         return switch (t) {
-            .struct_t, .enum_t, .component, .resource, .event_t => true,
+            .struct_t, .enum_t, .component, .resource, .builtin_resource, .event_t => true,
             else => false,
         };
     }
@@ -5599,7 +5781,7 @@ pub const TypeChecker = struct {
 
     /// Resolve a type node to a `ResolvedType`. Despite the historical name it
     /// dispatches on the node kind: `.named` resolves through the alias chain
-    /// to a builtin / component / resource; the collection kinds (`.array` /
+    /// to a builtin or a declared type; the collection kinds (`.array` /
     /// `.slice` / `.map_type` / `.set_type`) resolve their element / key /
     /// value, an unknown one leaving the collection unknown.
     fn namedTypeToResolved(self: *TypeChecker, type_node: NodeId) ResolvedType {
@@ -5619,39 +5801,20 @@ pub const TypeChecker = struct {
                 if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
                 if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
                 if (self.symbols.get(resolved_name)) |sym| {
-                    return switch (sym.kind) {
-                        .component => .{ .component = resolved_name },
-                        .resource => .{ .resource = resolved_name },
-                        .struct_ => .{ .struct_t = resolved_name },
-                        .enum_ => .{ .enum_t = resolved_name },
-                        else => .unknown,
-                    };
+                    if (sym.kind == .event_) return .unknown;
+                    return nominalOf(.{ .arena = self.arena, .item = sym.item_id }) orelse .unknown;
                 }
-                // a selectively-imported type resolves in any type
-                // position (`type HA = Health`, field types, signatures). Identity
-                // is the local-name `StringId`; the defining arena is reached via
-                // `imported_symbols` only where the decl itself is needed (the
-                // cross-arena component check, `checkComponentInstance`).
                 if (self.imported_symbols.get(resolved_name)) |entry| {
                     return switch (entry.kind) {
-                        .component => .{ .component = resolved_name },
-                        .resource => .{ .resource = resolved_name },
-                        .struct_ => .{ .struct_t = resolved_name },
-                        .enum_ => .{ .enum_t = resolved_name },
                         .type_alias => self.importedAliasTarget(entry),
-                        else => .unknown,
+                        .event_ => .unknown,
+                        else => nominalOf(exportRef(self.project.?, entry)) orelse .unknown,
                     };
                 }
                 return .unknown;
             },
             .path => {
-                // `alias.Member` qualified type. Resolve silently
-                // through the whole-module aliases + project exports — the
-                // qualified twin of the `imported_symbols` branch above. A
-                // failure (unknown alias / absent / private member) is a
-                // silent `.unknown` here; the use-site diagnostics
-                // (E0102/E0104/E0107) are minted where a selective type would
-                // be (the type-alias target, `validateTypeAliases`).
+                // `validatePathTypesIn` reports a path naming no type.
                 return switch (self.resolvePathTypeNode(type_node)) {
                     .resolved => |t| t,
                     else => .unknown,
@@ -5665,8 +5828,7 @@ pub const TypeChecker = struct {
                 const gt = self.arena.generic_type_nodes.items[self.arena.typeNodeData(type_node)];
                 if (self.generic_scope.contains(gt.name)) return .{ .generic = gt.name };
                 return switch (self.kindNamed(gt.name) orelse return .unknown) {
-                    .struct_ => .{ .struct_t = gt.name },
-                    .enum_ => .{ .enum_t = gt.name },
+                    .struct_, .enum_ => self.nominalNamed(gt.name).?,
                     else => .unknown,
                 };
             },
@@ -5712,9 +5874,8 @@ pub const TypeChecker = struct {
     /// and the emitting use site (`validateTypeAliases`) share one lookup, each
     /// deciding whether/how to diagnose.
     const PathResolution = union(enum) {
-        /// The member resolved to a type kind (component / resource / struct /
-        /// enum), or `.unknown` when it is exported but not a type (fn / const
-        /// / …) — mirrors the `imported_symbols` arm's `else => .unknown`.
+        /// The member is a type. An event member is `.unknown`, as an event
+        /// named in this file is.
         resolved: ResolvedType,
         /// The receiver ident is not a whole-module alias in scope → E0102.
         alias_unresolved,
@@ -5722,15 +5883,13 @@ pub const TypeChecker = struct {
         member_absent,
         /// The member exists in the target module but is `private` → E0107.
         member_private,
+        /// The member is exported and is no type: a trait, a fn, a const → E0102.
+        not_a_type,
     };
 
-    /// Resolve a `.path` type node (`alias.Member`) against the
-    /// whole-module import aliases (`imported_aliases` → target file index) and
-    /// the project exports index — the qualified twin of the `imported_symbols`
-    /// branch in `namedTypeToResolved`. Pure lookup, no diagnostics. Identity of
-    /// a resolved kind is the member's `StringId` in THIS arena (`path.member`),
-    /// matching how the selective arm keys on the local name. No-op-ish when
-    /// `project == null` (single-file mode has no aliases → `.alias_unresolved`).
+    /// Resolve a `.path` type node (`alias.Member`) through the whole-module
+    /// import aliases and the project exports. Pure lookup, no diagnostics; a
+    /// single file has no aliases.
     fn resolvePathTypeNode(self: *TypeChecker, type_node: NodeId) PathResolution {
         const path = self.arena.path_types.items[self.arena.typeNodeData(type_node)];
         const project = self.project orelse return .alias_unresolved;
@@ -5738,13 +5897,11 @@ pub const TypeChecker = struct {
         const member_bytes = self.arena.strings.slice(path.member);
         const entry = project.exports[target_idx].get(member_bytes) orelse return .member_absent;
         if (entry.visibility == .private) return .member_private;
-        return .{ .resolved = switch (entry.kind) {
-            .component => .{ .component = path.member },
-            .resource => .{ .resource = path.member },
-            .struct_ => .{ .struct_t = path.member },
-            .enum_ => .{ .enum_t = path.member },
-            else => .unknown,
-        } };
+        return switch (entry.kind) {
+            .type_alias => .{ .resolved = self.importedAliasTarget(entry) },
+            .event_ => .{ .resolved = .unknown },
+            else => if (nominalOf(exportRef(project, entry))) |t| .{ .resolved = t } else .not_a_type,
+        };
     }
 
     /// Const-fold a fixed-array size node to its `u64` length. It accepts a
@@ -5781,7 +5938,26 @@ pub const TypeChecker = struct {
                 // Nothing in pass 1 reads the result — the only consumers are
                 // this function's own cycle and unknown-requisite diagnostics.
                 .component_decl => try self.checkRequiresAnnotation(self.arena.component_decls.items[data]),
+                .service_decl => try self.checkServiceSignatures(self.arena.service_decls.items[data]),
                 else => {},
+            }
+        }
+    }
+
+    /// A `service`'s method signatures, judged as a bodyless fn's are.
+    fn checkServiceSignatures(self: *TypeChecker, decl: ast_mod.ServiceDecl) !void {
+        var mi: u32 = 0;
+        while (mi < decl.methods_len) : (mi += 1) {
+            const m = self.arena.impl_methods.items[decl.methods_start + mi];
+            var i: u32 = 0;
+            while (i < m.params_len) : (i += 1) {
+                const p = self.arena.fn_params.items[m.params_start + i];
+                if (self.namedTypeToResolved(p.type_node) == .unknown and !self.holdsUnresolvedPath(p.type_node)) {
+                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown or unsupported parameter type on service method '{s}'", .{self.arena.strings.slice(m.name)});
+                }
+            }
+            if (!m.return_type.isNone() and self.namedTypeToResolved(m.return_type) == .unknown and !self.holdsUnresolvedPath(m.return_type)) {
+                try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(m.return_type), "unknown or unsupported return type on service method '{s}'", .{self.arena.strings.slice(m.name)});
             }
         }
     }
@@ -5797,10 +5973,7 @@ pub const TypeChecker = struct {
         // `.entity`, anything else (validateImpls already flagged it) as
         // `unknown`.
         const self_type: ResolvedType = if (self.kindNamed(impl.type_name)) |kind| switch (kind) {
-            .struct_ => .{ .struct_t = impl.type_name },
-            .component => .{ .component = impl.type_name },
-            .resource => .{ .resource = impl.type_name },
-            .enum_ => .{ .enum_t = impl.type_name },
+            .struct_, .component, .resource, .enum_ => self.nominalNamed(impl.type_name).?,
             else => ResolvedType.unknown,
         } else if (std.mem.eql(u8, self.arena.strings.slice(impl.type_name), "Entity"))
             .{ .builtin = .entity }
@@ -5843,7 +6016,7 @@ pub const TypeChecker = struct {
         while (i < decl.params_len) : (i += 1) {
             const p = self.arena.fn_params.items[decl.params_start + i];
             const ptype = self.namedTypeToResolved(p.type_node);
-            if (ptype == .unknown) {
+            if (ptype == .unknown and !self.holdsUnresolvedPath(p.type_node)) {
                 try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown or unsupported parameter type on method '{s}'", .{self.arena.strings.slice(decl.name)});
             }
             try self.bindLocal(&ctx, p.name, .{ .type_ = ptype, .is_mut = false }, self.arena.typeNodeSpan(p.type_node));
@@ -5853,7 +6026,7 @@ pub const TypeChecker = struct {
             ResolvedType.unknown
         else
             self.namedTypeToResolved(decl.return_type);
-        if (!decl.return_type.isNone() and ret_t == .unknown) {
+        if (!decl.return_type.isNone() and ret_t == .unknown and !self.holdsUnresolvedPath(decl.return_type)) {
             try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.return_type), "unknown or unsupported return type on method '{s}'", .{self.arena.strings.slice(decl.name)});
         }
         const saved_ret = self.current_fn_return;
@@ -6004,7 +6177,8 @@ pub const TypeChecker = struct {
         const p = self.arena.rule_params.items[rule.params_start + idx];
         if (!std.mem.eql(u8, self.arena.strings.slice(p.name), name)) return false;
         const t = self.namedTypeToResolved(p.type_node);
-        return t == .component and t.component == comp;
+        const want = self.declNamed(comp) orelse return false;
+        return t == .component and t.component.eql(want);
     }
 
     /// Emit E1208 ObserverSignatureMismatch with the parameter shape required by
@@ -6083,7 +6257,7 @@ pub const TypeChecker = struct {
                 if (ptype == .unknown) {
                     try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown type '{s}' on rule parameter", .{self.arena.strings.slice(tn)});
                 }
-            } else {
+            } else if (!self.holdsUnresolvedPath(p.type_node)) {
                 try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unsupported parameter type in E1 (rule parameters must be scalar or Entity)", .{});
             }
             try self.bindLocal(&ctx, p.name, .{ .type_ = ptype, .is_mut = false }, self.arena.typeNodeSpan(p.type_node));
@@ -6100,9 +6274,9 @@ pub const TypeChecker = struct {
                 // A `.d.etch`-declared event resolves here too —
                 // which is the whole point of admitting `event_decl` into §20.1
                 // a rule can only observe an event whose type Etch knows.
-                if (self.eventNamed(event_type) != null or self.declaredEvent(event_type) != null) {
+                if (self.eventNamed(event_type) orelse self.declaredEvent(event_type)) |ev| {
                     const event_id = try self.arena.strings.intern(self.gpa, "event");
-                    try self.bindLocal(&ctx, event_id, .{ .type_ = .{ .event_t = event_type }, .is_mut = false }, annot.span);
+                    try self.bindLocal(&ctx, event_id, .{ .type_ = .{ .event_t = .{ .arena = ev.arena, .item = ev.item } }, .is_mut = false }, annot.span);
                 } else {
                     try self.emit(.on_event_type_mismatch, .error_, annot.span, "@on_event(...) requires a declared event type; '{s}' is not an event", .{self.arena.strings.slice(event_type)});
                 }
@@ -6465,7 +6639,7 @@ pub const TypeChecker = struct {
         while (i < decl.params_len) : (i += 1) {
             const p = self.arena.fn_params.items[decl.params_start + i];
             const ptype = self.namedTypeToResolved(p.type_node);
-            if (ptype == .unknown) {
+            if (ptype == .unknown and !self.holdsUnresolvedPath(p.type_node)) {
                 try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown or unsupported parameter type on function '{s}'", .{self.arena.strings.slice(decl.name)});
             }
             try self.bindLocal(&ctx, p.name, .{ .type_ = ptype, .is_mut = false }, self.arena.typeNodeSpan(p.type_node));
@@ -6478,7 +6652,7 @@ pub const TypeChecker = struct {
             ResolvedType.unknown
         else
             self.namedTypeToResolved(decl.return_type);
-        if (!decl.return_type.isNone() and ret_t == .unknown) {
+        if (!decl.return_type.isNone() and ret_t == .unknown and !self.holdsUnresolvedPath(decl.return_type)) {
             try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.return_type), "unknown or unsupported return type on function '{s}'", .{self.arena.strings.slice(decl.name)});
         }
         const saved_ret = self.current_fn_return;
@@ -6980,7 +7154,7 @@ pub const TypeChecker = struct {
                 }
                 const t = self.arena.throw_stmts.items[data];
                 const vt = try self.synthExprE(t.value, ctx);
-                const is_error = vt == .struct_t and vt.struct_t == self.arena.error_type_name;
+                const is_error = vt == .struct_t and isErrorDecl(vt.struct_t);
                 if (!is_error and vt != .unknown) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(t.value), "thrown value must be the builtin 'Error' struct (part1 §10.2)", .{});
                 }
@@ -7007,7 +7181,7 @@ pub const TypeChecker = struct {
                 // The caught binding shares the catch body's scope.
                 try ctx.enter(self.gpa);
                 defer ctx.leave();
-                try self.bindLocal(ctx, tc.catch_name, .{ .type_ = .{ .struct_t = self.arena.error_type_name }, .is_mut = false }, self.arena.stmtSpan(stmt_id));
+                try self.bindLocal(ctx, tc.catch_name, .{ .type_ = self.nominalNamed(self.arena.error_type_name).?, .is_mut = false }, self.arena.stmtSpan(stmt_id));
                 i = 0;
                 while (i < tc.catch_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[tc.catch_start + i]));
@@ -7745,11 +7919,12 @@ pub const TypeChecker = struct {
                 if (self.arena.exprKind(fa.receiver) == .path) {
                     const path_name = self.arena.exprData(fa.receiver);
                     if (self.enumNamed(path_name) != null) {
-                        if (self.enumVariantIndex(path_name, fa.field_name) == null) {
+                        const ref = self.declNamed(path_name).?;
+                        if (self.enumVariantIndex(ref, fa.field_name) == null) {
                             try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(id), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(path_name), self.arena.strings.slice(fa.field_name) });
                             return ResolvedType.unknown;
                         }
-                        return .{ .enum_t = path_name };
+                        return .{ .enum_t = ref };
                     }
                 }
                 const receiver_type = try self.synthExprE(fa.receiver, ctx_opt);
@@ -7769,8 +7944,8 @@ pub const TypeChecker = struct {
                     // when-clause gate does not apply: the time resources are
                     // ambient, readable from any rule (the spec examples read
                     // `get(GameTime).dt` without a `when resource` clause).
-                    if (builtinResourceByName(tname) != null) {
-                        return .{ .resource = mg.type_name };
+                    if (builtinResourceByName(tname)) |br| {
+                        return .{ .builtin_resource = br };
                     }
                     if (self.kindNamed(mg.type_name)) |k| {
                         if (k == .component) {
@@ -7794,7 +7969,7 @@ pub const TypeChecker = struct {
                             }
                         }
                     }
-                    return .{ .resource = mg.type_name };
+                    return self.nominalNamed(mg.type_name).?;
                 }
 
                 // Receiver form `entity.get(T)` — component access.
@@ -7832,7 +8007,7 @@ pub const TypeChecker = struct {
                         }
                     }
                 }
-                return .{ .component = mg.type_name };
+                return self.nominalNamed(mg.type_name).?;
             },
             .binary => return try self.synthBinary(id, data, ctx_opt),
             .unary => return try self.synthUnary(id, data, ctx_opt),
@@ -8746,11 +8921,11 @@ pub const TypeChecker = struct {
             const b = a.generic_bounds.items[gp.bounds_start + bi];
             const ok = switch (b.kind) {
                 .component => actual == .component,
-                .resource => actual == .resource,
+                .resource => actual == .resource or actual == .builtin_resource,
                 .event => false, // `event` bound needs the `event` keyword
                 .trait_ => blk: {
-                    const tn = typeNameOfResolved(actual) orelse break :blk false;
-                    const target = self.implTargetIn(self.arena, tn) orelse break :blk false;
+                    if (actual == .builtin) break :blk false;
+                    const target = implTargetOf(actual) orelse break :blk false;
                     const trait = self.declNamedIn(a, b.trait_name) orelse break :blk false;
                     break :blk self.typeImplementsTrait(target, trait);
                 },
@@ -8781,19 +8956,52 @@ pub const TypeChecker = struct {
     /// expression position the parser stores the bare `tag_path` with the
     /// variant ident as the expr data directly (multi-segment paths are a
     /// parse error there). E0105 when the variant does not exist.
-    fn checkEnumShorthand(self: *TypeChecker, value: NodeId, enum_name: StringId) TypeError!ResolvedType {
+    fn checkEnumShorthand(self: *TypeChecker, value: NodeId, enum_ref: DeclRef) TypeError!ResolvedType {
         const variant: StringId = self.arena.exprData(value);
         _ = self.unresolved_shorthands.swapRemove(value.raw());
-        if (self.enumVariantIndex(enum_name, variant) != null) {
-            const earlier = try self.arena.enum_shorthands.fetchPut(self.gpa, value.raw(), enum_name);
-            if (self.closure_calls != 0 and earlier != null and earlier.?.value != enum_name) {
+        if (self.enumVariantIndex(enum_ref, variant) != null) {
+            const earlier = try self.shorthand_enums.fetchPut(self.gpa, value.raw(), enum_ref);
+            if (self.closure_calls != 0 and earlier != null and !earlier.?.value.eql(enum_ref)) {
                 try self.emit(.ambiguous_enum_variant, .error_, self.arena.exprSpan(value), "this closure reads '.{s}' as a variant of another enum at each call; write it qualified", .{self.arena.strings.slice(variant)});
             }
-            return .{ .enum_t = enum_name };
+            try self.recordShorthand(value, enum_ref);
+            return .{ .enum_t = enum_ref };
         }
+        _ = self.shorthand_enums.remove(value.raw());
         _ = self.arena.enum_shorthands.remove(value.raw());
-        try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(enum_name), self.arena.strings.slice(variant) });
+        try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "enum '{s}' has no variant '{s}'", .{ declBytes(enum_ref), self.arena.strings.slice(variant) });
         return ResolvedType.unknown;
+    }
+
+    /// Hand the backends a shorthand's enum. They run one file, so an enum of
+    /// another file is the checker's alone.
+    fn recordShorthand(self: *TypeChecker, value: NodeId, enum_ref: DeclRef) TypeError!void {
+        if (enum_ref.arena == self.arena) {
+            try self.arena.enum_shorthands.put(self.gpa, value.raw(), declName(enum_ref));
+        } else {
+            _ = self.arena.enum_shorthands.remove(value.raw());
+        }
+    }
+
+    /// The enums this file names, each once whatever names it.
+    fn namedEnums(self: *TypeChecker, out: *std.ArrayListUnmanaged(DeclRef)) TypeError!void {
+        var local = self.symbols.iterator();
+        while (local.next()) |e| {
+            if (e.value_ptr.kind != .enum_ or self.imported_symbols.contains(e.key_ptr.*)) continue;
+            try appendDistinct(self.gpa, out, .{ .arena = self.arena, .item = e.value_ptr.item_id });
+        }
+        var imported = self.imported_symbols.iterator();
+        while (imported.next()) |e| {
+            if (e.value_ptr.kind != .enum_) continue;
+            try appendDistinct(self.gpa, out, exportRef(self.project.?, e.value_ptr.*));
+        }
+    }
+
+    fn appendDistinct(gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(DeclRef), ref: DeclRef) !void {
+        for (out.items) |r| {
+            if (r.eql(ref)) return;
+        }
+        try out.append(gpa, ref);
     }
 
     /// The slots of every payload of a composite type node of this file and of
@@ -8924,23 +9132,16 @@ pub const TypeChecker = struct {
     /// resolves it again through `fitShorthands`.
     fn synthShorthand(self: *TypeChecker, id: NodeId) TypeError!ResolvedType {
         if (!self.arena.isEnumShorthand(id)) return ResolvedType.unknown;
-        if (self.arena.shorthandEnum(id)) |name| return .{ .enum_t = name };
+        if (self.shorthand_enums.get(id.raw())) |ref| return .{ .enum_t = ref };
         const variant: StringId = self.arena.exprData(id);
-        var found: ?StringId = null;
+        var enums: std.ArrayListUnmanaged(DeclRef) = .empty;
+        defer enums.deinit(self.gpa);
+        try self.namedEnums(&enums);
+        var found: ?DeclRef = null;
         var count: u32 = 0;
-        var local = self.symbols.iterator();
-        while (local.next()) |e| {
-            if (e.value_ptr.kind != .enum_ or self.imported_symbols.contains(e.key_ptr.*)) continue;
-            if (self.enumVariantIndex(e.key_ptr.*, variant) != null) {
-                found = e.key_ptr.*;
-                count += 1;
-            }
-        }
-        var imported = self.imported_symbols.iterator();
-        while (imported.next()) |e| {
-            if (e.value_ptr.kind != .enum_) continue;
-            if (self.enumVariantIndex(e.key_ptr.*, variant) != null) {
-                found = e.key_ptr.*;
+        for (enums.items) |ref| {
+            if (self.enumVariantIndex(ref, variant) != null) {
+                found = ref;
                 count += 1;
             }
         }
@@ -8948,13 +9149,14 @@ pub const TypeChecker = struct {
             try self.unresolved_shorthands.put(self.gpa, id.raw(), {});
             return ResolvedType.unknown;
         }
-        try self.arena.enum_shorthands.put(self.gpa, id.raw(), found.?);
+        try self.shorthand_enums.put(self.gpa, id.raw(), found.?);
+        try self.recordShorthand(id, found.?);
         return .{ .enum_t = found.? };
     }
 
     /// Resolve the shorthands `value` yields — itself, or the trailing values of
     /// its branches — against the enum a slot expects.
-    fn fitShorthands(self: *TypeChecker, enum_name: StringId, value: NodeId) TypeError!void {
+    fn fitShorthands(self: *TypeChecker, enum_name: DeclRef, value: NodeId) TypeError!void {
         if (value.isNone()) return;
         switch (self.arena.exprKind(value)) {
             .tag_path => if (self.arena.isEnumShorthand(value)) {
@@ -8979,18 +9181,16 @@ pub const TypeChecker = struct {
     /// Every shorthand no slot resolved: E0106 when several enums name its
     /// variant, E0105 when none does.
     fn reportUnresolvedShorthands(self: *TypeChecker) TypeError!void {
+        var enums: std.ArrayListUnmanaged(DeclRef) = .empty;
+        defer enums.deinit(self.gpa);
+        try self.namedEnums(&enums);
         for (self.unresolved_shorthands.keys()) |raw| {
             const id: NodeId = @bitCast(raw);
-            if (self.arena.shorthandEnum(id) != null) continue;
+            if (self.shorthand_enums.contains(raw)) continue;
             const variant = self.arena.strings.slice(self.arena.exprData(id));
             var count: u32 = 0;
-            var local = self.symbols.iterator();
-            while (local.next()) |e| {
-                if (e.value_ptr.kind == .enum_ and !self.imported_symbols.contains(e.key_ptr.*) and self.enumVariantIndex(e.key_ptr.*, self.arena.exprData(id)) != null) count += 1;
-            }
-            var imported = self.imported_symbols.iterator();
-            while (imported.next()) |e| {
-                if (e.value_ptr.kind == .enum_ and self.enumVariantIndex(e.key_ptr.*, self.arena.exprData(id)) != null) count += 1;
+            for (enums.items) |ref| {
+                if (self.enumVariantIndex(ref, self.arena.exprData(id)) != null) count += 1;
             }
             if (count > 1) {
                 try self.emit(.ambiguous_enum_variant, .error_, self.arena.exprSpan(id), "'.{s}' is a variant of several enums; write it qualified", .{variant});
@@ -9013,19 +9213,24 @@ pub const TypeChecker = struct {
             try self.emit(.ambiguous_type, .error_, self.arena.exprSpan(id), "anonymous struct literal '.{{ … }}' needs an expected struct type from its context (let annotation or typed field value)", .{});
             return ResolvedType.unknown;
         }
-        return try self.checkStructLitAgainst(id, data, sl.type_name, ctx_opt);
+        const ref = self.declNamed(sl.type_name) orelse {
+            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a struct type", .{self.arena.strings.slice(sl.type_name)});
+            return ResolvedType.unknown;
+        };
+        if (ref.arena.itemKind(ref.item) != .struct_decl) {
+            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a struct type", .{self.arena.strings.slice(sl.type_name)});
+            return ResolvedType.unknown;
+        }
+        return try self.checkStructLitAgainst(id, data, ref, ctx_opt);
     }
 
     /// Check a struct literal's fields against the declared struct
     /// `struct_name` (split out so the
     /// anonymous `.{ … }` form checks through the same point with the name
     /// supplied by its context — check mode, resolver-types §4).
-    fn checkStructLitAgainst(self: *TypeChecker, id: NodeId, data: u32, struct_name: StringId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    fn checkStructLitAgainst(self: *TypeChecker, id: NodeId, data: u32, struct_ref: DeclRef, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const sl = self.arena.struct_lits.items[data];
-        const target = self.structNamed(struct_name) orelse {
-            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a struct type", .{self.arena.strings.slice(struct_name)});
-            return ResolvedType.unknown;
-        };
+        const target = structOf(struct_ref);
         const decl = target.decl;
         var i: u32 = 0;
         while (i < sl.fields_len) : (i += 1) {
@@ -9065,7 +9270,7 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "struct-literal field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
                 }
             } else {
-                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(id), "struct '{s}' has no field '{s}'", .{ self.arena.strings.slice(struct_name), self.arena.strings.slice(flit.name) });
+                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(id), "struct '{s}' has no field '{s}'", .{ declBytes(struct_ref), self.arena.strings.slice(flit.name) });
             }
         }
         // A builtin-`Error` literal must provide `message` and `code` (part1
@@ -9073,7 +9278,7 @@ pub const TypeChecker = struct {
         // field). Bounded to `Error` — general struct-literal completeness
         // stays permissive (declared defaults fill omissions), but Error's
         // fields have no defaults the two backends could agree on.
-        if (struct_name == self.arena.error_type_name) {
+        if (isErrorDecl(struct_ref)) {
             const required = [_][]const u8{ "message", "code" };
             for (required) |req| {
                 var provided = false;
@@ -9110,19 +9315,28 @@ pub const TypeChecker = struct {
                 try self.emit(.struct_field_missing, .error_, self.arena.exprSpan(id), "struct-typed field '{s}' must be provided in the literal (no declared default)", .{target.arena.strings.slice(f.name)});
             }
         }
-        return .{ .struct_t = struct_name };
+        return .{ .struct_t = struct_ref };
     }
 
-    /// The user type name carried by a struct / component / resource type, or
-    /// `null` for builtins / collections (no user methods on them —
-    /// builtin/stdlib methods like `Vec3.length` are §5.3, out of scope).
-    fn typeNameOfResolved(rt: ResolvedType) ?StringId {
-        return switch (rt) {
-            .struct_t => |n| n,
-            .component => |n| n,
-            .resource => |n| n,
-            .enum_t => |n| n,
+    /// Whether `ref` is the builtin `Error` of its file.
+    fn isErrorDecl(ref: DeclRef) bool {
+        return ref.arena.error_type_name != 0 and ref.arena.itemKind(ref.item) == .struct_decl and declName(ref) == ref.arena.error_type_name;
+    }
+
+    /// What an impl for a value of type `t` is for, null for a type no impl
+    /// can target.
+    fn implTargetOf(t: ResolvedType) ?ImplTarget {
+        return switch (t) {
+            .struct_t, .component, .resource, .enum_t => |r| .{ .decl = r },
+            .builtin => |b| if (b == .entity) .entity else null,
             else => null,
+        };
+    }
+
+    fn implTargetBytes(t: ImplTarget) []const u8 {
+        return switch (t) {
+            .decl => |r| declBytes(r),
+            .entity => "Entity",
         };
     }
 
@@ -9160,7 +9374,11 @@ pub const TypeChecker = struct {
                 }
                 return try self.synthSetAssociated(id, mc, ctx_opt);
             }
-            const method = (try self.lookupMethod(type_name, mc.method_name, self.arena.exprSpan(id))) orelse {
+            const target = self.implTargetIn(self.arena, type_name) orelse {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no associated function '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
+                return ResolvedType.unknown;
+            };
+            const method = (try self.lookupMethod(target, mc.method_name, self.arena.exprSpan(id))) orelse {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no associated function '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
                 return ResolvedType.unknown;
             };
@@ -9675,22 +9893,15 @@ pub const TypeChecker = struct {
             }
         }
 
-        const type_name: StringId = typeNameOfResolved(recv_t) orelse blk: {
-            if (recv_t == .builtin and recv_t.builtin == .entity) {
-                break :blk self.arena.strings.find("Entity") orelse {
-                    // No `Entity` interned ⇒ no trait impl targets it.
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on an Entity (no trait impl in scope)", .{method_slice});
-                    return ResolvedType.unknown;
-                };
-            }
+        const target: ImplTarget = implTargetOf(recv_t) orelse {
             if (recv_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "method call '{s}' on a value with no methods (builtin / collection methods are not supported here)", .{method_slice});
             return ResolvedType.unknown;
         };
 
         // Step 1 — inherent method (§5.1).
-        if (try self.lookupMethod(type_name, mc.method_name, self.arena.exprSpan(id))) |method| {
+        if (try self.lookupMethod(target, mc.method_name, self.arena.exprSpan(id))) |method| {
             if (method.decl.self_kind == .none) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'{s}' is an associated function (no self) — call it as '{s}.{s}(...)'", .{ method_slice, self.arena.strings.slice(type_name), method_slice });
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'{s}' is an associated function (no self) — call it as '{s}.{s}(...)'", .{ method_slice, self.localSpelling(target), method_slice });
                 return ResolvedType.unknown;
             }
             try self.checkMutSelfReceiver(method.decl, mc, ctx_opt);
@@ -9698,7 +9909,7 @@ pub const TypeChecker = struct {
         }
 
         // Step 2 — trait method (§5.2), after inherent.
-        if (try self.findTraitMethod(type_name, mc.method_name, self.arena.exprSpan(id))) |disp| {
+        if (try self.findTraitMethod(target, mc.method_name, self.arena.exprSpan(id))) |disp| {
             // Conditional impl (§7.3): the `when` conditions must be provable
             // from the calling rule's `when` (E0215 otherwise).
             if (!self.traitImplConditionsProven(disp.impl_arena, disp.when_root, ctx_opt)) {
@@ -9709,8 +9920,23 @@ pub const TypeChecker = struct {
         }
 
         // Steps 3-4 (builtin / service) are §5.3-5.4 — out of the core.
-        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
+        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on type '{s}'", .{ method_slice, implTargetBytes(target) });
         return ResolvedType.unknown;
+    }
+
+    /// How this file writes the impl target `t`: the name a selective import
+    /// binds it under, else its declared name.
+    fn localSpelling(self: *TypeChecker, t: ImplTarget) []const u8 {
+        const ref = switch (t) {
+            .decl => |r| r,
+            .entity => return "Entity",
+        };
+        if (ref.arena == self.arena) return declBytes(ref);
+        var it = self.imported_symbols.iterator();
+        while (it.next()) |e| {
+            if (exportRef(self.project.?, e.value_ptr.*).eql(ref) and !self.symbols.contains(e.key_ptr.*)) return self.arena.strings.slice(e.key_ptr.*);
+        }
+        return declBytes(ref);
     }
 
     /// One resolved trait-dispatch candidate: the method to call
@@ -9726,8 +9952,7 @@ pub const TypeChecker = struct {
     /// impls of the same trait also surface as E0211 (the §7.3
     /// most-specific-wins / E0216 tie-break is a refinement — flagged for
     /// review).
-    fn findTraitMethod(self: *TypeChecker, type_name: StringId, method_name: StringId, span: SourceSpan) TypeError!?TraitDispatch {
-        const target = self.implTargetIn(self.arena, type_name) orelse return null;
+    fn findTraitMethod(self: *TypeChecker, target: ImplTarget, method_name: StringId, span: SourceSpan) TypeError!?TraitDispatch {
         const bytes = self.arena.strings.slice(method_name);
         var found: ?TraitDispatch = null;
         var count: u32 = 0;
@@ -9913,12 +10138,10 @@ pub const TypeChecker = struct {
 
         // Enum scrutinee: track covered variants for exhaustiveness (E1230,
         // `etch-resolver-types.md §12.4` — all variants ⇒ exhaustive).
-        const enum_name: ?StringId = if (scrut_t == .enum_t) scrut_t.enum_t else null;
+        const enum_name: ?DeclRef = if (scrut_t == .enum_t) scrut_t.enum_t else null;
         var covered: std.ArrayListUnmanaged(bool) = .empty;
         defer covered.deinit(self.gpa);
-        if (enum_name) |en| {
-            if (self.enumNamed(en)) |e| try covered.appendNTimes(self.gpa, false, e.decl.variants_len);
-        }
+        if (enum_name) |en| try covered.appendNTimes(self.gpa, false, enumOf(en).decl.variants_len);
 
         var i: u32 = 0;
         while (i < m.arms_len) : (i += 1) {
@@ -9953,12 +10176,12 @@ pub const TypeChecker = struct {
                     if (enum_name) |en| {
                         // A qualified `Type.variant` pattern must name the
                         // scrutinee's enum.
-                        if (pat.type_name != 0 and pat.type_name != en) {
-                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "enum-variant pattern names enum '{s}' but the scrutinee is '{s}'", .{ self.arena.strings.slice(pat.type_name), self.arena.strings.slice(en) });
+                        if (pat.type_name != 0 and !self.namesDecl(pat.type_name, en)) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "enum-variant pattern names enum '{s}' but the scrutinee is '{s}'", .{ self.arena.strings.slice(pat.type_name), self.localSpelling(.{ .decl = en }) });
                         } else if (self.enumVariantIndex(en, pat.variant)) |vidx| {
                             if (vidx < covered.items.len) covered.items[vidx] = true;
                         } else {
-                            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(arm.body), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(en), self.arena.strings.slice(pat.variant) });
+                            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(arm.body), "enum '{s}' has no variant '{s}'", .{ declBytes(en), self.arena.strings.slice(pat.variant) });
                         }
                     } else if (scrut_t != .unknown) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "enum-variant pattern used on a non-enum scrutinee", .{});
@@ -10160,49 +10383,40 @@ pub const TypeChecker = struct {
 
     fn lookupFieldType(self: *TypeChecker, receiver_type: ResolvedType, field_name: StringId, span: SourceSpan) !ResolvedType {
         switch (receiver_type) {
-            .component => |name_id| {
-                const c = self.componentNamed(name_id) orelse return ResolvedType.unknown;
+            .component => |ref| {
+                const c = componentOf(ref);
                 if (self.fieldTypeIn(c.arena, c.decl.fields_start, c.decl.fields_len, field_name)) |t| return t;
-                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on component '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on component '{s}'", .{ self.arena.strings.slice(field_name), declBytes(ref) });
                 return ResolvedType.unknown;
             },
-            .resource => |name_id| {
-                // Builtin engine resource: fields resolve
-                // against the `builtin_resources` descriptor table (there is
-                // no AST declaration to consult).
-                if (builtinResourceByName(self.arena.strings.slice(name_id))) |br| {
-                    const fname = self.arena.strings.slice(field_name);
-                    for (br.fields) |f| {
-                        if (std.mem.eql(u8, fname, f.name)) return .{ .builtin = f.type_ };
-                    }
-                    try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on builtin resource '{s}'", .{ fname, br.name });
-                    return ResolvedType.unknown;
+            .builtin_resource => |br| {
+                const fname = self.arena.strings.slice(field_name);
+                for (br.fields) |f| {
+                    if (std.mem.eql(u8, fname, f.name)) return .{ .builtin = f.type_ };
                 }
-                const r = self.resourceNamed(name_id) orelse return ResolvedType.unknown;
-                if (self.fieldTypeIn(r.arena, r.decl.fields_start, r.decl.fields_len, field_name)) |t| return t;
-                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on resource '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on builtin resource '{s}'", .{ fname, br.name });
                 return ResolvedType.unknown;
             },
-            .struct_t => |name_id| {
-                // Field of a `struct` value — e.g. `self.x`
-                // inside a method or `v.x` on a struct local.
-                const target = self.structNamed(name_id) orelse return ResolvedType.unknown;
+            .resource => |ref| {
+                const r = resourceOf(ref);
+                if (self.fieldTypeIn(r.arena, r.decl.fields_start, r.decl.fields_len, field_name)) |t| return t;
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on resource '{s}'", .{ self.arena.strings.slice(field_name), declBytes(ref) });
+                return ResolvedType.unknown;
+            },
+            .struct_t => |ref| {
+                const target = structOf(ref);
                 var i: u32 = 0;
                 while (i < target.decl.fields_len) : (i += 1) {
                     const f = target.arena.fields.items[target.decl.fields_start + i];
                     if (self.sameName(target.arena, f.name, field_name)) return self.typeIn(target.arena, f.type_node);
                 }
-                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on struct '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on struct '{s}'", .{ self.arena.strings.slice(field_name), declBytes(ref) });
                 return ResolvedType.unknown;
             },
-            .event_t => |name_id| {
-                // Field of the implicit `event` binding inside an `@on_event(T)`
-                // observer — e.g. `event.amount`. An event is a POD
-                // struct of fields, resolved against its declaration.
-                if (self.eventNamed(name_id) orelse self.declaredEvent(name_id)) |ev| {
-                    if (self.fieldTypeIn(ev.arena, ev.decl.fields_start, ev.decl.fields_len, field_name)) |t| return t;
-                }
-                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on event '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
+            .event_t => |ref| {
+                const ev = eventOf(ref);
+                if (self.fieldTypeIn(ev.arena, ev.decl.fields_start, ev.decl.fields_len, field_name)) |t| return t;
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on event '{s}'", .{ self.arena.strings.slice(field_name), declBytes(ref) });
                 return ResolvedType.unknown;
             },
             .optional => {
@@ -17586,11 +17800,13 @@ test "an interned optional holds the payload it is given" {
     const index = std.mem.indexOfScalar(ast_mod.TypeNodeKind, kinds, .optional).?;
     const node: NodeId = .{ .category = .type_node, .index = @intCast(index) };
     const p = pr.ast.strings.find("P").?;
-    const declared = tc.internedOptional(&pr.ast, node, .{ .struct_t = p });
+    const item = std.mem.indexOfScalar(ast_mod.ItemKind, pr.ast.items.items(.kind), .struct_decl).?;
+    const struct_p: ResolvedType = .{ .struct_t = .{ .arena = &pr.ast, .item = .{ .category = .item, .index = @intCast(item) } } };
+    const declared = tc.internedOptional(&pr.ast, node, struct_p);
     const generic = tc.internedOptional(&pr.ast, node, .{ .generic = p });
-    try std.testing.expect(declared.optional.eql(.{ .struct_t = p }));
+    try std.testing.expect(declared.optional.eql(struct_p));
     try std.testing.expect(generic.optional.eql(.{ .generic = p }));
-    try std.testing.expectEqual(declared.optional, tc.internedOptional(&pr.ast, node, .{ .struct_t = p }).optional);
+    try std.testing.expectEqual(declared.optional, tc.internedOptional(&pr.ast, node, struct_p).optional);
 }
 
 test "an optional type node keeps one payload per generic scope reading it" {

@@ -650,3 +650,137 @@ test "a component and an imported resource of one name are refused, the runtime 
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .duplicate_symbol));
 }
+
+const foreign_geo =
+    \\struct Pos { x: int = 0 }
+    \\enum Dir { north, south }
+    \\component Health { hp: int = 0 }
+    \\resource Score { n: int = 0 }
+    \\event Hit { amount: int = 0 }
+    \\trait Shape {
+    \\  fn area(self) -> int
+    \\}
+    \\type HA = Health
+    \\private struct Hidden { h: int = 0 }
+    \\fn mk() -> Pos { Pos { x: 1 } }
+    \\fn arr() -> int[3] { [1, 2, 3] }
+    \\fn mkh(h: HA) -> int { 0 }
+    \\fn take(p: Pos) -> int { p.x }
+    \\fn pass(e: Error) -> int { 0 }
+    \\fn wrap<T>(t: T) -> Pos { Pos { x: 1 } }
+    \\impl Pos {
+    \\  fn shift(self, by: Dir) -> Pos { self }
+    \\}
+;
+
+const foreign_files = [_]etch.ProjectFile{
+    .{ .name = "base.etch", .source = "component Armor { v: int = 0 }\ntype HB = Armor" },
+    .{ .name = "geo.etch", .source = foreign_geo },
+    .{ .name = "use.etch", .source = "import geo as g\nfn relay(p: g.Pos) -> g.Pos { p }" },
+    .{ .name = "svc.d.etch", .source = "import geo { Pos }\nservice sv {\n  fn mk() -> Pos\n}" },
+};
+
+const ForeignCase = struct {
+    name: []const u8,
+    main: []const u8,
+    codes: []const DiagnosticCode = &.{},
+    extra: ?etch.ProjectFile = null,
+};
+
+const foreign_refused = [_]ForeignCase{
+    .{ .name = "a foreign return the file never names", .main = "import geo { mk }\nfn f() -> int { mk() }", .codes = &.{.return_type_mismatch} },
+    .{ .name = "a foreign return the file names under another binding", .main = "import geo { mk, Pos as Q }\nfn f() -> int { mk() }", .codes = &.{.return_type_mismatch} },
+    .{ .name = "a foreign return a local type shadows", .main = "import geo { mk }\nstruct Pos { y: bool = false }\nfn f() -> Pos { mk() }", .codes = &.{.return_type_mismatch} },
+    .{ .name = "a foreign parameter through its module's alias", .main = "import geo { mkh }\nfn f() -> int { mkh(1) }", .codes = &.{.type_mismatch} },
+    .{ .name = "a foreign parameter through an alias its module imports", .main = "import ali { mkb }\nfn f() -> int { mkb(1) }", .codes = &.{.type_mismatch}, .extra = .{ .name = "ali.etch", .source = "import base { HB }\nfn mkb(h: HB) -> int { 0 }" } },
+    .{ .name = "a foreign fixed-array return", .main = "import geo { arr }\nfn f() -> int { arr() }", .codes = &.{.return_type_mismatch} },
+    .{ .name = "a foreign signature written qualified", .main = "import use { relay }\nimport geo { mk }\nfn f() -> int { relay(mk()) }", .codes = &.{.return_type_mismatch} },
+    .{ .name = "a foreign parameter", .main = "import geo { take }\nfn f() -> int { take(1) }", .codes = &.{.type_mismatch} },
+    .{ .name = "a foreign Error parameter", .main = "import geo { pass }\nfn f() -> int { pass(1) }", .codes = &.{.type_mismatch} },
+    .{ .name = "a foreign generic fn's concrete return", .main = "import geo { wrap }\nfn f() -> int { wrap(1) }", .codes = &.{.return_type_mismatch} },
+    .{ .name = "a foreign method's parameter and return", .main = "import geo { Pos }\nfn f(p: Pos) -> int { p.shift(1) }", .codes = &.{ .type_mismatch, .return_type_mismatch } },
+    .{ .name = "a service return the caller never names", .main = "rule r() {\n  let n: int = sv.mk()\n}", .codes = &.{.type_mismatch} },
+    .{ .name = "a service signature naming no type", .main = "fn f() -> int { 0 }", .codes = &.{.undefined_symbol}, .extra = .{ .name = "bad.d.etch", .source = "service sv2 {\n  fn bad(x: Nope) -> int\n}" } },
+    .{ .name = "a qualified alias", .main = "import geo as g\nfn f() -> int {\n  let x: g.HA = 1\n  0\n}", .codes = &.{.type_mismatch} },
+    .{ .name = "an absent qualified member", .main = "import geo as g\nfn f() -> int {\n  let x: g.Nope = 1\n  0\n}", .codes = &.{.unknown_export} },
+    .{ .name = "a private qualified member", .main = "import geo as g\nfn f() -> int {\n  let x: g.Hidden = 1\n  0\n}", .codes = &.{.import_private_item} },
+    .{ .name = "a qualified type of no module alias", .main = "import geo as g\nfn f() -> int {\n  let x: h.Pos = 1\n  0\n}", .codes = &.{.undefined_symbol} },
+    .{ .name = "a qualified trait as a type", .main = "import geo as g\nfn f() -> int {\n  let x: g.Shape = 1\n  0\n}", .codes = &.{.undefined_symbol} },
+    .{ .name = "an absent qualified member in an optional field", .main = "import geo as g\nstruct S { p: g.Nope? }", .codes = &.{.unknown_export} },
+    .{ .name = "an absent qualified parameter", .main = "import geo as g\nfn f(p: g.Nope) -> int { 0 }", .codes = &.{.unknown_export} },
+    .{ .name = "an absent qualified optional return", .main = "import geo as g\nfn f() -> g.Nope? { none }", .codes = &.{.unknown_export} },
+    .{ .name = "an absent qualified rule parameter", .main = "import geo as g\nrule r(p: g.Nope) {\n}", .codes = &.{.unknown_export} },
+    .{ .name = "an absent qualified method parameter", .main = "import geo as g\nstruct Q { x: int = 0 }\nimpl Q {\n  fn m(self, p: g.Nope) -> int { 0 }\n}", .codes = &.{.unknown_export} },
+    .{ .name = "a qualified struct as a component field", .main = "import geo as g\ncomponent C { p: g.Pos }", .codes = &.{.undefined_symbol} },
+    .{ .name = "one method of one name on one type written under two names", .main = "import geo { Pos, Pos as P2 }\nimpl Pos {\n  fn a(self) -> int { 0 }\n}\nimpl P2 {\n  fn a(self) -> int { 1 }\n}", .codes = &.{.ambiguous_inherent_method} },
+    .{ .name = "a field a qualified struct lacks", .main = "import geo as g\nfn f(p: g.Pos) -> int { p.nope }", .codes = &.{.invalid_field_filter} },
+    .{ .name = "a field a qualified struct lacks, a local one having it", .main = "import geo as g\nstruct Pos { y: bool = false }\nfn f(p: g.Pos) -> bool { p.y }", .codes = &.{.invalid_field_filter} },
+    .{ .name = "a qualified struct is not the local one of its name", .main = "import geo as g\nstruct Pos { y: bool = false }\nfn f(p: g.Pos) -> Pos { p }", .codes = &.{.return_type_mismatch} },
+    .{ .name = "a qualified enum is not the local one of its name", .main = "import geo as g\nenum Dir { east }\nfn f(d: g.Dir) -> Dir { d }", .codes = &.{.return_type_mismatch} },
+    .{ .name = "a field a qualified component lacks", .main = "import geo as g\nfn f(h: g.Health) -> int { h.nope }", .codes = &.{.invalid_field_filter} },
+    .{ .name = "a field a qualified resource lacks", .main = "import geo as g\nfn f(r: g.Score) -> int { r.nope }", .codes = &.{.invalid_field_filter} },
+    .{ .name = "a component of a name a whole-module import brings", .main = "import geo as g\ncomponent Health { v: int = 0 }", .codes = &.{.duplicate_symbol} },
+};
+
+const foreign_accepted = [_]ForeignCase{
+    .{ .name = "a foreign return named", .main = "import geo { mk, Pos }\nfn f() -> Pos { mk() }" },
+    .{ .name = "a foreign return written qualified", .main = "import geo as g\nimport geo { mk }\nfn f() -> g.Pos { mk() }" },
+    .{ .name = "a qualified struct field", .main = "import geo as g\nstruct S { p: g.Pos }" },
+    .{ .name = "a qualified optional struct field", .main = "import geo as g\nstruct S { p: g.Pos? }" },
+    .{ .name = "a field of a qualified struct", .main = "import geo as g\nfn f(p: g.Pos) -> int { p.x }" },
+    .{ .name = "two spellings of one declaration", .main = "import geo { Pos as P2 }\nimport geo as g\nfn f(p: P2) -> g.Pos { p }" },
+    .{ .name = "a foreign alias parameter", .main = "import geo { mkh, Health }\nfn f(h: Health) -> int { mkh(h) }" },
+    .{ .name = "a foreign parameter through an alias its module imports", .main = "import ali { mkb }\nimport base { Armor }\nfn f(a: Armor) -> int { mkb(a) }", .extra = .{ .name = "ali.etch", .source = "import base { HB }\nfn mkb(h: HB) -> int { 0 }" } },
+    .{ .name = "a foreign fixed-array return", .main = "import geo { arr }\nfn f() -> int[3] { arr() }" },
+    .{ .name = "a foreign qualified signature", .main = "import use { relay }\nimport geo { mk }\nfn f() -> int { relay(mk()).x }" },
+    .{ .name = "a foreign enum parameter of a method", .main = "import geo { Pos, Dir }\nfn f(p: Pos) -> Pos { p.shift(.north) }" },
+    .{ .name = "a shorthand against a qualified enum", .main = "import geo as g\nfn f(d: g.Dir) -> bool { d == .north }" },
+    .{ .name = "a service return the caller never names", .main = "rule r() {\n  let p = sv.mk()\n}" },
+    .{ .name = "an Error across modules", .main = "import geo { pass }\nfn f(e: Error) -> int { pass(e) }" },
+    .{ .name = "a field of a qualified component", .main = "import geo as g\nfn f(h: g.Health) -> int { h.hp }" },
+    .{ .name = "a foreign generic fn's concrete return", .main = "import geo { wrap, Pos }\nfn f() -> Pos { wrap(1) }" },
+    .{ .name = "one enum under two names gives a shorthand one enum", .main = "import geo { Dir, Dir as D2 }\nfn f() -> bool {\n  let d = .north\n  true\n}" },
+};
+
+/// Whether `main`, beside the foreign modules, draws exactly `c.codes`.
+fn foreignJudged(c: ForeignCase) !bool {
+    const gpa = std.testing.allocator;
+    const main = etch.ProjectFile{ .name = "main.etch", .source = c.main };
+    var files: std.ArrayListUnmanaged(etch.ProjectFile) = .empty;
+    defer files.deinit(gpa);
+    try files.appendSlice(gpa, &foreign_files);
+    if (c.extra) |e| try files.append(gpa, e);
+    try files.append(gpa, main);
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, files.items, &diags);
+    var right = diags.items.len == c.codes.len;
+    for (c.codes) |code| {
+        var want: usize = 0;
+        for (c.codes) |k| {
+            if (k == code) want += 1;
+        }
+        if (countCode(diags.items, code) != want) right = false;
+    }
+    if (!right) {
+        std.debug.print("{s}:\n", .{c.name});
+        for (diags.items) |d| std.debug.print("  {t} {s}\n", .{ d.code, d.primary_message });
+    }
+    return right;
+}
+
+test "a foreign type is the declaration it names, refused where it does not fit" {
+    var wrong: usize = 0;
+    for (foreign_refused) |c| {
+        if (!try foreignJudged(c)) wrong += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a foreign type is the declaration it names, accepted where it fits" {
+    var wrong: usize = 0;
+    for (foreign_accepted) |c| {
+        if (!try foreignJudged(c)) wrong += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
