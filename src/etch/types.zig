@@ -395,9 +395,8 @@ pub const ResolvedType = union(enum) {
     }
 };
 
-/// An optional type node of one arena, resolved inside a generic scope or
-/// outside any: a generic parameter can shadow a declared type's name.
-const OptionalNode = struct { arena: usize, node: u32, generic: bool };
+/// An optional type node of one arena.
+const OptionalNode = struct { arena: usize, node: u32 };
 
 /// Each builtin as a `ResolvedType`, the payload of an optional of a builtin.
 const builtin_payloads = blk: {
@@ -597,10 +596,10 @@ pub const TypeChecker = struct {
     closure_wraps: std.AutoHashMapUnmanaged(u32, u8) = .empty,
     /// Payloads of the optionals built at check time.
     payloads: std.ArrayListUnmanaged(*ResolvedType) = .empty,
-    /// Each optional type node of the files this check reads → its payload's
-    /// slot, made by `reserveOptionalSlots` so a type node resolves without
-    /// allocating; `.unknown` until its node first resolves.
-    optional_slots: std.AutoHashMapUnmanaged(OptionalNode, *ResolvedType) = .empty,
+    /// Each optional type node of the files this check reads → its payloads'
+    /// slots, made by `reserveOptionalSlots` so a type node resolves without
+    /// allocating; `.unknown` until filled.
+    optional_slots: std.AutoHashMapUnmanaged(OptionalNode, []ResolvedType) = .empty,
     optional_slot_store: []ResolvedType = &.{},
     optional_slots_reserved: bool = false,
     /// The `await_expr` node that is the statement-head `await` of the statement
@@ -8705,8 +8704,9 @@ pub const TypeChecker = struct {
         return ResolvedType.unknown;
     }
 
-    /// Two slots per optional type node of this file and of every project file,
-    /// the arenas `typeIn` can read a type node from.
+    /// The slots of every optional type node of this file and of every project
+    /// file, the arenas `typeIn` can read a type node from: one per payload the
+    /// node can resolve to.
     fn reserveOptionalSlots(self: *TypeChecker) !void {
         if (self.optional_slots_reserved) return;
         var arenas: std.ArrayListUnmanaged(*const AstArena) = .empty;
@@ -8717,43 +8717,86 @@ pub const TypeChecker = struct {
                 if (a != self.arena) try arenas.append(self.gpa, a);
             }
         }
+        var nodes: usize = 0;
         var count: usize = 0;
         for (arenas.items) |a| {
-            for (a.type_nodes.items(.kind)) |k| {
-                if (k == .optional) count += 2;
+            for (a.type_nodes.items(.kind), 0..) |k, i| {
+                if (k != .optional) continue;
+                nodes += 1;
+                count += self.optionalPayloadCount(a, .{ .category = .type_node, .index = @intCast(i) });
             }
         }
         const store = try self.gpa.alloc(ResolvedType, count);
         errdefer self.gpa.free(store);
-        try self.optional_slots.ensureTotalCapacity(self.gpa, @intCast(count));
+        @memset(store, .unknown);
+        try self.optional_slots.ensureTotalCapacity(self.gpa, @intCast(nodes));
         var next: usize = 0;
         for (arenas.items) |a| {
             for (a.type_nodes.items(.kind), 0..) |k, i| {
                 if (k != .optional) continue;
-                for ([_]bool{ false, true }) |generic| {
-                    store[next] = .unknown;
-                    self.optional_slots.putAssumeCapacity(.{ .arena = @intFromPtr(a), .node = @intCast(i), .generic = generic }, &store[next]);
-                    next += 1;
-                }
+                const node: NodeId = .{ .category = .type_node, .index = @intCast(i) };
+                const n = self.optionalPayloadCount(a, node);
+                self.optional_slots.putAssumeCapacity(.{ .arena = @intFromPtr(a), .node = node.index }, store[next .. next + n]);
+                next += n;
             }
         }
         self.optional_slot_store = store;
         self.optional_slots_reserved = true;
     }
 
-    /// The optional of `payload` resolved from the type node `node` of `a`: its
-    /// reserved slot, so no allocation.
+    /// How many payloads the optional type node `node` of `a` can resolve to. A
+    /// generic scope changes it only through the names it holds that are type
+    /// parameters of this file: at most one payload per subset of those, and at
+    /// most one per scope this file can open — each holds a parameter — plus
+    /// the empty scope. `foreignType` reads no scope.
+    fn optionalPayloadCount(self: *TypeChecker, a: *const AstArena, node: NodeId) usize {
+        if (a != self.arena) return 1;
+        const scopes = self.arena.generic_params.items.len + 1;
+        var names: [8]StringId = undefined;
+        var held: usize = 0;
+        if (!self.scopeNamesIn(@bitCast(a.typeNodeData(node)), &names, &held)) return scopes;
+        return @min(@as(usize, 1) << @intCast(held), scopes);
+    }
+
+    /// Adds to `names[0..held.*]` the type-parameter names the type node `node`
+    /// reads from a generic scope; false when they do not fit.
+    fn scopeNamesIn(self: *TypeChecker, node: NodeId, names: []StringId, held: *usize) bool {
+        const a = self.arena;
+        const data = a.typeNodeData(node);
+        const name: StringId = switch (a.typeNodeKind(node)) {
+            .named => a.namedTypeName(node).?,
+            .generic => a.generic_type_nodes.items[data].name,
+            .array, .slice => return self.scopeNamesIn(a.array_types.items[data].elem, names, held),
+            .map_type => return self.scopeNamesIn(a.map_types.items[data].key, names, held) and self.scopeNamesIn(a.map_types.items[data].value, names, held),
+            .set_type => return self.scopeNamesIn(a.set_types.items[data].elem, names, held),
+            .optional => return self.scopeNamesIn(@bitCast(data), names, held),
+            else => return true,
+        };
+        for (a.generic_params.items) |p| {
+            if (p.name != name) continue;
+            for (names[0..held.*]) |n| {
+                if (n == name) return true;
+            }
+            if (held.* == names.len) return false;
+            names[held.*] = name;
+            held.* += 1;
+            return true;
+        }
+        return true;
+    }
+
+    /// The optional of `payload` resolved from the type node `node` of `a`, in
+    /// the node's slot holding that payload, else its first free one, so no
+    /// allocation.
     fn internedOptional(self: *TypeChecker, a: *const AstArena, node: NodeId, payload: ResolvedType) ResolvedType {
         if (payload == .unknown) return .unknown;
         if (payload == .builtin) return optionalOfBuiltin(payload.builtin);
-        const key: OptionalNode = .{ .arena = @intFromPtr(a), .node = node.index, .generic = self.generic_scope.count() != 0 };
-        const slot = self.optional_slots.get(key) orelse unreachable;
-        if (slot.* == .unknown) {
-            slot.* = payload;
-        } else {
-            std.debug.assert(slot.eql(payload));
+        const slots = self.optional_slots.get(.{ .arena = @intFromPtr(a), .node = node.index }) orelse unreachable;
+        for (slots) |*slot| {
+            if (slot.* == .unknown) slot.* = payload;
+            if (slot.eql(payload)) return .{ .optional = slot };
         }
-        return .{ .optional = slot };
+        unreachable;
     }
 
     /// The optional of `payload`, built at check time.
@@ -17383,6 +17426,41 @@ test "a scene's scope resolves an optional of a declared type" {
     var scope = try TypeChecker.cookScope(gpa, &pr.ast, &project, &diags);
     defer scope.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+test "an interned optional holds the payload it is given" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa, "struct P { x: int = 0 }\nfn f<P>(v: P) -> P? {\n  none\n}");
+    defer pr.deinit(gpa);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer diags.deinit(gpa);
+    var tc: TypeChecker = .{ .gpa = gpa, .arena = &pr.ast, .diagnostics = &diags };
+    defer tc.deinit();
+    try tc.reserveOptionalSlots();
+    const kinds = pr.ast.type_nodes.items(.kind);
+    const index = std.mem.indexOfScalar(ast_mod.TypeNodeKind, kinds, .optional).?;
+    const node: NodeId = .{ .category = .type_node, .index = @intCast(index) };
+    const p = pr.ast.strings.find("P").?;
+    const declared = tc.internedOptional(&pr.ast, node, .{ .struct_t = p });
+    const generic = tc.internedOptional(&pr.ast, node, .{ .generic = p });
+    try std.testing.expect(declared.optional.eql(.{ .struct_t = p }));
+    try std.testing.expect(generic.optional.eql(.{ .generic = p }));
+    try std.testing.expectEqual(declared.optional, tc.internedOptional(&pr.ast, node, .{ .struct_t = p }).optional);
+}
+
+test "an optional type node keeps one payload per generic scope reading it" {
+    const gpa = std.testing.allocator;
+    const decls = "struct P { x: int = 0 }\nstruct S { p: P? = none }\n";
+    const shadowing = "fn f<P>(v: P) {\n  let s = S { p: none }\n}\n";
+    const plain = "fn g<T>(v: T) {\n  let s = S { p: 5 }\n}\n";
+    const orders = [_][]const u8{ decls ++ shadowing ++ plain, decls ++ plain ++ shadowing };
+    for (orders) |src| {
+        var r = try parseAndCheck(gpa, src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        try std.testing.expectEqual(@as(usize, 1), r.diagnostics.items.len);
+        try std.testing.expectEqual(DiagnosticCode.type_mismatch, r.diagnostics.items[0].code);
+    }
 }
 
 test "an optional of any payload refuses what does not fit it" {
