@@ -599,6 +599,26 @@ test "one component under two local names is one type" {
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 }
 
+test "a collection field of an imported resource keeps its element type" {
+    const gpa = std.testing.allocator;
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "enum Dir { north, south }\nresource Nav { dirs: Dir[], seen: Set<Dir>, names: [string: Dir] }\n" },
+        .{ .name = "main.etch", .source =
+        \\import lib { Nav, Dir }
+        \\rule r() when resource Nav {
+        \\  get_mut(Nav).dirs = 5
+        \\  get_mut(Nav).seen = 5
+        \\  get_mut(Nav).names = 5
+        \\}
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 3), diags.items.len);
+    try std.testing.expectEqual(@as(usize, 3), countCode(diags.items, .type_mismatch));
+}
+
 test "a mistyped field of an imported resource in a scene file is refused" {
     const gpa = std.testing.allocator;
     const files = [_]etch.ProjectFile{

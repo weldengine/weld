@@ -3592,6 +3592,9 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             if (al.elements_len == 0) return CodegenError.UnsupportedConstruct;
             const first: NodeId = @bitCast(ast.extra.items[al.elements_start]);
             const elem_zig = inferExprZigType(ast, ctx, first);
+            // An element type the inference cannot name — a nested collection,
+            // an optional, a component read — has no Zig spelling here.
+            if (elem_zig.len == 0 or std.mem.eql(u8, elem_zig, "struct")) return CodegenError.UnsupportedConstruct;
             if (al.is_fill) {
                 try w.print("[_]{s}{{", .{elem_zig});
                 try emitExpr(w, ast, ctx, first);

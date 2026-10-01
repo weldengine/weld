@@ -6875,9 +6875,7 @@ pub const Interpreter = struct {
             },
             .array_lit => {
                 // `[a, b, c]` / `[v; n]` → materialize a fresh array in the
-                // rule-body collection store, return its handle. Elements
-                // are builtin scalars (the
-                // type-checker rejects non-builtin / nested-array elements).
+                // rule-body collection store, return its handle.
                 const al = self.ast.array_lits.items[data];
                 const handle = try self.collections.newArray(self.gpa);
                 if (al.is_fill) {

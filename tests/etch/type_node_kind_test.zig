@@ -96,6 +96,14 @@ test "the codegen refuses a non-named event field, even unchecked" {
     try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "event E { xs: int[] }", false));
 }
 
+test "the codegen refuses an array whose element type it cannot spell" {
+    try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "rule r() {\n  let a = [[1], [2]]\n}", true));
+}
+
+test "the codegen lowers an array of structs" {
+    try lowerSource(std.testing.allocator, "struct P { x: int = 0 }\nrule r() {\n  let a = [P { x: 1 }]\n}", true);
+}
+
 test "the same resource with a scalar field lowers" {
     try lowerSource(std.testing.allocator, "resource R { xs: int }", true);
 }

@@ -291,13 +291,11 @@ pub fn builtinResourceByName(name: []const u8) ?*const BuiltinResource {
     return null;
 }
 
-/// Fixed-array carrier for `ResolvedType.array_fixed`: builtin element type +
-/// compile-time length. Collections hold **builtin primitive** elements
-/// only (collections of components / structs are unsupported); a non-builtin element
-/// resolves the whole collection type to `unknown`.
-pub const ArrayFixedInfo = struct { elem: BuiltinType, len: u64 };
-/// Map carrier for `ResolvedType.map_t`: builtin key + value types.
-pub const MapInfo = struct { key: BuiltinType, value: BuiltinType };
+/// Fixed-array carrier for `ResolvedType.array_fixed`: element type +
+/// compile-time length.
+pub const ArrayFixedInfo = struct { elem: *const ResolvedType, len: u64 };
+/// Map carrier for `ResolvedType.map_t`: key + value types.
+pub const MapInfo = struct { key: *const ResolvedType, value: *const ResolvedType };
 
 /// A closure value's type. `env` indexes `TypeChecker.closure_envs`, or is
 /// `no_env` for a literal typed where no scope exists.
@@ -320,11 +318,11 @@ pub const ResolvedType = union(enum) {
     array_fixed: ArrayFixedInfo,
     /// `T[]` dynamic array / slice. Slicing a fixed or
     /// dynamic array yields this.
-    array_dyn: BuiltinType,
+    array_dyn: *const ResolvedType,
     /// `[K: V]` map.
     map_t: MapInfo,
     /// `Set<T>` set.
-    set_t: BuiltinType,
+    set_t: *const ResolvedType,
     /// A closure value; its return type is inferred at each call.
     closure: ClosureType,
     /// A `struct` value. Payload is the struct type name. A
@@ -343,8 +341,9 @@ pub const ResolvedType = union(enum) {
     /// parameter name. Opaque within a generic body (operations are permissive,
     /// like `unknown`); resolved to a concrete type by inference at the call site.
     generic: StringId,
-    /// `T?`, of any payload. The payload lives in the checker: a builtin one in
-    /// `builtin_payloads`, a type node's in a slot `reserveOptionalSlots` made,
+    /// `T?`, of any payload. A payload — this one, or a collection's element,
+    /// key or value — lives in the checker: a builtin one in
+    /// `builtin_payloads`, a type node's in a slot `reservePayloadSlots` made,
     /// any other in `TypeChecker.payloads`.
     optional: *const ResolvedType,
     /// The current test's World handle — the return type of
@@ -367,10 +366,10 @@ pub const ResolvedType = union(enum) {
             .component => |id| id == b.component,
             .resource => |id| id == b.resource,
             .range => |bt| bt == b.range,
-            .array_fixed => |info| info.elem == b.array_fixed.elem and info.len == b.array_fixed.len,
-            .array_dyn => |elem| elem == b.array_dyn,
-            .map_t => |info| info.key == b.map_t.key and info.value == b.map_t.value,
-            .set_t => |elem| elem == b.set_t,
+            .array_fixed => |info| info.elem.eql(b.array_fixed.elem.*) and info.len == b.array_fixed.len,
+            .array_dyn => |elem| elem.eql(b.array_dyn.*),
+            .map_t => |info| info.key.eql(b.map_t.key.*) and info.value.eql(b.map_t.value.*),
+            .set_t => |elem| elem.eql(b.set_t.*),
             .closure => |c| std.meta.eql(c.literal, b.closure.literal),
             .struct_t => |id| id == b.struct_t,
             .enum_t => |id| id == b.enum_t,
@@ -385,7 +384,7 @@ pub const ResolvedType = union(enum) {
 
     /// The element type produced by indexing or iterating this collection,
     /// or `null` if the type is not an indexable/iterable collection.
-    pub fn elementType(self: ResolvedType) ?BuiltinType {
+    pub fn elementType(self: ResolvedType) ?*const ResolvedType {
         return switch (self) {
             .array_fixed => |info| info.elem,
             .array_dyn => |elem| elem,
@@ -395,8 +394,23 @@ pub const ResolvedType = union(enum) {
     }
 };
 
-/// An optional type node of one arena.
-const OptionalNode = struct { arena: usize, node: u32 };
+/// A payload of a composite type node of one arena: an optional's, a
+/// collection's element, a map's key (`child` 0) or value (`child` 1).
+const PayloadNode = struct { arena: usize, node: u32, child: u1 };
+
+/// The payload nodes of the type node `node` of `a`.
+const PayloadChildren = struct { nodes: [2]NodeId = .{ NodeId.none, NodeId.none }, len: usize = 0 };
+
+fn payloadChildren(a: *const AstArena, node: NodeId) PayloadChildren {
+    const data = a.typeNodeData(node);
+    return switch (a.typeNodeKind(node)) {
+        .optional => .{ .nodes = .{ @bitCast(data), NodeId.none }, .len = 1 },
+        .array, .slice => .{ .nodes = .{ a.array_types.items[data].elem, NodeId.none }, .len = 1 },
+        .set_type => .{ .nodes = .{ a.set_types.items[data].elem, NodeId.none }, .len = 1 },
+        .map_type => .{ .nodes = .{ a.map_types.items[data].key, a.map_types.items[data].value }, .len = 2 },
+        else => .{},
+    };
+}
 
 /// Each builtin as a `ResolvedType`, the payload of an optional of a builtin.
 const builtin_payloads = blk: {
@@ -414,9 +428,14 @@ fn optionalDepth(t: ResolvedType) u8 {
     return depth;
 }
 
+/// The builtin `b` as a payload.
+fn builtinPayload(b: BuiltinType) *const ResolvedType {
+    return &builtin_payloads[@intFromEnum(b)];
+}
+
 /// The optional of the builtin `b`.
 fn optionalOfBuiltin(b: BuiltinType) ResolvedType {
-    return .{ .optional = &builtin_payloads[@intFromEnum(b)] };
+    return .{ .optional = builtinPayload(b) };
 }
 
 /// Symbol entry in the file-local symbol table built by pass 1.
@@ -596,12 +615,12 @@ pub const TypeChecker = struct {
     closure_wraps: std.AutoHashMapUnmanaged(u32, u8) = .empty,
     /// Payloads of the optionals built at check time.
     payloads: std.ArrayListUnmanaged(*ResolvedType) = .empty,
-    /// Each optional type node of the files this check reads → its payloads'
-    /// slots, made by `reserveOptionalSlots` so a type node resolves without
+    /// Each payload of a composite type node of the files this check reads →
+    /// its slots, made by `reservePayloadSlots` so a type node resolves without
     /// allocating; `.unknown` until filled.
-    optional_slots: std.AutoHashMapUnmanaged(OptionalNode, []ResolvedType) = .empty,
-    optional_slot_store: []ResolvedType = &.{},
-    optional_slots_reserved: bool = false,
+    payload_slots: std.AutoHashMapUnmanaged(PayloadNode, []ResolvedType) = .empty,
+    payload_slot_store: []ResolvedType = &.{},
+    payload_slots_reserved: bool = false,
     /// The `await_expr` node that is the statement-head `await` of the statement
     /// currently being checked, or `NodeId.none`. Set at the top of
     /// `checkStmt` for the allowed positions (expr-stmt / `let` init / simple
@@ -852,9 +871,9 @@ pub const TypeChecker = struct {
         self.unresolved_shorthands.deinit(self.gpa);
         for (self.payloads.items) |p| self.gpa.destroy(p);
         self.payloads.deinit(self.gpa);
-        self.optional_slots.deinit(self.gpa);
+        self.payload_slots.deinit(self.gpa);
         self.closure_wraps.deinit(self.gpa);
-        self.gpa.free(self.optional_slot_store);
+        self.gpa.free(self.payload_slot_store);
         if (self.tag_table) |*t| t.deinit(self.gpa);
     }
 
@@ -1021,7 +1040,7 @@ pub const TypeChecker = struct {
 
     /// The passes before the imports bind: the file's own symbols.
     fn collectDeclarations(self: *TypeChecker) !void {
-        try self.reserveOptionalSlots();
+        try self.reservePayloadSlots();
         // E1901 is the FIRST check: it decides whether the file is even
         // allowed to contain what it contains, and a `.d.etch` carrying a
         // `rule` would otherwise produce a cascade of resolution errors on a
@@ -1058,6 +1077,45 @@ pub const TypeChecker = struct {
         try self.validateAnimGraphDecls();
         try self.validateShaderDecls();
         try self.validateSceneDecls();
+        try self.checkCollectionKeysIn(0, @intCast(self.arena.type_nodes.len));
+    }
+
+    /// E0601 on each map type of the type nodes `from..to` whose key, and each
+    /// set type whose element, is no `Hash + Eq` type. A field's own type is
+    /// left to its declaration's gate, and a key a type parameter can name is
+    /// not checked.
+    fn checkCollectionKeysIn(self: *TypeChecker, from: u32, to: u32) TypeError!void {
+        var fields = try std.DynamicBitSetUnmanaged.initEmpty(self.gpa, self.arena.type_nodes.len);
+        defer fields.deinit(self.gpa);
+        for (self.arena.fields.items) |f| {
+            if (!f.type_node.isNone() and f.type_node.category == .type_node) fields.set(f.type_node.index);
+        }
+        var i = from;
+        while (i < to) : (i += 1) {
+            if (fields.isSet(i)) continue;
+            const node: NodeId = .{ .category = .type_node, .index = @intCast(i) };
+            const data = self.arena.typeNodeData(node);
+            switch (self.arena.typeNodeKind(node)) {
+                .map_type => {
+                    const key = self.arena.map_types.items[data].key;
+                    if (self.readsGenericScope(key)) continue;
+                    try self.checkHashBound(self.namedTypeToResolved(key), "map key type", "K: Hash", self.arena.typeNodeSpan(key));
+                },
+                .set_type => {
+                    const elem = self.arena.set_types.items[data].elem;
+                    if (self.readsGenericScope(elem)) continue;
+                    try self.checkHashBound(self.namedTypeToResolved(elem), "set element type", "T: Hash", self.arena.typeNodeSpan(elem));
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// Whether the type node `node` names a type parameter of this file.
+    fn readsGenericScope(self: *TypeChecker, node: NodeId) bool {
+        var names: [8]StringId = undefined;
+        var held: usize = 0;
+        return !self.scopeNamesIn(node, &names, &held) or held != 0;
     }
 
     /// How a file names its components and what its imports bind, as `check`
@@ -1182,6 +1240,7 @@ pub const TypeChecker = struct {
         tc.range_reported.clearRetainingCapacity();
         tc.unresolved_shorthands.clearRetainingCapacity();
         try tc.checkLiteralRangesIn(.{ .indices = .{ .expr_from = run.expr_from, .expr_to = run.expr_to, .type_from = run.type_from, .type_to = run.type_to } });
+        try tc.checkCollectionKeysIn(run.type_from, run.type_to);
         var names: std.AutoHashMapUnmanaged(StringId, void) = .empty;
         defer names.deinit(gpa);
         for (scope) |name| if (arena.strings.find(name)) |id| try names.put(gpa, id, {});
@@ -1527,8 +1586,8 @@ pub const TypeChecker = struct {
     /// A type written in arena `a`, as this file names it. A declaration `a`
     /// names, its own or one it imports, resolves when this file binds the
     /// same name, through an import, to that same declaration, and is unknown
-    /// otherwise; a builtin, a `string` and a collection or optional of a
-    /// builtin resolve anywhere.
+    /// otherwise; a builtin and a `string` resolve anywhere, and a collection or
+    /// an optional when its payloads do.
     fn foreignType(self: *TypeChecker, a: *const AstArena, type_node: NodeId) ResolvedType {
         if (a == self.arena) return self.namedTypeToResolved(type_node);
         switch (a.typeNodeKind(type_node)) {
@@ -1553,17 +1612,20 @@ pub const TypeChecker = struct {
             },
             .slice => {
                 const elem = self.foreignType(a, a.array_types.items[a.typeNodeData(type_node)].elem);
-                return if (elem == .builtin) .{ .array_dyn = elem.builtin } else .unknown;
+                if (elem == .unknown) return .unknown;
+                return .{ .array_dyn = self.internedPayload(a, type_node, 0, elem) };
             },
             .set_type => {
                 const elem = self.foreignType(a, a.set_types.items[a.typeNodeData(type_node)].elem);
-                return if (elem == .builtin) .{ .set_t = elem.builtin } else .unknown;
+                if (elem == .unknown) return .unknown;
+                return .{ .set_t = self.internedPayload(a, type_node, 0, elem) };
             },
             .map_type => {
                 const mt = a.map_types.items[a.typeNodeData(type_node)];
                 const k = self.foreignType(a, mt.key);
                 const v = self.foreignType(a, mt.value);
-                return if (k == .builtin and v == .builtin) .{ .map_t = .{ .key = k.builtin, .value = v.builtin } } else .unknown;
+                if (k == .unknown or v == .unknown) return .unknown;
+                return .{ .map_t = .{ .key = self.internedPayload(a, type_node, 0, k), .value = self.internedPayload(a, type_node, 1, v) } };
             },
             .optional => return self.internedOptional(a, type_node, self.foreignType(a, @bitCast(a.typeNodeData(type_node)))),
             else => return .unknown,
@@ -4751,7 +4813,7 @@ pub const TypeChecker = struct {
                             const st = self.arena.set_types.items[self.arena.typeNodeData(field.type_node)];
                             const elem = try self.checkResourceCollectionElement(st.elem);
                             if (elem) |e| {
-                                if (e == .builtin) try self.checkHashBound(e.builtin, "set element type", "T: Hash", self.arena.typeNodeSpan(st.elem));
+                                if (e == .builtin) try self.checkHashBound(.{ .builtin = e.builtin }, "set element type", "T: Hash", self.arena.typeNodeSpan(st.elem));
                                 if (!default.isNone()) try self.checkSetDefault(default);
                             }
                             continue;
@@ -4761,7 +4823,7 @@ pub const TypeChecker = struct {
                             const key = try self.checkResourceCollectionElement(mt.key);
                             const value = try self.checkResourceCollectionElement(mt.value);
                             if (key) |k| {
-                                if (k == .builtin) try self.checkHashBound(k.builtin, "map key type", "K: Hash", self.arena.typeNodeSpan(mt.key));
+                                if (k == .builtin) try self.checkHashBound(.{ .builtin = k.builtin }, "map key type", "K: Hash", self.arena.typeNodeSpan(mt.key));
                             }
                             if (key != null and value != null and !default.isNone()) try self.checkMapDefault(default, key.?, value.?);
                             continue;
@@ -5029,21 +5091,22 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// A collection literal against the element types a `let` annotation
-    /// declares. The literal's own type follows its first element, so a numeric
-    /// literal element is judged against the declared type directly, and any
-    /// other element carries the literal's type.
+    /// A collection literal against the builtin element types a `let`
+    /// annotation declares; any other element type is left to `valueFits`. The
+    /// literal's own type follows its elements, so a numeric literal element is
+    /// judged against the declared type directly, and any other element
+    /// carries the literal's type.
     fn checkCollectionLitAgainst(self: *TypeChecker, value: NodeId, declared: ResolvedType, inferred: ResolvedType) !void {
         switch (self.arena.exprKind(value)) {
             .array_lit => {
                 const elem: BuiltinType = switch (declared) {
-                    .array_dyn => |e| e,
-                    .array_fixed => |info| info.elem,
+                    .array_dyn => |e| if (e.* == .builtin) e.builtin else return,
+                    .array_fixed => |info| if (info.elem.* == .builtin) info.elem.builtin else return,
                     else => return,
                 };
                 const lit_elem: ?BuiltinType = switch (inferred) {
-                    .array_dyn => |e| e,
-                    .array_fixed => |info| info.elem,
+                    .array_dyn => |e| builtinOrNull(e),
+                    .array_fixed => |info| builtinOrNull(info.elem),
                     else => null,
                 };
                 const al = self.arena.array_lits.items[self.arena.exprData(value)];
@@ -5053,18 +5116,22 @@ pub const TypeChecker = struct {
                 }
             },
             .map_lit => {
-                if (declared != .map_t) return;
+                if (declared != .map_t or declared.map_t.key.* != .builtin or declared.map_t.value.* != .builtin) return;
                 const lit: ?MapInfo = if (inferred == .map_t) inferred.map_t else null;
                 const ml = self.arena.map_lits.items[self.arena.exprData(value)];
                 var i: u32 = 0;
                 while (i < ml.entries_len) : (i += 1) {
                     const entry = self.arena.map_entries.items[ml.entries_start + i];
-                    try self.checkElementAgainst(declared.map_t.key, entry.key, if (lit) |m| m.key else null);
-                    try self.checkElementAgainst(declared.map_t.value, entry.value, if (lit) |m| m.value else null);
+                    try self.checkElementAgainst(declared.map_t.key.builtin, entry.key, if (lit) |m| builtinOrNull(m.key) else null);
+                    try self.checkElementAgainst(declared.map_t.value.builtin, entry.value, if (lit) |m| builtinOrNull(m.value) else null);
                 }
             },
             else => {},
         }
+    }
+
+    fn builtinOrNull(t: *const ResolvedType) ?BuiltinType {
+        return if (t.* == .builtin) t.builtin else null;
     }
 
     fn checkElementAgainst(self: *TypeChecker, declared: BuiltinType, e: NodeId, lit_type: ?BuiltinType) !void {
@@ -5245,7 +5312,7 @@ pub const TypeChecker = struct {
             return self.literalTypeFits(declared.builtin, value, actual.builtin);
         }
         if (declared == .builtin and declared.builtin == .vec3 and actual == .array_fixed)
-            return actual.array_fixed.len == 3 and actual.array_fixed.elem.isNumeric();
+            return actual.array_fixed.len == 3 and actual.array_fixed.elem.* == .builtin and actual.array_fixed.elem.builtin.isNumeric();
         if ((declared == .builtin) != (actual == .builtin)) return false;
         if (std.meta.activeTag(declared) != std.meta.activeTag(actual) and !(isArray(declared) and isArray(actual))) return false;
         if (isNominal(declared)) return self.sameDeclaration(declared, actual);
@@ -5277,18 +5344,18 @@ pub const TypeChecker = struct {
                 const want = arrayElem(declared);
                 const have = arrayElem(actual);
                 if (declared == .array_fixed and actual == .array_fixed and declared.array_fixed.len != actual.array_fixed.len) return false;
-                if (kind == .array_lit) return self.runFits(want, self.arena.array_lits.items[self.arena.exprData(value)], have);
-                return want == have;
+                if (kind == .array_lit) return self.runFits(want.*, self.arena.array_lits.items[self.arena.exprData(value)], have.*);
+                return self.sameElement(want.*, have.*);
             },
             .set_t => |want| {
                 if (kind == .method_call) {
                     const mc = self.arena.method_calls.items[self.arena.exprData(value)];
                     if (mc.args_len == 1) {
                         const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
-                        if (self.arena.exprKind(arg) == .array_lit) return self.runFits(want, self.arena.array_lits.items[self.arena.exprData(arg)], actual.set_t);
+                        if (self.arena.exprKind(arg) == .array_lit) return self.runFits(want.*, self.arena.array_lits.items[self.arena.exprData(arg)], actual.set_t.*);
                     }
                 }
-                return want == actual.set_t;
+                return self.sameElement(want.*, actual.set_t.*);
             },
             .map_t => |want| {
                 if (kind == .map_lit) {
@@ -5296,12 +5363,12 @@ pub const TypeChecker = struct {
                     var i: u32 = 0;
                     while (i < ml.entries_len) : (i += 1) {
                         const entry = self.arena.map_entries.items[ml.entries_start + i];
-                        if (!try self.elementFits(want.key, entry.key, actual.map_t.key)) return false;
-                        if (!try self.elementFits(want.value, entry.value, actual.map_t.value)) return false;
+                        if (!try self.elementFits(want.key.*, entry.key, actual.map_t.key.*)) return false;
+                        if (!try self.elementFits(want.value.*, entry.value, actual.map_t.value.*)) return false;
                     }
                     return true;
                 }
-                return want.key == actual.map_t.key and want.value == actual.map_t.value;
+                return try self.sameElement(want.key.*, actual.map_t.key.*) and try self.sameElement(want.value.*, actual.map_t.value.*);
             },
             .optional => |want| {
                 if (kind == .some_lit) return self.valueFits(want.*, @bitCast(self.arena.exprData(value)), actual.optional.*);
@@ -5312,7 +5379,13 @@ pub const TypeChecker = struct {
         }
     }
 
-    fn arrayElem(t: ResolvedType) BuiltinType {
+    /// Whether a collection whose elements are `have` is one whose elements are
+    /// `want`: an element takes no conversion.
+    fn sameElement(self: *TypeChecker, want: ResolvedType, have: ResolvedType) TypeError!bool {
+        return self.valueCompares(want, NodeId.none, have);
+    }
+
+    fn arrayElem(t: ResolvedType) *const ResolvedType {
         return switch (t) {
             .array_fixed => |info| info.elem,
             .array_dyn => |elem| elem,
@@ -5320,7 +5393,7 @@ pub const TypeChecker = struct {
         };
     }
 
-    fn runFits(self: *TypeChecker, want: BuiltinType, al: ast_mod.ArrayLitExpr, have: BuiltinType) !bool {
+    fn runFits(self: *TypeChecker, want: ResolvedType, al: ast_mod.ArrayLitExpr, have: ResolvedType) !bool {
         var i: u32 = 0;
         while (i < al.elements_len) : (i += 1) {
             if (!try self.elementFits(want, @bitCast(self.arena.extra.items[al.elements_start + i]), have)) return false;
@@ -5330,16 +5403,19 @@ pub const TypeChecker = struct {
 
     /// One element of a collection literal: a numeric literal by the literal
     /// rule, anything else by the literal's own element type.
-    fn elementFits(self: *TypeChecker, want: BuiltinType, e: NodeId, have: BuiltinType) !bool {
-        var lit = e;
-        if (self.arena.exprKind(lit) == .unary and self.arena.unary_exprs.items[self.arena.exprData(lit)].op == .neg) {
-            lit = self.arena.unary_exprs.items[self.arena.exprData(lit)].operand;
+    fn elementFits(self: *TypeChecker, want: ResolvedType, e: NodeId, have: ResolvedType) TypeError!bool {
+        if (want == .builtin) {
+            var lit = e;
+            if (self.arena.exprKind(lit) == .unary and self.arena.unary_exprs.items[self.arena.exprData(lit)].op == .neg) {
+                lit = self.arena.unary_exprs.items[self.arena.exprData(lit)].operand;
+            }
+            switch (self.arena.exprKind(lit)) {
+                .int_lit => return self.literalTypeFits(want.builtin, e, .int_),
+                .float_lit => return self.literalTypeFits(want.builtin, e, .float_),
+                else => {},
+            }
         }
-        return switch (self.arena.exprKind(lit)) {
-            .int_lit => self.literalTypeFits(want, e, .int_),
-            .float_lit => self.literalTypeFits(want, e, .float_),
-            else => want == have,
-        };
+        return self.valueFits(want, e, have);
     }
 
     fn isArray(t: ResolvedType) bool {
@@ -5440,8 +5516,9 @@ pub const TypeChecker = struct {
     }
 
     /// The type `branches` join to (`etch-reference-part1.md` §3.6): the first
-    /// value's, the optional of it that a later value is, and the optional of
-    /// it when a branch yields `none`.
+    /// value's, the optional of it that a later value is, the dynamic array two
+    /// arrays of one element and two lengths are, and the optional of it when a
+    /// branch yields `none`.
     fn joinBranches(self: *TypeChecker, branches: []const Branch) TypeError!ResolvedType {
         var join: ?ResolvedType = null;
         var none = false;
@@ -5449,7 +5526,11 @@ pub const TypeChecker = struct {
             if (self.yieldsNone(b.node)) {
                 none = true;
             } else if (join) |j| {
-                if (optionalDepth(b.t) > optionalDepth(j) and try self.valueFits(b.t, NodeId.none, j)) join = b.t;
+                if (optionalDepth(b.t) > optionalDepth(j) and try self.valueFits(b.t, NodeId.none, j)) {
+                    join = b.t;
+                } else if (isArray(j) and isArray(b.t) and !j.eql(b.t) and arrayElem(j).eql(arrayElem(b.t).*)) {
+                    join = .{ .array_dyn = arrayElem(j) };
+                }
             } else join = b.t;
         }
         const t = join orelse return ResolvedType.unknown;
@@ -5519,8 +5600,8 @@ pub const TypeChecker = struct {
     /// Resolve a type node to a `ResolvedType`. Despite the historical name it
     /// dispatches on the node kind: `.named` resolves through the alias chain
     /// to a builtin / component / resource; the collection kinds (`.array` /
-    /// `.slice` / `.map_type` / `.set_type`) resolve their element /
-    /// key / value to a builtin.
+    /// `.slice` / `.map_type` / `.set_type`) resolve their element / key /
+    /// value, an unknown one leaving the collection unknown.
     fn namedTypeToResolved(self: *TypeChecker, type_node: NodeId) ResolvedType {
         switch (self.arena.typeNodeKind(type_node)) {
             .named => {
@@ -5592,28 +5673,28 @@ pub const TypeChecker = struct {
             .array => {
                 const at = self.arena.array_types.items[self.arena.typeNodeData(type_node)];
                 const elem = self.namedTypeToResolved(at.elem);
-                if (elem != .builtin) return .unknown;
+                if (elem == .unknown) return .unknown;
                 const len = self.constArrayLen(at.size) orelse return .unknown;
-                return .{ .array_fixed = .{ .elem = elem.builtin, .len = len } };
+                return .{ .array_fixed = .{ .elem = self.internedPayload(self.arena, type_node, 0, elem), .len = len } };
             },
             .slice => {
                 const at = self.arena.array_types.items[self.arena.typeNodeData(type_node)];
                 const elem = self.namedTypeToResolved(at.elem);
-                if (elem != .builtin) return .unknown;
-                return .{ .array_dyn = elem.builtin };
+                if (elem == .unknown) return .unknown;
+                return .{ .array_dyn = self.internedPayload(self.arena, type_node, 0, elem) };
             },
             .map_type => {
                 const mt = self.arena.map_types.items[self.arena.typeNodeData(type_node)];
                 const k = self.namedTypeToResolved(mt.key);
                 const v = self.namedTypeToResolved(mt.value);
-                if (k != .builtin or v != .builtin) return .unknown;
-                return .{ .map_t = .{ .key = k.builtin, .value = v.builtin } };
+                if (k == .unknown or v == .unknown) return .unknown;
+                return .{ .map_t = .{ .key = self.internedPayload(self.arena, type_node, 0, k), .value = self.internedPayload(self.arena, type_node, 1, v) } };
             },
             .set_type => {
                 const st = self.arena.set_types.items[self.arena.typeNodeData(type_node)];
                 const elem = self.namedTypeToResolved(st.elem);
-                if (elem != .builtin) return .unknown;
-                return .{ .set_t = elem.builtin };
+                if (elem == .unknown) return .unknown;
+                return .{ .set_t = self.internedPayload(self.arena, type_node, 0, elem) };
             },
             .optional => return self.internedOptional(self.arena, type_node, self.namedTypeToResolved(@bitCast(self.arena.typeNodeData(type_node)))),
             else => return .unknown,
@@ -5670,9 +5751,13 @@ pub const TypeChecker = struct {
     /// bare integer literal (`int[8]`); a more general const expression is a
     /// later refinement, so anything else returns `null` (→ `unknown` type).
     fn constArrayLen(self: *TypeChecker, size_node: NodeId) ?u64 {
+        return constArrayLenIn(self.arena, size_node);
+    }
+
+    fn constArrayLenIn(a: *const AstArena, size_node: NodeId) ?u64 {
         if (size_node.isNone()) return null;
-        if (self.arena.exprKind(size_node) != .int_lit) return null;
-        return const_eval.intLiteralMagnitude(self.arena.strings.slice(self.arena.exprData(size_node)));
+        if (a.exprKind(size_node) != .int_lit) return null;
+        return const_eval.intLiteralMagnitude(a.strings.slice(a.exprData(size_node)));
     }
 
     // ─── Pass 2 ──────────────────────────────────────────────────────────
@@ -6670,15 +6755,7 @@ pub const TypeChecker = struct {
             .let_stmt => {
                 const let = self.arena.let_stmts.items[data];
                 var declared: ?ResolvedType = null;
-                if (!let.type_annotation.isNone()) {
-                    declared = self.namedTypeToResolved(let.type_annotation);
-                    // The literal/constructor and annotation paths are the
-                    // only two gates through which a `map_t` / `set_t` enters
-                    // the program (fields and params reject composite types)
-                    // — the Hash bound is checked at both.
-                    if (declared.? == .map_t) try self.checkHashBound(declared.?.map_t.key, "map key type", "K: Hash", self.arena.typeNodeSpan(let.type_annotation));
-                    if (declared.? == .set_t) try self.checkHashBound(declared.?.set_t, "set element type", "T: Hash", self.arena.typeNodeSpan(let.type_annotation));
-                }
+                if (!let.type_annotation.isNone()) declared = self.namedTypeToResolved(let.type_annotation);
                 // Anonymous `.{ … }` initializer against a struct annotation: check
                 // mode — the annotation is the expected type (resolver-types §4), the
                 // same propagation as the field-value position.
@@ -6800,9 +6877,9 @@ pub const TypeChecker = struct {
                     if (f.index_name == 0) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "map for-in binds two variables (for k, v in m)", .{});
                     } else {
-                        try self.bindLocal(ctx, f.index_name, .{ .type_ = .{ .builtin = mi.value }, .is_mut = false }, stmt_span);
+                        try self.bindLocal(ctx, f.index_name, .{ .type_ = mi.value.*, .is_mut = false }, stmt_span);
                     }
-                    try self.bindLocal(ctx, f.var_name, .{ .type_ = .{ .builtin = mi.key }, .is_mut = false }, stmt_span);
+                    try self.bindLocal(ctx, f.var_name, .{ .type_ = mi.key.*, .is_mut = false }, stmt_span);
                 } else {
                     var elem_t: ResolvedType = ResolvedType.unknown;
                     if (iter_t == .range) {
@@ -6814,9 +6891,9 @@ pub const TypeChecker = struct {
                         // out-of-subset policy. Must precede `elementType`,
                         // which would otherwise bind the element.
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "set for-in is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{});
-                    } else if (iter_t.elementType()) |bt| {
+                    } else if (iter_t.elementType()) |e| {
                         // Array / slice iteration binds the element type.
-                        elem_t = .{ .builtin = bt };
+                        elem_t = e.*;
                     } else if (iter_t != .unknown) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "for-in iterable must be a range, array, or map in E1", .{});
                     }
@@ -7796,7 +7873,7 @@ pub const TypeChecker = struct {
                 }
                 return target_t;
             },
-            .array_lit => return try self.synthArrayLit(id, data, ctx_opt),
+            .array_lit => return try self.synthArrayLit(data, ctx_opt),
             .map_lit => return try self.synthMapLit(id, data, ctx_opt),
             .index => return try self.synthIndex(id, data, ctx_opt),
             .closure => {
@@ -7910,11 +7987,10 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Type an array literal. `[a, b, c]` (and `[v; n]`)
-    /// without an annotation infers a **fixed** array of the unified builtin
-    /// element type; an empty `[]` stays `unknown` so the `let`'s annotation
-    /// supplies the type. Arrays carry builtin primitive elements only.
-    fn synthArrayLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    /// Type an array literal. `[a, b, c]` (and `[v; n]`) without an annotation
+    /// infers a **fixed** array of the type its elements join to; an empty `[]`
+    /// stays `unknown` so the `let`'s annotation supplies the type.
+    fn synthArrayLit(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const al = self.arena.array_lits.items[data];
         if (al.is_fill) {
             const elem_id: NodeId = @bitCast(self.arena.extra.items[al.elements_start]);
@@ -7923,83 +7999,79 @@ pub const TypeChecker = struct {
             if (count_t == .builtin and !count_t.builtin.isInteger()) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(al.fill_count), "array fill count must be an integer", .{});
             }
-            if (elem_t != .builtin) {
-                if (elem_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array elements must be a builtin primitive in E1", .{});
-                return ResolvedType.unknown;
-            }
+            if (elem_t == .unknown) return ResolvedType.unknown;
             const len = self.constArrayLen(al.fill_count) orelse {
                 try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(al.fill_count), "array fill count must be a non-negative integer literal", .{});
                 return ResolvedType.unknown;
             };
-            return .{ .array_fixed = .{ .elem = elem_t.builtin, .len = len } };
+            return .{ .array_fixed = .{ .elem = try self.payloadOf(elem_t), .len = len } };
         }
         if (al.elements_len == 0) return ResolvedType.unknown; // empty: type from annotation
-        var elem_bt: ?BuiltinType = null;
+        var elements: std.ArrayListUnmanaged(Branch) = .empty;
+        defer elements.deinit(self.gpa);
         var i: u32 = 0;
         while (i < al.elements_len) : (i += 1) {
             const e: NodeId = @bitCast(self.arena.extra.items[al.elements_start + i]);
-            const et = try self.synthExprE(e, ctx_opt);
-            if (et != .builtin) {
-                if (et != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(e), "array elements must be a builtin primitive in E1", .{});
-                return ResolvedType.unknown;
-            }
-            if (elem_bt) |bt| {
-                if (!try self.literalTypeFits(bt, e, et.builtin)) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(e), "array elements must all have the same type", .{});
-                }
-            } else elem_bt = et.builtin;
+            try elements.append(self.gpa, .{ .node = e, .t = try self.synthExprE(e, ctx_opt), .span = self.arena.exprSpan(e) });
         }
-        return .{ .array_fixed = .{ .elem = elem_bt.?, .len = al.elements_len } };
+        const elem_t = try self.joinBranches(elements.items);
+        for (elements.items) |e| {
+            if (!try self.branchFits(elem_t, e, false)) try self.emit(.type_mismatch, .error_, e.span, "array elements must all have the same type", .{});
+        }
+        if (elem_t == .unknown) return ResolvedType.unknown;
+        return .{ .array_fixed = .{ .elem = try self.payloadOf(elem_t), .len = al.elements_len } };
     }
 
-    /// Type a map literal. `[k: v, ...]` infers a map whose key / value are the unified
-    /// builtin types of the entries. Maps carry builtin key / value types — a
-    /// non-builtin (e.g. a `string` key, which is not a builtin) leaves the literal
-    /// `unknown` (the interpreter still builds it from the runtime values; precise
-    /// string-keyed map typing is a later refinement). Empty `[:]` stays `unknown` so
-    /// the annotation types it. stdlib §14 / §15 pin `K: Hash + Eq` on map keys and
-    /// `T: Hash + Eq` on set elements, and the builtin Hash set excludes float/f32/f64
-    /// (NaN != NaN, hash undefined — stdlib §4.3): a float map key or set element is an
-    /// invalid program, rejected at the resolver so NEITHER backend ever sees one
-    /// (E0601 BoundNotSatisfied). Generalized from the optional-op
-    /// `checkMapKeyHashable` for the Set vertical — same code, same
-    /// wording family, `what`/`bound` carry the per-collection nouns.
-    fn checkHashBound(self: *TypeChecker, t: BuiltinType, comptime what: []const u8, comptime bound: []const u8, span: SourceSpan) !void {
-        if (t.isFloat()) {
+    /// E0601 unless `t` can key a map or be a set element: `Hash + Eq`
+    /// (`etch-stdlib.md` §4.3, §14, §15) — a builtin other than a float or a
+    /// handle, an enum, or an optional of such a type. A type parameter is not
+    /// checked.
+    fn checkHashBound(self: *TypeChecker, t: ResolvedType, comptime what: []const u8, comptime bound: []const u8, span: SourceSpan) !void {
+        if (isKeyType(t)) return;
+        if (t == .builtin and t.builtin.isFloat()) {
             try self.emit(.bound_not_satisfied, .error_, span, what ++ " does not satisfy the '" ++ bound ++ "' bound (float/f32/f64 are not hashable); wrap the float in a struct with a custom Hash", .{});
+        } else {
+            try self.emit(.bound_not_satisfied, .error_, span, what ++ " does not satisfy the '" ++ bound ++ "' bound", .{});
         }
     }
 
+    fn isKeyType(t: ResolvedType) bool {
+        return switch (t) {
+            .unknown, .generic, .enum_t => true,
+            .builtin => |b| b.isEq() and !b.isFloat(),
+            .optional => |p| isKeyType(p.*),
+            else => false,
+        };
+    }
+
+    /// Type a map literal. `[k: v, ...]` infers a map of the types its keys and
+    /// its values join to; an empty `[:]` stays `unknown` so the annotation
+    /// types it.
     fn synthMapLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         _ = id;
         const ml = self.arena.map_lits.items[data];
         if (ml.entries_len == 0) return ResolvedType.unknown; // empty: type from annotation
-        var key_bt: ?BuiltinType = null;
-        var val_bt: ?BuiltinType = null;
-        var all_builtin = true;
+        var keys: std.ArrayListUnmanaged(Branch) = .empty;
+        defer keys.deinit(self.gpa);
+        var values: std.ArrayListUnmanaged(Branch) = .empty;
+        defer values.deinit(self.gpa);
         var i: u32 = 0;
         while (i < ml.entries_len) : (i += 1) {
             const entry = self.arena.map_entries.items[ml.entries_start + i];
-            const kt = try self.synthExprE(entry.key, ctx_opt);
-            const vt = try self.synthExprE(entry.value, ctx_opt);
-            if (kt != .builtin or vt != .builtin) {
-                if (kt != .builtin and kt != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.key), "map keys must be a builtin primitive in E1", .{});
-                if (vt != .builtin and vt != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.value), "map values must be a builtin primitive in E1", .{});
-                all_builtin = false;
-                continue;
-            }
-            if (key_bt) |kb| {
-                if (!try self.literalTypeFits(kb, entry.key, kt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.key), "map keys must all have the same type", .{});
-            } else {
-                key_bt = kt.builtin;
-                try self.checkHashBound(kt.builtin, "map key type", "K: Hash", self.arena.exprSpan(entry.key));
-            }
-            if (val_bt) |vb| {
-                if (!try self.literalTypeFits(vb, entry.value, vt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.value), "map values must all have the same type", .{});
-            } else val_bt = vt.builtin;
+            try keys.append(self.gpa, .{ .node = entry.key, .t = try self.synthExprE(entry.key, ctx_opt), .span = self.arena.exprSpan(entry.key) });
+            try values.append(self.gpa, .{ .node = entry.value, .t = try self.synthExprE(entry.value, ctx_opt), .span = self.arena.exprSpan(entry.value) });
         }
-        if (!all_builtin or key_bt == null or val_bt == null) return ResolvedType.unknown;
-        return .{ .map_t = .{ .key = key_bt.?, .value = val_bt.? } };
+        const key_t = try self.joinBranches(keys.items);
+        const value_t = try self.joinBranches(values.items);
+        for (keys.items) |k| {
+            if (!try self.branchFits(key_t, k, false)) try self.emit(.type_mismatch, .error_, k.span, "map keys must all have the same type", .{});
+        }
+        for (values.items) |v| {
+            if (!try self.branchFits(value_t, v, false)) try self.emit(.type_mismatch, .error_, v.span, "map values must all have the same type", .{});
+        }
+        if (key_t == .unknown or value_t == .unknown) return ResolvedType.unknown;
+        try self.checkHashBound(key_t, "map key type", "K: Hash", keys.items[0].span);
+        return .{ .map_t = .{ .key = try self.payloadOf(key_t), .value = try self.payloadOf(value_t) } };
     }
 
     /// The loop's value is the type of the first value breaking out of it,
@@ -8604,11 +8676,17 @@ pub const TypeChecker = struct {
             .array, .slice => {
                 const at = f.arena.array_types.items[f.arena.typeNodeData(formal)];
                 const elem: ?ResolvedType = switch (actual) {
-                    .array_fixed => |info| .{ .builtin = info.elem },
-                    .array_dyn => |e| .{ .builtin = e },
+                    .array_fixed => |info| info.elem.*,
+                    .array_dyn => |e| e.*,
                     else => null,
                 };
                 if (elem) |ea| try self.unifyGeneric(f, at.elem, ea, subst, span);
+            },
+            .set_type => if (actual == .set_t) try self.unifyGeneric(f, f.arena.set_types.items[f.arena.typeNodeData(formal)].elem, actual.set_t.*, subst, span),
+            .map_type => if (actual == .map_t) {
+                const mt = f.arena.map_types.items[f.arena.typeNodeData(formal)];
+                try self.unifyGeneric(f, mt.key, actual.map_t.key.*, subst, span);
+                try self.unifyGeneric(f, mt.value, actual.map_t.value.*, subst, span);
             },
             // A `T` argument fits a `T?` formal by the implicit wrap
             // (`etch-reference-part1.md` §3.6).
@@ -8616,14 +8694,14 @@ pub const TypeChecker = struct {
                 const payload: NodeId = @bitCast(f.arena.typeNodeData(formal));
                 try self.unifyGeneric(f, payload, if (actual == .optional) actual.optional.* else actual, subst, span);
             },
-            else => {}, // generic_type / map / set — not inferred
+            else => {}, // generic_type — not inferred
         }
     }
 
     /// Apply the inferred substitution to a declared return type-node. A bare
     /// param `T` → its inferred type (or `.generic` if still
-    /// unbound); `T[]` → a dynamic array of the substituted element; otherwise
-    /// the ordinary resolution.
+    /// unbound); a collection or an optional → the same of its substituted
+    /// payloads; otherwise the ordinary resolution.
     fn substituteGeneric(self: *TypeChecker, f: FnRef, node: NodeId, subst: *const std.AutoHashMapUnmanaged(StringId, ResolvedType)) TypeError!ResolvedType {
         switch (f.arena.typeNodeKind(node)) {
             .named => {
@@ -8633,11 +8711,25 @@ pub const TypeChecker = struct {
                 }
                 return self.typeIn(f.arena, node);
             },
-            .slice => {
+            .array, .slice => {
                 const at = f.arena.array_types.items[f.arena.typeNodeData(node)];
                 const e = try self.substituteGeneric(f, at.elem, subst);
-                if (e == .builtin) return .{ .array_dyn = e.builtin };
-                return ResolvedType.unknown;
+                if (e == .unknown) return ResolvedType.unknown;
+                if (f.arena.typeNodeKind(node) == .slice) return .{ .array_dyn = try self.payloadOf(e) };
+                const len = constArrayLenIn(f.arena, at.size) orelse return ResolvedType.unknown;
+                return .{ .array_fixed = .{ .elem = try self.payloadOf(e), .len = len } };
+            },
+            .set_type => {
+                const e = try self.substituteGeneric(f, f.arena.set_types.items[f.arena.typeNodeData(node)].elem, subst);
+                if (e == .unknown) return ResolvedType.unknown;
+                return .{ .set_t = try self.payloadOf(e) };
+            },
+            .map_type => {
+                const mt = f.arena.map_types.items[f.arena.typeNodeData(node)];
+                const k = try self.substituteGeneric(f, mt.key, subst);
+                const v = try self.substituteGeneric(f, mt.value, subst);
+                if (k == .unknown or v == .unknown) return ResolvedType.unknown;
+                return .{ .map_t = .{ .key = try self.payloadOf(k), .value = try self.payloadOf(v) } };
             },
             .optional => return self.optionalOf(try self.substituteGeneric(f, @bitCast(f.arena.typeNodeData(node)), subst)),
             else => return self.typeIn(f.arena, node),
@@ -8704,11 +8796,11 @@ pub const TypeChecker = struct {
         return ResolvedType.unknown;
     }
 
-    /// The slots of every optional type node of this file and of every project
-    /// file, the arenas `typeIn` can read a type node from: one per payload the
-    /// node can resolve to.
-    fn reserveOptionalSlots(self: *TypeChecker) !void {
-        if (self.optional_slots_reserved) return;
+    /// The slots of every payload of a composite type node of this file and of
+    /// every project file, the arenas `typeIn` can read a type node from: one
+    /// per type the payload can resolve to.
+    fn reservePayloadSlots(self: *TypeChecker) !void {
+        if (self.payload_slots_reserved) return;
         var arenas: std.ArrayListUnmanaged(*const AstArena) = .empty;
         defer arenas.deinit(self.gpa);
         try arenas.append(self.gpa, self.arena);
@@ -8717,44 +8809,48 @@ pub const TypeChecker = struct {
                 if (a != self.arena) try arenas.append(self.gpa, a);
             }
         }
-        var nodes: usize = 0;
+        var keys: usize = 0;
         var count: usize = 0;
         for (arenas.items) |a| {
-            for (a.type_nodes.items(.kind), 0..) |k, i| {
-                if (k != .optional) continue;
-                nodes += 1;
-                count += self.optionalPayloadCount(a, .{ .category = .type_node, .index = @intCast(i) });
+            for (0..a.type_nodes.len) |i| {
+                const children = payloadChildren(a, .{ .category = .type_node, .index = @intCast(i) });
+                for (children.nodes[0..children.len]) |c| {
+                    keys += 1;
+                    count += self.payloadCount(a, c);
+                }
             }
         }
         const store = try self.gpa.alloc(ResolvedType, count);
         errdefer self.gpa.free(store);
         @memset(store, .unknown);
-        try self.optional_slots.ensureTotalCapacity(self.gpa, @intCast(nodes));
+        try self.payload_slots.ensureTotalCapacity(self.gpa, @intCast(keys));
         var next: usize = 0;
         for (arenas.items) |a| {
-            for (a.type_nodes.items(.kind), 0..) |k, i| {
-                if (k != .optional) continue;
+            for (0..a.type_nodes.len) |i| {
                 const node: NodeId = .{ .category = .type_node, .index = @intCast(i) };
-                const n = self.optionalPayloadCount(a, node);
-                self.optional_slots.putAssumeCapacity(.{ .arena = @intFromPtr(a), .node = node.index }, store[next .. next + n]);
-                next += n;
+                const children = payloadChildren(a, node);
+                for (children.nodes[0..children.len], 0..) |c, child| {
+                    const n = self.payloadCount(a, c);
+                    self.payload_slots.putAssumeCapacity(.{ .arena = @intFromPtr(a), .node = node.index, .child = @intCast(child) }, store[next .. next + n]);
+                    next += n;
+                }
             }
         }
-        self.optional_slot_store = store;
-        self.optional_slots_reserved = true;
+        self.payload_slot_store = store;
+        self.payload_slots_reserved = true;
     }
 
-    /// How many payloads the optional type node `node` of `a` can resolve to. A
-    /// generic scope changes it only through the names it holds that are type
-    /// parameters of this file: at most one payload per subset of those, and at
+    /// How many types the payload node `node` of `a` can resolve to. A generic
+    /// scope changes it only through the names it holds that are type
+    /// parameters of this file: at most one type per subset of those, and at
     /// most one per scope this file can open — each holds a parameter — plus
     /// the empty scope. `foreignType` reads no scope.
-    fn optionalPayloadCount(self: *TypeChecker, a: *const AstArena, node: NodeId) usize {
+    fn payloadCount(self: *TypeChecker, a: *const AstArena, node: NodeId) usize {
         if (a != self.arena) return 1;
         const scopes = self.arena.generic_params.items.len + 1;
         var names: [8]StringId = undefined;
         var held: usize = 0;
-        if (!self.scopeNamesIn(@bitCast(a.typeNodeData(node)), &names, &held)) return scopes;
+        if (!self.scopeNamesIn(node, &names, &held)) return scopes;
         return @min(@as(usize, 1) << @intCast(held), scopes);
     }
 
@@ -8762,15 +8858,16 @@ pub const TypeChecker = struct {
     /// reads from a generic scope; false when they do not fit.
     fn scopeNamesIn(self: *TypeChecker, node: NodeId, names: []StringId, held: *usize) bool {
         const a = self.arena;
-        const data = a.typeNodeData(node);
         const name: StringId = switch (a.typeNodeKind(node)) {
             .named => a.namedTypeName(node).?,
-            .generic => a.generic_type_nodes.items[data].name,
-            .array, .slice => return self.scopeNamesIn(a.array_types.items[data].elem, names, held),
-            .map_type => return self.scopeNamesIn(a.map_types.items[data].key, names, held) and self.scopeNamesIn(a.map_types.items[data].value, names, held),
-            .set_type => return self.scopeNamesIn(a.set_types.items[data].elem, names, held),
-            .optional => return self.scopeNamesIn(@bitCast(data), names, held),
-            else => return true,
+            .generic => a.generic_type_nodes.items[a.typeNodeData(node)].name,
+            else => {
+                const children = payloadChildren(a, node);
+                for (children.nodes[0..children.len]) |c| {
+                    if (!self.scopeNamesIn(c, names, held)) return false;
+                }
+                return true;
+            },
         };
         for (a.generic_params.items) |p| {
             if (p.name != name) continue;
@@ -8785,29 +8882,41 @@ pub const TypeChecker = struct {
         return true;
     }
 
-    /// The optional of `payload` resolved from the type node `node` of `a`, in
-    /// the node's slot holding that payload, else its first free one, so no
-    /// allocation.
-    fn internedOptional(self: *TypeChecker, a: *const AstArena, node: NodeId, payload: ResolvedType) ResolvedType {
-        if (payload == .unknown) return .unknown;
-        if (payload == .builtin) return optionalOfBuiltin(payload.builtin);
-        const slots = self.optional_slots.get(.{ .arena = @intFromPtr(a), .node = node.index }) orelse unreachable;
+    /// `payload`, the type the payload `child` of the type node `node` of `a`
+    /// resolves to, in the slot holding it, else the first free one, so no
+    /// allocation. An unknown payload leaves its type unknown instead.
+    fn internedPayload(self: *TypeChecker, a: *const AstArena, node: NodeId, child: u1, payload: ResolvedType) *const ResolvedType {
+        std.debug.assert(payload != .unknown);
+        if (payload == .builtin) return builtinPayload(payload.builtin);
+        const slots = self.payload_slots.get(.{ .arena = @intFromPtr(a), .node = node.index, .child = child }) orelse unreachable;
         for (slots) |*slot| {
             if (slot.* == .unknown) slot.* = payload;
-            if (slot.eql(payload)) return .{ .optional = slot };
+            if (slot.eql(payload)) return slot;
         }
         unreachable;
+    }
+
+    /// The optional the type node `node` of `a` names, of `payload`.
+    fn internedOptional(self: *TypeChecker, a: *const AstArena, node: NodeId, payload: ResolvedType) ResolvedType {
+        if (payload == .unknown) return .unknown;
+        return .{ .optional = self.internedPayload(a, node, 0, payload) };
+    }
+
+    /// `payload` as a payload, built at check time.
+    fn payloadOf(self: *TypeChecker, payload: ResolvedType) TypeError!*const ResolvedType {
+        std.debug.assert(payload != .unknown);
+        if (payload == .builtin) return builtinPayload(payload.builtin);
+        try self.payloads.ensureUnusedCapacity(self.gpa, 1);
+        const p = try self.gpa.create(ResolvedType);
+        p.* = payload;
+        self.payloads.appendAssumeCapacity(p);
+        return p;
     }
 
     /// The optional of `payload`, built at check time.
     fn optionalOf(self: *TypeChecker, payload: ResolvedType) TypeError!ResolvedType {
         if (payload == .unknown) return .unknown;
-        if (payload == .builtin) return optionalOfBuiltin(payload.builtin);
-        try self.payloads.ensureUnusedCapacity(self.gpa, 1);
-        const p = try self.gpa.create(ResolvedType);
-        p.* = payload;
-        self.payloads.appendAssumeCapacity(p);
-        return .{ .optional = p };
+        return .{ .optional = try self.payloadOf(payload) };
     }
 
     /// A `.variant` shorthand with no expected type (`etch-resolver-types.md`
@@ -9141,16 +9250,16 @@ pub const TypeChecker = struct {
             }
             const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
             const arg_t = try self.synthExprE(arg, ctx_opt);
-            const elem: BuiltinType = switch (arg_t) {
+            const elem: *const ResolvedType = switch (arg_t) {
                 .array_fixed => |info| info.elem,
-                .array_dyn => |bt| bt,
+                .array_dyn => |e| e,
                 .unknown => return ResolvedType.unknown,
                 else => {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "'Set.from' expects an array argument", .{});
                     return ResolvedType.unknown;
                 },
             };
-            try self.checkHashBound(elem, "set element type", "T: Hash", self.arena.exprSpan(arg));
+            try self.checkHashBound(elem.*, "set element type", "T: Hash", self.arena.exprSpan(arg));
             return .{ .set_t = elem };
         }
         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "associated function '{s}' on 'Set' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
@@ -9345,7 +9454,7 @@ pub const TypeChecker = struct {
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (!try self.valueFits(.{ .builtin = recv_t.array_dyn }, arg, arg_t)) {
+                    if (!try self.valueFits(recv_t.array_dyn.*, arg, arg_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "pushed value type does not match the array element type", .{});
                     }
                 }
@@ -9366,7 +9475,7 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method 'pop' takes no arguments", .{});
                 }
                 try self.checkMutCollectionReceiver(mc, ctx_opt);
-                return optionalOfBuiltin(recv_t.array_dyn);
+                return .{ .optional = recv_t.array_dyn };
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method '{s}' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
             return ResolvedType.unknown;
@@ -9385,10 +9494,10 @@ pub const TypeChecker = struct {
                     const varg: NodeId = @bitCast(self.arena.extra.items[mc.args_start + 1]);
                     const k_t = try self.synthExprE(karg, ctx_opt);
                     const v_t = try self.synthExprE(varg, ctx_opt);
-                    if (!try self.valueFits(.{ .builtin = recv_t.map_t.key }, karg, k_t)) {
+                    if (!try self.valueFits(recv_t.map_t.key.*, karg, k_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(karg), "inserted key type does not match the map key type", .{});
                     }
-                    if (!try self.valueFits(.{ .builtin = recv_t.map_t.value }, varg, v_t)) {
+                    if (!try self.valueFits(recv_t.map_t.value.*, varg, v_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(varg), "inserted value type does not match the map value type", .{});
                     }
                 }
@@ -9418,7 +9527,7 @@ pub const TypeChecker = struct {
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (!try self.valueFits(.{ .builtin = recv_t.set_t }, arg, arg_t)) {
+                    if (!try self.valueFits(recv_t.set_t.*, arg, arg_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "inserted item type does not match the set element type", .{});
                     }
                 }
@@ -9431,7 +9540,7 @@ pub const TypeChecker = struct {
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (!try self.valueFits(.{ .builtin = recv_t.set_t }, arg, arg_t)) {
+                    if (!try self.valueFits(recv_t.set_t.*, arg, arg_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "item type does not match the set element type", .{});
                     }
                 }
@@ -9524,7 +9633,7 @@ pub const TypeChecker = struct {
             }
             if (std.mem.eql(u8, method_slice, "active_extensions")) {
                 if (mc.args_len != 0) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "Entity method 'active_extensions' takes no arguments", .{});
-                return ResolvedType{ .array_dyn = .string_ };
+                return ResolvedType{ .array_dyn = builtinPayload(.string_) };
             }
             // structural mutation methods on an `Entity` receiver
             // (`etch-grammar.md` §4.5). All three are unit; they enqueue a
@@ -9752,31 +9861,31 @@ pub const TypeChecker = struct {
         const recv_t = try self.synthExprE(ix.receiver, ctx_opt);
         if (self.arena.exprKind(ix.index) == .range) {
             _ = try self.synthExprE(ix.index, ctx_opt); // type-check the bounds
-            const elem = recv_t.elementType() orelse {
+            if (!isArray(recv_t)) {
                 if (recv_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "cannot slice a non-array value", .{});
                 return ResolvedType.unknown;
-            };
-            return .{ .array_dyn = elem };
+            }
+            return .{ .array_dyn = arrayElem(recv_t) };
         }
         const idx_t = try self.synthExprE(ix.index, ctx_opt);
         switch (recv_t) {
             .array_fixed => |info| {
                 if (!builtinWhere(idx_t, BuiltinType.isInteger)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
-                return .{ .builtin = info.elem };
+                return info.elem.*;
             },
             .array_dyn => |elem| {
                 if (!builtinWhere(idx_t, BuiltinType.isInteger)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
-                return .{ .builtin = elem };
+                return elem.*;
             },
             .map_t => |mi| {
                 // `m[k] -> V?` (stdlib §14.2/§14.3):
                 // the optional-returning accessor unlocked by the Optional
                 // ops — lifts the earlier rejection. The key must fit the
                 // map's key type.
-                if (!try self.valueFits(.{ .builtin = mi.key }, ix.index, idx_t)) {
+                if (!try self.valueFits(mi.key.*, ix.index, idx_t)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "map index key type does not match the map key type", .{});
                 }
-                return optionalOfBuiltin(mi.value);
+                return .{ .optional = mi.value };
             },
             .unknown => return ResolvedType.unknown,
             else => {
@@ -15571,8 +15680,7 @@ const mistyped_cases = [_]MistypedCase{
     .{ .name = "if condition", .src = "rule r() {\n  let c = P { x: 1 }\n  if c { let z = 1 }\n}", .code = .type_mismatch },
     .{ .name = "while condition", .src = "rule r() {\n  let c = P { x: 1 }\n  while c { let z = 2 }\n}", .code = .type_mismatch },
     .{ .name = "array index", .src = "rule r() {\n  let a = [10, 20, 30]\n  let v = a[P { x: 1 }]\n}", .code = .type_mismatch },
-    .{ .name = "map literal value", .src = "rule r() { let m = [1: P { x: 1 }] }", .code = .type_mismatch },
-    .{ .name = "map literal key", .src = "rule r() { let m = [P { x: 1 }: 2] }", .code = .type_mismatch },
+    .{ .name = "map literal key", .src = "rule r() { let m = [P { x: 1 }: 2] }", .code = .bound_not_satisfied },
     .{ .name = "concrete parameter of a generic fn", .src = "fn pick<T>(a: T, n: int) -> T { a }\nrule r() { let v = pick(1, P { x: 1 }) }", .code = .type_mismatch },
     .{ .name = "assert_eq, int against an enum", .src = "enum Dir { up, down }\ntest \"t\" { assert_eq(1, Dir.up) }", .code = .type_mismatch },
     .{ .name = "extension name", .src = "component C { n: int = 0 }\nrule r(entity: Entity) when entity has C { entity.activate_extension(P { x: 1 }) }", .code = .type_mismatch },
@@ -15613,6 +15721,7 @@ test "well-typed values at the same gates are accepted" {
         \\  let a: int = 1
         \\  let b: P = P { x: 1 }
         \\  let q: P = .{ x: 2 }
+        \\  let mp = [1: P { x: 1 }]
         \\  let c = true
         \\  let d = if c { 0 } else { 1 }
         \\  let mut e = 0
@@ -17428,6 +17537,42 @@ test "a scene's scope resolves an optional of a declared type" {
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 }
 
+const declared_collection_refused = [_]UnitCase{
+    .{ .name = "an int is no array of structs", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let a: P[] = 5\n}" },
+    .{ .name = "an int is no fixed array of enums", .code = .type_mismatch, .src = "enum Dir { north, south }\nrule r() {\n  let ds: Dir[2] = 5\n}" },
+    .{ .name = "an int is no map of structs", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let m: [int: P] = 5\n}" },
+    .{ .name = "an int is no set of enums", .code = .type_mismatch, .src = "enum Dir { north, south }\nrule r() {\n  let s: Set<Dir> = 5\n}" },
+    .{ .name = "an array of structs holds no int", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let a: P[] = [1, 2]\n}" },
+    .{ .name = "a pushed int is no struct", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let mut a: P[] = []\n  a.push(1)\n}" },
+    .{ .name = "an int array passed for an array of structs", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn f(xs: P[]) -> int {\n  xs.len()\n}\nrule r() {\n  let n = f([1])\n}" },
+    .{ .name = "a struct is no set element", .code = .bound_not_satisfied, .src = "struct P { x: int = 0 }\nrule r() {\n  let s: Set<P> = Set.new()\n}" },
+    .{ .name = "a struct is no map key", .code = .bound_not_satisfied, .src = "struct P { x: int = 0 }\nrule r() {\n  let m: [P: int] = [:]\n}" },
+    .{ .name = "an array is no set element", .code = .bound_not_satisfied, .src = "rule r() {\n  let s: Set<int[]> = Set.new()\n}" },
+    .{ .name = "a resource array of enums holds no int", .code = .type_mismatch, .src = "enum Dir { north, south }\nresource Nav { dirs: Dir[] }\nrule r() when resource Nav {\n  get_mut(Nav).dirs = 5\n}" },
+    .{ .name = "array elements of two types", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let a = [P { x: 1 }, 2]\n}" },
+    .{ .name = "a set is not sliced", .code = .type_mismatch, .src = "rule r() {\n  let s = Set.from([1, 2])\n  let t = s[0..1]\n}" },
+    .{ .name = "a float is no set element of a parameter", .code = .bound_not_satisfied, .src = "fn f(s: Set<float>) -> int {\n  0\n}" },
+    .{ .name = "a struct is no map key of a return type", .code = .bound_not_satisfied, .src = "struct P { x: int = 0 }\nfn f() -> [P: int] {\n  [:]\n}" },
+    .{ .name = "a generic map return keeps its element type", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn wrap<T>(x: T) -> [string: T] {\n  [\"a\": x]\n}\nrule r() {\n  let w: [string: int] = wrap(P { x: 1 })\n}" },
+    .{ .name = "an array of arrays holds no array of strings", .code = .type_mismatch, .src = "rule r() {\n  let a: int[][] = [[\"s\"]]\n}" },
+};
+
+test "a collection of a declared type refuses what does not fit it" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (declared_collection_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
 test "an interned optional holds the payload it is given" {
     const gpa = std.testing.allocator;
     var pr = try parser_mod.parse(gpa, "struct P { x: int = 0 }\nfn f<P>(v: P) -> P? {\n  none\n}");
@@ -17436,7 +17581,7 @@ test "an interned optional holds the payload it is given" {
     defer diags.deinit(gpa);
     var tc: TypeChecker = .{ .gpa = gpa, .arena = &pr.ast, .diagnostics = &diags };
     defer tc.deinit();
-    try tc.reserveOptionalSlots();
+    try tc.reservePayloadSlots();
     const kinds = pr.ast.type_nodes.items(.kind);
     const index = std.mem.indexOfScalar(ast_mod.TypeNodeKind, kinds, .optional).?;
     const node: NodeId = .{ .category = .type_node, .index = @intCast(index) };

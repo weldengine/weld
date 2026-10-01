@@ -791,6 +791,20 @@ const option_runs = [_]RunCase{
     .{ .name = "a resource string read through ?. outlives a later write", .src = "resource R { s: string = \"a\" }\ntest \"t\" {\n  get_mut(R).s = \"x{1}\"\n  let o = some(get(R))\n  let s = o?.s\n  get_mut(R).s = \"y{2}\"\n  assert(s == some(\"x1\"))\n}" },
 };
 
+const declared_collection_runs = [_]RunCase{
+    .{ .name = "an array of structs, pushed, indexed, looped and popped", .src = "struct P { x: int = 0 }\ntest \"t\" {\n  let mut a: P[] = [P { x: 1 }]\n  a.push(P { x: 2 })\n  assert(a.len() == 2)\n  assert(a[1].x == 2)\n  let mut n = 0\n  for p in a {\n    n = n + p.x\n  }\n  assert(n == 3)\n  let last = a.pop()\n  assert((last?.x ?? 0) == 2)\n}" },
+    .{ .name = "a fn taking and returning an array of structs", .src = "struct P { x: int = 0 }\nfn total(xs: P[]) -> int {\n  let mut n = 0\n  for p in xs {\n    n = n + p.x\n  }\n  n\n}\nfn make() -> P[] {\n  [P { x: 4 }, P { x: 5 }]\n}\ntest \"t\" {\n  assert(total(make()) == 9)\n}" },
+    .{ .name = "a map of structs, a set of enums, a map of optionals", .src = "struct P { x: int = 0 }\nenum Dir { north, south }\ntest \"t\" {\n  let mut m: [string: P] = [\"a\": P { x: 1 }]\n  m.insert(\"b\", P { x: 2 })\n  assert((m[\"b\"]?.x ?? 0) == 2)\n  let mut s: Set<Dir> = Set.new()\n  s.insert(.north)\n  s.insert(Dir.north)\n  assert(s.len() == 1)\n  assert(s.contains(.north))\n  let w: [string: int?] = [\"a\": 1]\n  assert(w[\"a\"]! == some(1))\n}" },
+    .{ .name = "a nested array, and an enum array from shorthands", .src = "enum Dir { north, south }\ntest \"t\" {\n  let ys: int[][] = [[1], [2, 3]]\n  assert(ys[1].len() == 2)\n  let ds: Dir[] = [.north, .south]\n  assert(ds[1] == Dir.south)\n}" },
+    .{ .name = "a generic fn over a map, a set and a returned map", .src = "struct P { x: int = 0 }\nfn size<K, V>(m: [K: V]) -> int {\n  m.len()\n}\nfn count<T>(s: Set<T>) -> int {\n  s.len()\n}\nfn wrap<T>(x: T) -> [string: T] {\n  [\"a\": x]\n}\ntest \"t\" {\n  assert(size([\"a\": 1, \"b\": 2]) == 2)\n  assert(count(Set.from([1, 2, 3])) == 3)\n  let w = wrap(P { x: 4 })\n  assert((w[\"a\"]?.x ?? 0) == 4)\n}" },
+    .{ .name = "an array type read in two generic scopes", .src = "struct P { x: int = 0 }\nfn same<P>(xs: P[]) -> P[] {\n  xs\n}\ntest \"t\" {\n  assert(same([1, 2]).len() == 2)\n  let ps: P[] = [P { x: 3 }]\n  assert(ps[0].x == 3)\n}" },
+    .{ .name = "a resource array of enums takes a shorthand", .src = "enum Dir { north, south }\nresource Nav { dirs: Dir[] }\ntest \"t\" {\n  get_mut(Nav).dirs.push(.south)\n  assert(get(Nav).dirs[0] == Dir.south)\n}" },
+};
+
+test "a collection of a declared type is checked and runs" {
+    try std.testing.expectEqual(@as(usize, 0), try failingRuns(&declared_collection_runs));
+}
+
 test "an optional carries any payload, checked and run" {
     try std.testing.expectEqual(@as(usize, 0), try failingRuns(&option_runs));
 }
