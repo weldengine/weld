@@ -123,4 +123,6 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p88_runtime_arith", .etch_path = "tests/etch_interp/programs/88_runtime_arith.etch" },
     // A match on a runtime-built string, expression and statement.
     .{ .name = "p89_string_match", .etch_path = "tests/etch_interp/programs/89_string_match.etch" },
+    // A copy of each kind of value, read and never written.
+    .{ .name = "p90_value_copies", .etch_path = "tests/etch_interp/programs/90_value_copies.etch" },
 };

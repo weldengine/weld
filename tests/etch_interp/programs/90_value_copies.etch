@@ -1,0 +1,167 @@
+component Copies {
+  arr: int = 0
+  anon: int = 0
+  nested: int = 0
+  chained: int = 0
+  call: int = 0
+  method: int = 0
+  closure: int = 0
+  opt: int = 0
+  self_copy: int = 0
+  seeded_arr: int = 0
+  seeded_map: int = 0
+  seeded_set: int = 0
+  throwing_closure: int = 0
+}
+
+struct In {
+  v: int
+}
+
+struct Out {
+  inner: In
+}
+
+struct Deep {
+  o: Out
+}
+
+impl In {
+  fn peek(mut self) -> int {
+    let q = self
+    q.v
+  }
+
+  fn twin(self) -> In {
+    In { v: self.v + 1 }
+  }
+}
+
+fn make_in(v: int) -> In {
+  In { v: v }
+}
+
+rule copy_fixed_array(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let a = [1, 2, 3]
+  let b = a
+  let b2 = b
+  acc.arr = b2[2]
+}
+
+rule copy_anon_struct(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let q: In = .{ v: 4 }
+  let r = q
+  acc.anon = r.v
+}
+
+rule copy_struct_field(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let o = Out { inner: In { v: 5 } }
+  let i = o.inner
+  acc.nested = i.v
+}
+
+rule copy_chained_field(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let d = Deep { o: Out { inner: In { v: 6 } } }
+  let j = d.o.inner
+  acc.chained = j.v
+}
+
+rule copy_fn_result(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let e = make_in(7)
+  let c = e
+  acc.call = c.v
+}
+
+rule copy_method_result(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let base = In { v: 7 }
+  let t = base.twin()
+  let t2 = t
+  acc.method = t2.v
+}
+
+rule copy_closure(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let g = |k: int| k + 1
+  let g2 = g
+  acc.closure = g2(8)
+}
+
+rule copy_optional(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let os = some(10)
+  let os2 = os
+  acc.opt = os2 ?? 0
+}
+
+rule copy_self(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut k = In { v: 11 }
+  acc.self_copy = k.peek()
+}
+
+rule seeded_array(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let xs: int[] = [12, 13]
+  acc.seeded_arr = xs[1]
+}
+
+rule seeded_map(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let m: [int: int] = [1: 14]
+  acc.seeded_map = m[1] ?? 0
+}
+
+rule seeded_set(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let s: Set<int> = Set.from([15])
+  acc.seeded_set = if s.contains(15) { 15 } else { 0 }
+}
+
+rule copy_throwing_closure(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  try {
+    let risky = |x: int| {
+      if x > 0 {
+        throw Error { message: "boom", code: ErrorCode.invalid_arg }
+      }
+      x
+    }
+    let copied = risky
+    let v = copied(1)
+    acc.throwing_closure = v
+  } catch err {
+    acc.throwing_closure = 16
+  }
+}

@@ -99,6 +99,8 @@ const p87 = @import("programs/87_triple_quote_multiline_interp.expected.zig");
 const p88 = @import("programs/88_runtime_arith.expected.zig");
 // A match on a runtime-built string, expression and statement.
 const p89 = @import("programs/89_string_match.expected.zig");
+// A copy of each kind of value, read and never written.
+const p90 = @import("programs/90_value_copies.expected.zig");
 
 /// Embedded list of the differential corpus programs, consumed by the
 /// interpreter test and by the codegen parity test.
@@ -173,4 +175,5 @@ pub const programs = [_]Program{
     .{ .name = "87_triple_quote_multiline_interp", .source = @embedFile("programs/87_triple_quote_multiline_interp.etch"), .config = p87.config, .initial = p87.initial, .expected = p87.expected },
     .{ .name = "88_runtime_arith", .source = @embedFile("programs/88_runtime_arith.etch"), .config = p88.config, .initial = p88.initial, .expected = p88.expected },
     .{ .name = "89_string_match", .source = @embedFile("programs/89_string_match.etch"), .config = p89.config, .initial = p89.initial, .expected = p89.expected },
+    .{ .name = "90_value_copies", .source = @embedFile("programs/90_value_copies.etch"), .config = p90.config, .initial = p90.initial, .expected = p90.expected },
 };

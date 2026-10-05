@@ -1189,7 +1189,7 @@ fn emitMethod(w: *Writer, ast: *const AstArena, struct_name: []const u8, method:
         try w.print("self: {s}{s}", .{ if (method.self_kind == .by_mut) "*" else "", struct_name });
         wrote_param = true;
         if (ast.strings.find("self")) |sid| {
-            try ctx.records.append(w.gpa, .{ .key = .{ .name = sid }, .info = .{ .kind = .value, .zig_type = struct_name, .is_mut = method.self_kind == .by_mut } });
+            try ctx.records.append(w.gpa, .{ .key = .{ .name = sid }, .info = .{ .kind = .value, .zig_type = struct_name, .is_mut = method.self_kind == .by_mut, .deref = method.self_kind == .by_mut } });
         }
     }
     var p_i: u32 = 0;
@@ -2489,6 +2489,12 @@ const LocalInfo = struct {
     /// node — lets the call site see the body (a
     /// throwing body rides the hidden `__err` out-param). `none` otherwise.
     closure_node: NodeId = NodeId.none,
+    /// An un-annotated aggregate — an array literal, a closure, an optional —
+    /// whose type Zig infers: a copy of it is left to Zig as well, where a copy
+    /// of any other un-annotated binding is annotated `i64`.
+    aggregate: bool = false,
+    /// `self` of a `mut self` method, a pointer read as the value it points to.
+    deref: bool = false,
 };
 
 const LocalKey = union(enum) {
@@ -3141,7 +3147,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         const al = ast.array_lits.items[ast.exprData(let.value)];
         if (al.is_fill) return CodegenError.UnsupportedConstruct;
         try w.writeIndent();
-        try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+        try w.print("{s} ", .{if (let.is_mut or al.elements_len > 0) "var" else "const"});
         try w.ident(ast.strings.slice(let.name));
         try w.print(": {s} = .empty;\n", .{list_t});
         if (al.elements_len > 0) {
@@ -3186,7 +3192,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         if (ast.exprKind(let.value) != .map_lit) return CodegenError.UnsupportedConstruct;
         const ml = ast.map_lits.items[ast.exprData(let.value)];
         try w.writeIndent();
-        try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+        try w.print("{s} ", .{if (let.is_mut or ml.entries_len > 0) "var" else "const"});
         try w.ident(ast.strings.slice(let.name));
         try w.print(": {s} = .empty;\n", .{list_t});
         if (ml.entries_len > 0) {
@@ -3240,8 +3246,9 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
     };
     if (set_list_t) |list_t| {
         const call = setCallOf(ast, let.value) orelse return CodegenError.UnsupportedConstruct;
+        const seeded = call == .from and ast.exprKind(call.from) == .array_lit and ast.array_lits.items[ast.exprData(call.from)].elements_len > 0;
         try w.writeIndent();
-        try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+        try w.print("{s} ", .{if (let.is_mut or seeded) "var" else "const"});
         try w.ident(ast.strings.slice(let.name));
         try w.print(": {s} = .empty;\n", .{list_t});
         if (call == .from) {
@@ -3289,7 +3296,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             try w.write(";\n");
             try ctx.records.append(w.gpa, .{
                 .key = .{ .name = let.name },
-                .info = .{ .kind = .value, .zig_type = "", .is_mut = let.is_mut },
+                .info = .{ .kind = .value, .zig_type = ast.strings.slice(sname), .is_mut = let.is_mut },
             });
             return;
         }
@@ -3319,7 +3326,16 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             .kind = .value,
             .zig_type = zig_t,
             .is_mut = let.is_mut,
-            .closure_node = if (value_kind == .closure) let.value else NodeId.none,
+            .closure_node = switch (value_kind) {
+                .closure => let.value,
+                .ident => if (ctx.lookup(ast.exprData(let.value))) |src| src.closure_node else NodeId.none,
+                else => NodeId.none,
+            },
+            .aggregate = zig_t.len == 0 and switch (value_kind) {
+                .array_lit, .closure, .some_lit => true,
+                .ident => if (ctx.lookup(ast.exprData(let.value))) |src| src.aggregate else false,
+                else => false,
+            },
         },
     });
 }
@@ -3534,7 +3550,10 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             const name_id: StringId = data;
             if (ctx.lookup(name_id)) |local| {
                 switch (local.kind) {
-                    .value => try w.ident(ast.strings.slice(name_id)),
+                    .value => {
+                        try w.ident(ast.strings.slice(name_id));
+                        if (local.deref) try w.write(".*");
+                    },
                     .capture => {
                         // A captured outer binding reads through the closure
                         // struct's receiver — the value
@@ -6451,7 +6470,7 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         .some_lit, .none_lit => "",
         .ident => blk: {
             const sid: StringId = data;
-            if (ctx.lookup(sid)) |local| break :blk if (local.zig_type.len > 0) local.zig_type else "i64";
+            if (ctx.lookup(sid)) |local| break :blk if (local.zig_type.len > 0 or local.aggregate) local.zig_type else "i64";
             break :blk "i64";
         },
         .binary => blk: {
@@ -6501,19 +6520,31 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         // `emitLet` drop the `: T`.
         .array_lit => "",
         .index => "",
-        // Closures (anonymous struct type) and call results are left to Zig
-        // inference too.
+        // A closure is an anonymous struct type, left to Zig inference.
         .closure => "",
-        .fn_call => "",
-        // Struct literals (struct type) and method-call results (the method's
-        // return type) are left to Zig inference.
+        // A top-level fn's call types as its declared return.
+        .fn_call => blk: {
+            const call = ast.call_exprs.items[data];
+            if (ast.exprKind(call.callee) != .ident or ctx.lookup(ast.exprData(call.callee)) != null) break :blk "";
+            const decl = findFnDecl(ast, ast.exprData(call.callee)) orelse break :blk "";
+            if (decl.return_type.isNone()) break :blk "";
+            break :blk fnTypeZig(ast, decl.return_type) catch "";
+        },
         .struct_lit => blk: {
             // An explicit `T { … }` literal types as `T`; the anonymous `.{ … }` form
             // keeps "" (context-typed).
             const sl = ast.struct_lits.items[data];
             break :blk if (sl.type_name == 0) "" else ast.strings.slice(sl.type_name);
         },
-        .method_call => "",
+        // A user method's call types as its declared return.
+        .method_call => blk: {
+            const mc = ast.method_calls.items[data];
+            const recv_t = inferExprZigType(ast, ctx, mc.receiver);
+            if (recv_t.len == 0 or type_map.mapBuiltin(recv_t) != null) break :blk "";
+            const decl = findImplMethodDecl(ast, recv_t, mc.method_name) orelse break :blk "";
+            if (decl.return_type.isNone()) break :blk "";
+            break :blk fnTypeZig(ast, decl.return_type) catch "";
+        },
         // A loop expression's value type is inferred by Zig from its break.
         .loop_expr => "",
         // A block expression's value type is inferred by Zig from its trailing
@@ -6566,7 +6597,11 @@ fn receiverComponentName(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) ?[]
             }
             break :blk null;
         },
-        .field_access => null, // chained field access not introspected — fall back to default type
+        .field_access => blk: {
+            const t = inferExprZigType(ast, ctx, expr);
+            const id = ast.strings.find(t) orelse break :blk null;
+            break :blk if (isStructName(ast, id)) t else null;
+        },
         else => null,
     };
 }
@@ -6609,7 +6644,7 @@ fn fieldZigTypeOnComponent(ast: *const AstArena, comp_name: []const u8, field_na
                 // `.len()` dispatch; enum-typed fields (`Error.code`) map 1:1, driving
                 // the match shorthand.
                 if (std.mem.eql(u8, etch_t, "string")) return "[]const u8";
-                if (isEnumName(ast, resolved)) return etch_t;
+                if (isEnumName(ast, resolved) or isStructName(ast, resolved)) return etch_t;
                 return type_map.mapBuiltin(etch_t);
             }
         }

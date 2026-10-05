@@ -604,9 +604,8 @@ const StructVal = struct {
 
 /// Per-rule-body store for struct values, addressed by `Value.struct_ref`. Reset at the
 /// body boundary like the collection / closure stores (rule-arena semantics). A struct
-/// is a by-value type; in the interpreter the handle is shared (reference-like), which
-/// is sound for the `self` mutation through a `mut self` method must propagate to the
-/// receiver, and no differential aliases two struct locals.
+/// is a by-value type (`etch-reference-part1.md` §5.2), but its handle is shared: two
+/// locals of one struct see each other's writes.
 const StructStore = struct {
     list: std.ArrayListUnmanaged(StructVal) = .empty,
 
