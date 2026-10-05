@@ -535,9 +535,9 @@ const CollectionStore = struct {
     }
 };
 
-/// A runtime closure value: the closure-expression node plus a
-/// by-value snapshot of the environment captured at the definition site
-/// (§5.6 — value types copied). A closure is short-lived (invoked in the
+/// A runtime closure value: the closure-expression node plus the
+/// environment's bindings at the definition site, a struct or a collection
+/// held by its handle, not copied. A closure is short-lived (invoked in the
 /// same rule body), so capturing component refs is sound; long-lived closures
 /// (event handlers) are unsupported.
 const ClosureVal = struct {

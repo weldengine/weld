@@ -725,9 +725,9 @@ pub const TypeChecker = struct {
     /// landed in the query-operator commit) resolves paths against it.
     tag_table: ?tags_mod.TagTable = null,
     /// Names of the scope the closure body being typed was written in
-    /// (`etch-resolver-types.md` §8.2). Assigning one the body did not bind
-    /// itself is E0221 ClosureCannotMutateCapture. `null` outside a closure
-    /// body.
+    /// (`etch-resolver-types.md` §8.2). Writing one the body did not bind
+    /// itself, by assignment or through it, is E0221
+    /// ClosureCannotMutateCapture. `null` outside a closure body.
     closure_captures: ?*std.AutoHashMapUnmanaged(StringId, void) = null,
     /// The scope each closure value was created in, indexed by
     /// `ClosureType.env`.
@@ -6080,7 +6080,12 @@ pub const TypeChecker = struct {
         /// scope begins at 0.
         scope_starts: std.ArrayListUnmanaged(usize) = .empty,
 
-        pub const Local = struct { type_: ResolvedType, is_mut: bool };
+        pub const Local = struct { type_: ResolvedType, is_mut: bool, ref: RefMode = .none };
+
+        /// What a binding of an ECS ref may write through: a `get` ref is
+        /// read-only and a `get_mut` one mutable, whatever `mut` the binding
+        /// carries.
+        pub const RefMode = enum { none, read_only, mutable };
         const Shadowed = struct { name: StringId, shadowed: ?Local };
 
         pub fn deinit(self: *RuleCtx, gpa: std.mem.Allocator) void {
@@ -6953,8 +6958,8 @@ pub const TypeChecker = struct {
                 // A binding to `entity.get_mut(T)` aliases the mutable
                 // component reference, so the local inherits mutability
                 // even when written `let h = ...` without `mut`.
-                const value_is_get_mut = self.arena.exprKind(let.value) == .method_get_mut;
-                try self.bindLocal(ctx, let.name, .{ .type_ = final, .is_mut = let.is_mut or value_is_get_mut }, self.arena.stmtSpan(stmt_id));
+                const ref = refModeOf(ctx, self.arena, let.value, final);
+                try self.bindLocal(ctx, let.name, .{ .type_ = final, .is_mut = let.is_mut or ref == .mutable, .ref = ref }, self.arena.stmtSpan(stmt_id));
             },
             .assign_stmt => {
                 const assign = self.arena.assign_stmts.items[data];
@@ -6963,18 +6968,16 @@ pub const TypeChecker = struct {
                 if (target_kind == .ident) {
                     const name_id = self.arena.exprData(assign.target);
                     if (ctx.locals.get(name_id)) |local| {
-                        // E0221 (resolver-types §8.2):
-                        // a closure body cannot mutate a captured binding —
-                        // captures are value snapshots in both backends. The
-                        // capture check precedes the mutability check (a
-                        // captured `let mut` is still immutable here).
-                        const is_captured = if (self.closure_captures) |caps| caps.contains(name_id) and !ctx.loggedSince(0, name_id) else false;
-                        if (is_captured) {
-                            const span = self.arena.exprSpan(assign.target);
-                            try self.emit(.closure_cannot_mutate_capture, .error_, span, "closure cannot mutate captured binding '{s}' (pass it as an argument or mutate through entity.get_mut)", .{self.arena.strings.slice(name_id)});
+                        // E0221 (resolver-types §8.2): a closure body writes no
+                        // binding it captured, `let mut` included, by
+                        // assignment or through one (`placeOf`).
+                        if (self.isClosureCapture(ctx, name_id)) {
+                            try self.emitCapturedWrite(self.arena.exprSpan(assign.target), name_id);
                         } else if (!local.is_mut) {
                             const span = self.arena.exprSpan(assign.target);
                             try self.emit(.type_mismatch, .error_, span, "cannot assign to immutable binding (use 'let mut')", .{});
+                        } else if (local.ref == .mutable and refModeOf(ctx, self.arena, assign.value, local.type_) != .mutable) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "a binding of get_mut(T) is rebound only to get_mut(T)", .{});
                         }
                         const rhs_type = try self.synthHeadValue(assign.value, ctx);
                         const fits = if (assign.op == .assign) try self.valueFits(local.type_, assign.value, rhs_type) else try self.valueCompares(local.type_, assign.value, rhs_type);
@@ -6994,20 +6997,26 @@ pub const TypeChecker = struct {
                         try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(assign.target), "unknown binding '{s}'", .{name});
                     }
                 } else if (target_kind == .field_access) {
-                    // Walk down: assignment is valid if the chain ends at
-                    // either `entity.get_mut(T)` directly or an ident
-                    // whose local binding is mutable (e.g. one bound via
-                    // `let h = entity.get_mut(T)`).
-                    const ok = isAssignTargetReachable(self.arena, ctx, assign.target);
-                    if (!ok) {
-                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.target), "assignment target field must be accessed via entity.get_mut(T) or a mutable binding", .{});
+                    const place = self.placeOf(ctx, assign.target);
+                    const span = self.arena.exprSpan(assign.target);
+                    switch (place.verdict) {
+                        .ok => {},
+                        .immutable_binding, .not_a_place => try self.emit(.type_mismatch, .error_, span, "assignment target field must be accessed via entity.get_mut(T) or a mutable binding", .{}),
+                        .read_only_ref => try self.emit(.type_mismatch, .error_, span, "cannot write through a read-only ECS ref (get(T)); write through get_mut(T)", .{}),
+                        .through_optional => try self.emit(.type_mismatch, .error_, span, "cannot write through '?.': unwrap the optional first", .{}),
+                        .captured => try self.emitCapturedWrite(span, place.root),
                     }
                     // Synthesize the field type and check the value matches it.
                     const lhs_type = try self.synthExprE(assign.target, ctx);
                     const rhs_type = try self.synthExprE(assign.value, ctx);
-                    const fits = if (assign.op == .assign) try self.valueFits(lhs_type, assign.value, rhs_type) else try self.valueCompares(lhs_type, assign.value, rhs_type);
-                    if (!fits) {
-                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match field type", .{});
+                    if (place.verdict != .through_optional) {
+                        const fits = if (assign.op == .assign) try self.valueFits(lhs_type, assign.value, rhs_type) else try self.valueCompares(lhs_type, assign.value, rhs_type);
+                        if (!fits) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match field type", .{});
+                        }
+                    }
+                    if (assign.op != .assign and ((lhs_type == .builtin and lhs_type.builtin == .string_) or (rhs_type == .builtin and rhs_type.builtin == .string_))) {
+                        try self.emit(.type_mismatch, .error_, span, "compound assignment on strings is not in the M0.8 minimal subset (use 's = s + ...')", .{});
                     }
                 } else {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.target), "unsupported assignment target in S3 rule body", .{});
@@ -10027,10 +10036,7 @@ pub const TypeChecker = struct {
     /// mutable binding. Same reachability rule as `checkMutSelfReceiver`, without a
     /// user `FnDecl`.
     fn checkMutCollectionReceiver(self: *TypeChecker, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) !void {
-        const ctx = ctx_opt orelse return;
-        if (!isAssignTargetReachable(self.arena, ctx, mc.receiver)) {
-            try self.emit(.immutable_receiver_for_mut_self, .error_, self.arena.exprSpan(mc.receiver), "cannot call a mutating collection method on an immutable receiver (bind it with 'let mut')", .{});
-        }
+        try self.checkMutatingReceiver(mc, ctx_opt, "cannot call a mutating collection method on an immutable receiver (bind it with 'let mut')");
     }
 
     /// E0220 (`etch-resolver-types.md §7.6`): a `mut self` method called on an
@@ -10038,10 +10044,78 @@ pub const TypeChecker = struct {
     /// `let mut` / a `get_mut` ref is mutable. Skipped without a rule context.
     fn checkMutSelfReceiver(self: *TypeChecker, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) !void {
         if (method.self_kind != .by_mut) return;
+        try self.checkMutatingReceiver(mc, ctx_opt, "cannot call a 'mut self' method on an immutable receiver (bind it with 'let mut')");
+    }
+
+    /// The receiver of a method that writes it must be a place `placeOf`
+    /// accepts, reached without `?.`.
+    fn checkMutatingReceiver(self: *TypeChecker, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx, immutable_message: []const u8) !void {
         const ctx = ctx_opt orelse return;
-        if (!isAssignTargetReachable(self.arena, ctx, mc.receiver)) {
-            try self.emit(.immutable_receiver_for_mut_self, .error_, self.arena.exprSpan(mc.receiver), "cannot call a 'mut self' method on an immutable receiver (bind it with 'let mut')", .{});
+        const span = self.arena.exprSpan(mc.receiver);
+        const place = self.placeOf(ctx, mc.receiver);
+        const verdict: PlaceVerdict = if (mc.opt_chain) .through_optional else place.verdict;
+        switch (verdict) {
+            .ok => {},
+            .immutable_binding, .not_a_place => try self.emit(.immutable_receiver_for_mut_self, .error_, span, "{s}", .{immutable_message}),
+            .read_only_ref => try self.emit(.immutable_receiver_for_mut_self, .error_, span, "cannot call a mutating method through a read-only ECS ref (get(T)); call it through get_mut(T)", .{}),
+            .through_optional => try self.emit(.immutable_receiver_for_mut_self, .error_, span, "cannot write through '?.': unwrap the optional first", .{}),
+            .captured => try self.emitCapturedWrite(span, place.root),
         }
+    }
+
+    const PlaceVerdict = enum { ok, immutable_binding, read_only_ref, through_optional, captured, not_a_place };
+
+    /// The verdict on writing through `id`, a field chain: its root must be a
+    /// `get_mut`, a binding of one, or a mutable binding the closure body
+    /// being typed did not capture. `root` names the root binding.
+    fn placeOf(self: *TypeChecker, ctx: *const RuleCtx, id: NodeId) struct { verdict: PlaceVerdict, root: StringId = 0 } {
+        var cur = id;
+        while (true) switch (self.arena.exprKind(cur)) {
+            .field_access => {
+                const fa = self.arena.field_accesses.items[self.arena.exprData(cur)];
+                if (fa.opt_chain) return .{ .verdict = .through_optional };
+                cur = fa.receiver;
+            },
+            .method_get_mut => return .{ .verdict = .ok },
+            .method_get => return .{ .verdict = .read_only_ref },
+            .ident => {
+                const name = self.arena.exprData(cur);
+                const local = ctx.locals.get(name) orelse return .{ .verdict = .not_a_place };
+                return .{ .root = name, .verdict = switch (local.ref) {
+                    .mutable => .ok,
+                    .read_only => .read_only_ref,
+                    .none => if (self.isClosureCapture(ctx, name)) .captured else if (local.is_mut) .ok else .immutable_binding,
+                } };
+            },
+            else => return .{ .verdict = .not_a_place },
+        };
+    }
+
+    /// Whether `name` is a binding the closure body being typed captured
+    /// rather than bound itself.
+    fn isClosureCapture(self: *TypeChecker, ctx: *const RuleCtx, name: StringId) bool {
+        const caps = self.closure_captures orelse return false;
+        return caps.contains(name) and !ctx.loggedSince(0, name);
+    }
+
+    fn emitCapturedWrite(self: *TypeChecker, span: SourceSpan, name: StringId) !void {
+        try self.emit(.closure_cannot_mutate_capture, .error_, span, "closure cannot mutate captured binding '{s}' (pass it as an argument or mutate through entity.get_mut)", .{self.arena.strings.slice(name)});
+    }
+
+    /// The ref mode a binding of `value`, of type `t`, takes: a `get_mut` or a
+    /// binding of one is mutable, any other ECS ref read-only.
+    fn refModeOf(ctx: *const RuleCtx, arena: *const AstArena, value: NodeId, t: ResolvedType) RuleCtx.RefMode {
+        switch (arena.exprKind(value)) {
+            .method_get_mut => return .mutable,
+            .ident => if (ctx.locals.get(arena.exprData(value))) |local| {
+                if (local.ref != .none) return local.ref;
+            },
+            else => {},
+        }
+        return switch (t) {
+            .component, .resource, .builtin_resource => .read_only,
+            else => .none,
+        };
     }
 
     /// Check a method/associated-fn call's argument count + types against the
@@ -10483,27 +10557,6 @@ pub fn isConstEvaluable(arena: *const AstArena, id: NodeId) bool {
         },
         else => false,
     };
-}
-
-fn isAssignTargetReachable(arena: *const AstArena, ctx: *TypeChecker.RuleCtx, id: NodeId) bool {
-    var cur = id;
-    while (true) {
-        const k = arena.exprKind(cur);
-        switch (k) {
-            .field_access => {
-                const fa = arena.field_accesses.items[arena.exprData(cur)];
-                cur = fa.receiver;
-            },
-            .method_get_mut => return true,
-            .method_get => return false,
-            .ident => {
-                const name_id = arena.exprData(cur);
-                if (ctx.locals.get(name_id)) |local| return local.is_mut;
-                return false;
-            },
-            else => return false,
-        }
-    }
 }
 
 const parser_mod = @import("parser.zig");
@@ -12234,8 +12287,7 @@ test "closure body cannot mutate a capture, E0221" {
     const gpa = std.testing.allocator;
 
     // Mutating a captured binding inside the body → E0221, even though the
-    // source binding is `let mut` (resolver-types §8.2: captures are value
-    // snapshots; mutation through a closure is forbidden).
+    // source binding is `let mut` (resolver-types §8.2).
     var mutate = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\rule r(entity: Entity)
@@ -17599,6 +17651,77 @@ const scope_captured = [_]UnitCase{
     \\}
     },
 };
+
+const PlaceCase = struct { name: []const u8, code: DiagnosticCode, needle: []const u8, src: []const u8 };
+
+const write_place_refused = [_]PlaceCase{
+    .{ .name = "a read-only resource ref written", .code = .type_mismatch, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  r.n = 1\n}" },
+    .{ .name = "a read-only resource ref written by a compound operator", .code = .type_mismatch, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  r.n += 1\n}" },
+    .{ .name = "a read-only resource ref's collection field replaced", .code = .type_mismatch, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  r.xs = [3]\n}" },
+    .{ .name = "a read-only resource ref's collection pushed", .code = .immutable_receiver_for_mut_self, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  r.xs.push(3)\n}" },
+    .{ .name = "a read-only resource ref's collection popped", .code = .immutable_receiver_for_mut_self, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  let p = r.xs.pop()\n}" },
+    .{ .name = "a read-only component ref written", .code = .type_mismatch, .needle = "read-only", .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let mut h = entity.get(H)\n  h.hp = 0\n}" },
+    .{ .name = "a mut self method through a read-only component ref", .code = .immutable_receiver_for_mut_self, .needle = "read-only", .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let mut h = entity.get(H)\n  h.hit()\n}" },
+    .{ .name = "a read-only builtin resource ref written", .code = .type_mismatch, .needle = "read-only", .src = "rule r() {\n  let mut t = get(GameTime)\n  t.time_scale = 0.5\n}" },
+    .{ .name = "a copy of a read-only ref written", .code = .type_mismatch, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let r = get(R)\n  let mut r2 = r\n  r2.n = 1\n}" },
+    .{ .name = "a get_mut binding rebound to a read-only ref", .code = .type_mismatch, .needle = "rebound only", .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let h = entity.get_mut(H)\n  h = entity.get(H)\n  h.hp = 0\n}" },
+    .{ .name = "a mutable get_mut binding rebound to a read-only ref", .code = .type_mismatch, .needle = "rebound only", .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let mut h = entity.get_mut(H)\n  h = entity.get(H)\n}" },
+    .{ .name = "a field written through '?.'", .code = .type_mismatch, .needle = "'?.'", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut o: P? = some(P { x: 1 })\n  o?.x = 2\n}" },
+    .{ .name = "a field written through '?.' by a compound operator", .code = .type_mismatch, .needle = "'?.'", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut o: P? = some(P { x: 1 })\n  o?.x += 1\n}" },
+    .{ .name = "a nested field written through '?.'", .code = .type_mismatch, .needle = "'?.'", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut o: Q? = some(Q { p: P { x: 1 } })\n  o?.p.x = 2\n}" },
+    .{ .name = "a collection pushed through '?.'", .code = .immutable_receiver_for_mut_self, .needle = "'?.'", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut o: int[]? = some([1])\n  o?.push(2)\n}" },
+    .{ .name = "a mut self method through '?.'", .code = .immutable_receiver_for_mut_self, .needle = "'?.'", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut o: P? = some(P { x: 1 })\n  o?.bump()\n}" },
+    .{ .name = "a closure writing a captured struct's field", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = |v: int| { p.x = v }\n  f(2)\n}" },
+    .{ .name = "a closure pushing onto a captured collection", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut xs: int[] = [1]\n  let f = |v: int| { xs.push(v) }\n  f(2)\n}" },
+    .{ .name = "a closure calling a mut self method on a capture", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = || { p.bump() }\n  f()\n}" },
+    .{ .name = "a compound operator on a struct's string field", .code = .type_mismatch, .needle = "compound assignment on strings", .src = "struct S { name: string = \"a\" }\nrule r() {\n  let mut s = S { name: \"a\" }\n  s.name += \"b\"\n}" },
+    .{ .name = "a compound operator on a resource's string field", .code = .type_mismatch, .needle = "compound assignment on strings", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  get_mut(R).name += \"x\"\n}" },
+};
+
+const write_place_accepted = [_]UnitCase{
+    .{ .name = "a copy of a resource collection field, pushed", .code = .type_mismatch, .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut xs = get(R).xs\n  xs.push(3)\n}" },
+    .{ .name = "a resource written through a get_mut binding", .code = .type_mismatch, .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let r = get_mut(R)\n  r.n = 1\n  r.xs.push(3)\n}" },
+    .{ .name = "a component written through a get_mut binding", .code = .type_mismatch, .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let h = entity.get_mut(H)\n  h.hp = 0\n  h.hit()\n}" },
+    .{ .name = "a read-only ref rebound to a read-only ref and read", .code = .type_mismatch, .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  r = get(R)\n  let k = r.n\n}" },
+    .{ .name = "an unwrapped optional's copy written", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let o: P? = some(P { x: 1 })\n  let mut p = o!\n  p.x = 2\n}" },
+    .{ .name = "a closure writing through a captured get_mut ref", .code = .type_mismatch, .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let h = entity.get_mut(H)\n  let f = |v: int| { h.hp = v }\n  f(2)\n}" },
+    .{ .name = "a get_mut binding rebound to a get_mut", .code = .type_mismatch, .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let mut h = entity.get_mut(H)\n  h = entity.get_mut(H)\n  h.hp = 1\n}" },
+    .{ .name = "a copy of a get_mut binding written", .code = .type_mismatch, .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let h = entity.get_mut(H)\n  let h2 = h\n  h2.hp = 1\n}" },
+    .{ .name = "a get_mut binding without mut rebound to a get_mut", .code = .type_mismatch, .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let h = entity.get_mut(H)\n  h = entity.get_mut(H)\n  h.hp = 1\n}" },
+    .{ .name = "a closure writing a copy it binds itself", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let p = P { x: 1 }\n  let f = || {\n    let mut q = p\n    q.x = 2\n  }\n  f()\n}" },
+};
+
+test "a write is refused through a read-only ref, through '?.' and to a capture" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (write_place_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or countMessage(r.diagnostics.items, c.code, c.needle) != 1) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a write through a get_mut, a copy or a binding of the body is accepted" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (write_place_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
 
 test "a capture the body did not bind is judged as a capture" {
     const gpa = std.testing.allocator;
