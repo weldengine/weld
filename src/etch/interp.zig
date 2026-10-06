@@ -535,9 +535,8 @@ const CollectionStore = struct {
     }
 };
 
-/// A runtime closure value: the closure-expression node plus the
-/// environment's bindings at the definition site, a struct or a collection
-/// held by its handle, not copied. A closure is short-lived (invoked in the
+/// A runtime closure value: the closure-expression node plus a copy of the
+/// environment's bindings at the definition site. A closure is short-lived (invoked in the
 /// same rule body), so capturing component refs is sound; long-lived closures
 /// (event handlers) are unsupported.
 const ClosureVal = struct {
@@ -604,8 +603,7 @@ const StructVal = struct {
 
 /// Per-rule-body store for struct values, addressed by `Value.struct_ref`. Reset at the
 /// body boundary like the collection / closure stores (rule-arena semantics). A struct
-/// is a by-value type (`etch-reference-part1.md` §5.2), but its handle is shared: two
-/// locals of one struct see each other's writes.
+/// is a by-value type: a read as a value copies it (`copyValue`).
 const StructStore = struct {
     list: std.ArrayListUnmanaged(StructVal) = .empty,
 
@@ -1082,6 +1080,10 @@ const CallFrame = struct {
     ret: RetTarget,
     /// How many times the await site wraps `f`'s value into an optional.
     wraps: u8 = 0,
+    /// A `mut self` method's receiver as called, and the caller's place
+    /// holding it.
+    self_in: ?Value = null,
+    self_slot: Interpreter.Slot = .none,
 };
 
 /// A suspendable task — the dynamic-pool replacement for the per-rule
@@ -3135,6 +3137,18 @@ pub const Interpreter = struct {
         }
     }
 
+    /// Pop the top frame, a `call` frame, writing a replaced `self` to the
+    /// caller's place.
+    fn popCallFrame(self: *Interpreter, task: *AsyncTask) StmtError!void {
+        const cf = task.frames.items[task.frames.items.len - 1].call;
+        const final: ?Value = if (cf.self_in == null) null else if (self.ast.strings.find("self")) |sid| cf.scope.get(sid) else null;
+        if (final) |v| retainHandle(v);
+        self.popFrame(task);
+        const v = final orelse return;
+        defer releaseHandle(self.gpa, v);
+        if (!std.meta.eql(v, cf.self_in.?)) try self.storeSlot(currentScope(task), cf.self_slot, v);
+    }
+
     /// Close the scope of the iteration the loop frame at `ti` is running.
     fn endIteration(self: *Interpreter, task: *AsyncTask, ti: usize) void {
         const scope = currentScope(task);
@@ -3246,6 +3260,8 @@ pub const Interpreter = struct {
             self.gpa.destroy(new_scope);
         }
         var fndecl: ast_mod.FnDecl = undefined;
+        var self_in: ?Value = null;
+        var self_slot: Slot = .none;
         switch (self.ast.exprKind(call_expr)) {
             .fn_call => {
                 const call = self.ast.call_exprs.items[self.ast.exprData(call_expr)];
@@ -3264,8 +3280,10 @@ pub const Interpreter = struct {
                     const type_name = self.ast.exprData(mc.receiver);
                     fndecl = self.methods.get(methodKey(type_name, mc.method_name)) orelse return error.RuntimeFailure;
                 } else {
-                    const recv = try self.evalExpr(world, scope, mc.receiver);
+                    const place = try self.evalPlaceSlot(world, scope, mc.receiver);
+                    const recv = place.value;
                     self_value = recv;
+                    self_slot = place.slot;
                     switch (recv) {
                         .struct_ref => |h| {
                             const tn = self.structs.list.items[h].type_name;
@@ -3283,6 +3301,7 @@ pub const Interpreter = struct {
                 if (!fndecl.is_async) return error.RuntimeFailure;
                 if (self_value) |sv| {
                     if (self.ast.strings.find("self")) |sid| try new_scope.put(self.gpa, sid, sv, fndecl.self_kind == .by_mut);
+                    if (fndecl.self_kind == .by_mut) self_in = sv;
                 }
                 try self.bindAsyncParams(world, scope, new_scope, fndecl, mc.args_start, mc.args_len, mc.names_start);
             },
@@ -3296,6 +3315,8 @@ pub const Interpreter = struct {
             .value_expr = if (fndecl.value.isNone()) null else fndecl.value,
             .ret = ret,
             .wraps = wraps,
+            .self_in = self_in,
+            .self_slot = self_slot,
         } });
         return .pushed;
     }
@@ -3542,7 +3563,7 @@ pub const Interpreter = struct {
                         var rv: Value = .{ .unit = {} };
                         if (val) |v| rv = try self.evalExpr(world, scope, v);
                         rv = try self.wrapped(rv, wraps);
-                        self.popFrame(task);
+                        try self.popCallFrame(task);
                         switch (ret) {
                             .return_ => {
                                 self.return_value = rv;
@@ -3969,7 +3990,7 @@ pub const Interpreter = struct {
                 const top = task.frames.items[task.frames.items.len - 1].call;
                 const ret = top.ret;
                 const v = try self.wrapped(self.return_value, top.wraps);
-                self.popFrame(task);
+                try self.popCallFrame(task);
                 switch (ret) {
                     .return_ => self.return_value = v, // enclosing fn returns `v` too → loop
                     else => {
@@ -4008,6 +4029,7 @@ pub const Interpreter = struct {
                         }
                         self.popFrame(task); // throw inside this `catch` → propagate past it
                     },
+                    .call => try self.popCallFrame(task),
                     else => self.popFrame(task),
                 }
             }
@@ -4958,7 +4980,6 @@ pub const Interpreter = struct {
                         const len = self.collections.arrays.items[handle].items.len;
                         var k: usize = 0;
                         arr_loop: while (k < len) : (k += 1) {
-                            if (k >= self.collections.arrays.items[handle].items.len) return error.RuntimeFailure;
                             try self.forIteration(world, locals, f, self.collections.arrays.items[handle].items[k], null);
                             if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                             switch (self.handleLoopControl(0)) {
@@ -5166,9 +5187,9 @@ pub const Interpreter = struct {
         const target_kind = self.ast.exprKind(assign.target);
         if (target_kind == .ident) {
             const name_id: StringId = self.ast.exprData(assign.target);
-            const cur = locals.get(name_id) orelse return error.RuntimeFailure;
             const rhs = try self.evalExpr(world, locals, assign.value);
             if (self.thrown) return; // see `assignRhsThrew`
+            const cur = locals.get(name_id) orelse return error.RuntimeFailure;
             const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
             const ptr = locals.getPtr(name_id) orelse return error.RuntimeFailure;
             replaceHeld(self.gpa, ptr, new_v);
@@ -5176,109 +5197,124 @@ pub const Interpreter = struct {
         }
         if (target_kind == .field_access) {
             const fa = self.ast.field_accesses.items[self.ast.exprData(assign.target)];
-            const recv = try self.evalExpr(world, locals, fa.receiver);
-            const field_name = self.ast.strings.slice(fa.field_name);
-            switch (recv) {
-                .component_ref => |cref| {
-                    if (!cref.mutable) return error.RuntimeFailure;
-                    const cur = Bridge.readComponentField(&world.registry, cref, world, field_name) catch |e|
-                        return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
-                    const rhs = try self.evalExpr(world, locals, assign.value);
-                    if (self.thrown) return; // see `assignRhsThrew`
-                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
-                    Bridge.writeComponentField(&world.registry, cref, world, field_name, new_v) catch |e|
-                        return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
-                    // Change detection: stamp `changed_tick = current_tick`
-                    // so an `entity has T changed` rule sees this write. Gated on
-                    // `has_changed` — a `changed`-free program never marks. Same
-                    // logical point as the codegen's post-write `markChanged`.
-                    if (self.has_changed) Bridge.markComponentChanged(world, cref, world.current_tick);
-                    return;
-                },
-                .resource_ref => |rref| {
-                    if (!rref.mutable) return error.RuntimeFailure;
-                    // A `.string_` slot write is a persistent promotion, not a
-                    // byte-block overwrite. Resolve the incoming
-                    // string's bytes (literal / rule-arena) here, then hand them
-                    // to `promoteResourceString`, which allocs the fresh block,
-                    // writes the new slot, and decrefs the previous value (order
-                    // enforced there). Only plain `=` is in the surface;
-                    // a compound op on a string slot is a runtime failure.
-                    if (world.registry.findField(rref.resource_id, field_name)) |field| {
-                        if (field.kind == .string_) {
-                            if (assign.op != .assign) return error.RuntimeFailure;
-                            const rhs = try self.evalExpr(world, locals, assign.value);
-                            if (self.thrown) return; // see `assignRhsThrew`
-                            const bytes = self.stringBytes(rhs) orelse return error.RuntimeFailure;
-                            Bridge.promoteResourceString(self.gpa, &world.registry, &world.resources, rref.resource_id, field_name, bytes) catch |e|
-                                return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
-                            return;
-                        }
-                        if (field.kind == .enum_) {
-                            // Enum slot write: resolve the RHS `.variant`
-                            // shorthand against the field's declared enum type (the
-                            // assignment position carries no expected-type context to
-                            // `evalExpr`), then store its discriminant. Only `=`.
-                            if (assign.op != .assign) return error.RuntimeFailure;
-                            const ev = try self.evalEnumShorthandFor(world, locals, assign.value, field.enum_type_name_id);
-                            Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, ev) catch |e|
-                                return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
-                            return;
-                        }
-                        if (field.kind == .array_ or field.kind == .map_ or field.kind == .set_) {
-                            // Whole-field reassignment `get_mut(R).xs = [...]`: build a
-                            // fresh persistent container from the RHS (deep-copy
-                            // entries, promote strings), then swap the slot and decref
-                            // the previous block (order enforced in
-                            // `promoteResourceCollection`). Only `=`.
-                            if (assign.op != .assign) return error.RuntimeFailure;
-                            const rhs = try self.evalExpr(world, locals, assign.value);
-                            if (self.thrown) return; // see `assignRhsThrew`
-                            const new_block = switch (field.kind) {
-                                .array_ => try self.buildPersistentArrayFrom(rhs),
-                                .map_ => try self.buildPersistentMapFrom(rhs),
-                                else => try self.buildPersistentSetFrom(rhs),
-                            };
-                            errdefer persistent.decref(self.gpa, new_block);
-                            Bridge.promoteResourceCollection(self.gpa, &world.registry, &world.resources, rref.resource_id, field_name, new_block) catch |e|
-                                return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
-                            return;
-                        }
-                    }
-                    const cur = Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
-                        return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
-                    const rhs = try self.evalExpr(world, locals, assign.value);
-                    if (self.thrown) return; // see `assignRhsThrew`
-                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
-                    Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, new_v) catch |e|
-                        return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
-                    return;
-                },
-                // Struct field write — `self.x = …` in a `mut
-                // self` method, or `v.x = …` on a `let mut v`. The field index
-                // is resolved before evaluating the rhs, then written back by
-                // index (the rhs eval may move the outer store, never the
-                // field's backing buffer).
-                .struct_ref => |handle| {
-                    var fi: ?usize = null;
-                    for (self.structs.list.items[handle].fields.items, 0..) |f, k| {
-                        if (f.name == fa.field_name) {
-                            fi = k;
-                            break;
-                        }
-                    }
-                    const k = fi orelse return error.RuntimeFailure;
-                    const cur = self.structs.list.items[handle].fields.items[k].value;
-                    const rhs = try self.evalExpr(world, locals, assign.value);
-                    if (self.thrown) return; // see `assignRhsThrew`
-                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
-                    self.structs.list.items[handle].fields.items[k].value = new_v;
-                    return;
-                },
-                else => return error.RuntimeFailure,
+            if (self.isRefPlace(locals, fa.receiver)) return self.assignRefField(world, locals, assign, fa);
+            const rhs = try self.evalExpr(world, locals, assign.value);
+            if (self.thrown) return; // see `assignRhsThrew`
+            const recv = try self.evalPlace(world, locals, fa.receiver);
+            if (recv != .struct_ref) return error.RuntimeFailure;
+            const handle = recv.struct_ref;
+            for (self.structs.list.items[handle].fields.items) |*f| {
+                if (f.name != fa.field_name) continue;
+                f.value = applyAssignOp(f.value, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, f.value, rhs), self.ast.exprSpan(assign.target));
+                return;
             }
+            return error.RuntimeFailure;
         }
         return error.RuntimeFailure;
+    }
+
+    /// Whether `id` resolves to an ECS ref with no effect: a `get` / `get_mut`
+    /// of a binding or of no receiver, or a binding holding a ref.
+    fn isRefPlace(self: *Interpreter, locals: *Locals, id: NodeId) bool {
+        switch (self.ast.exprKind(id)) {
+            .method_get, .method_get_mut => {
+                const mg = self.ast.method_gets.items[self.ast.exprData(id)];
+                return mg.receiver.isNone() or self.ast.exprKind(mg.receiver) == .ident;
+            },
+            .ident => {
+                const v = locals.get(self.ast.exprData(id)) orelse return false;
+                return v == .component_ref or v == .resource_ref;
+            },
+            else => return false,
+        }
+    }
+
+    /// A field write through an ECS ref. The ref is resolved before the
+    /// right-hand side to learn the field's kind; a component ref again after
+    /// it, the write landing where the right-hand side left the ref
+    /// (`etch-reference-part1.md` §7.9).
+    fn assignRefField(self: *Interpreter, world: *World, locals: *Locals, assign: ast_mod.AssignStmt, fa: ast_mod.FieldAccessExpr) StmtError!void {
+        const field_name = self.ast.strings.slice(fa.field_name);
+        const before = try self.evalPlace(world, locals, fa.receiver);
+        switch (before) {
+            .component_ref => {
+                const rhs = try self.evalExpr(world, locals, assign.value);
+                if (self.thrown) return; // see `assignRhsThrew`
+                const recv = try self.evalPlace(world, locals, fa.receiver);
+                if (recv != .component_ref) return error.RuntimeFailure;
+                const cref = recv.component_ref;
+                if (!cref.mutable) return error.RuntimeFailure;
+                const cur = Bridge.readComponentField(&world.registry, cref, world, field_name) catch |e|
+                    return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
+                const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
+                Bridge.writeComponentField(&world.registry, cref, world, field_name, new_v) catch |e|
+                    return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
+                // Change detection: stamp `changed_tick = current_tick`
+                // so an `entity has T changed` rule sees this write. Gated on
+                // `has_changed` — a `changed`-free program never marks. Same
+                // logical point as the codegen's post-write `markChanged`.
+                if (self.has_changed) Bridge.markComponentChanged(world, cref, world.current_tick);
+            },
+            .resource_ref => |first| {
+                // A `.string_` slot write is a persistent promotion, not a
+                // byte-block overwrite: the incoming string's bytes go to
+                // `promoteResourceString`, which allocs the fresh block,
+                // writes the new slot, and decrefs the previous value (order
+                // enforced there). Only plain `=` is in the surface;
+                // a compound op on a string slot is a runtime failure.
+                const field = world.registry.findField(first.resource_id, field_name);
+                const kind: ?FieldKind = if (field) |f| f.kind else null;
+                const rhs = if (kind != null and kind.? == .enum_) blk: {
+                    // Enum slot write: resolve the RHS `.variant` shorthand
+                    // against the field's declared enum type (the assignment
+                    // position carries no expected-type context to `evalExpr`),
+                    // then store its discriminant. Only `=`.
+                    if (assign.op != .assign) return error.RuntimeFailure;
+                    break :blk try self.evalEnumShorthandFor(world, locals, assign.value, field.?.enum_type_name_id);
+                } else try self.evalExpr(world, locals, assign.value);
+                if (self.thrown) return; // see `assignRhsThrew`
+                const rref = first;
+                if (!rref.mutable) return error.RuntimeFailure;
+                if (kind) |k| switch (k) {
+                    .string_ => {
+                        if (assign.op != .assign) return error.RuntimeFailure;
+                        const bytes = self.stringBytes(rhs) orelse return error.RuntimeFailure;
+                        Bridge.promoteResourceString(self.gpa, &world.registry, &world.resources, rref.resource_id, field_name, bytes) catch |e|
+                            return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
+                        return;
+                    },
+                    .enum_ => {
+                        Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, rhs) catch |e|
+                            return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
+                        return;
+                    },
+                    // Whole-field reassignment `get_mut(R).xs = [...]`: build a
+                    // fresh persistent container from the RHS (deep-copy
+                    // entries, promote strings), then swap the slot and decref
+                    // the previous block (order enforced in
+                    // `promoteResourceCollection`). Only `=`.
+                    .array_, .map_, .set_ => {
+                        if (assign.op != .assign) return error.RuntimeFailure;
+                        const new_block = switch (k) {
+                            .array_ => try self.buildPersistentArrayFrom(rhs),
+                            .map_ => try self.buildPersistentMapFrom(rhs),
+                            else => try self.buildPersistentSetFrom(rhs),
+                        };
+                        errdefer persistent.decref(self.gpa, new_block);
+                        Bridge.promoteResourceCollection(self.gpa, &world.registry, &world.resources, rref.resource_id, field_name, new_block) catch |e|
+                            return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
+                        return;
+                    },
+                    else => {},
+                };
+                const cur = Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
+                    return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
+                const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
+                Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, new_v) catch |e|
+                    return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
+            },
+            else => return error.RuntimeFailure,
+        }
     }
 
     /// Invoke a top-level `fn` (a free call). Args are
@@ -5903,7 +5939,7 @@ pub const Interpreter = struct {
     /// optional chain `recv?.method()` dispatches the same way on the
     /// unwrapped payload — same logical point as the
     /// resolver's `dispatchMethodOnType` split.
-    fn dispatchMethodOnValue(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall, recv: Value) StmtError!Value {
+    fn dispatchMethodOnValue(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall, recv: Value, recv_slot: Slot) StmtError!Value {
         switch (recv) {
             .world_handle => {
                 // the test World surface (§32). The mono-world handle
@@ -5951,7 +5987,7 @@ pub const Interpreter = struct {
                 const type_name = self.structs.list.items[handle].type_name;
                 const key = methodKey(type_name, mc.method_name);
                 const method = self.methods.get(key) orelse self.trait_methods.get(key) orelse return error.RuntimeFailure;
-                return try self.callMethod(world, locals, method, mc, recv);
+                return try self.callMethod(world, locals, method, mc, recv, recv_slot);
             },
             .entity_id => |eid| {
                 const mname = self.ast.strings.slice(mc.method_name);
@@ -6024,7 +6060,7 @@ pub const Interpreter = struct {
                 // type key is the interned `Entity`; self is the handle.
                 const entity_name = self.ast.strings.find("Entity") orelse return error.RuntimeFailure;
                 const method = self.trait_methods.get(methodKey(entity_name, mc.method_name)) orelse return error.RuntimeFailure;
-                return try self.callMethod(world, locals, method, mc, recv);
+                return try self.callMethod(world, locals, method, mc, recv, recv_slot);
             },
             .string_id, .string_run, .string_persistent, .string_view => {
                 // Builtin string methods: `len` → byte length; any other §12
@@ -6290,7 +6326,7 @@ pub const Interpreter = struct {
         try self.collections.sets.items[handle].append(self.gpa, item);
     }
 
-    fn callMethod(self: *Interpreter, world: *World, caller_locals: *Locals, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, self_value: ?Value) StmtError!Value {
+    fn callMethod(self: *Interpreter, world: *World, caller_locals: *Locals, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, self_value: ?Value, recv_slot: Slot) StmtError!Value {
         // As in `callFn`: an `async method` runs via the await call-frame
         // path; a direct sync call is a coloring violation (E0901).
         if (method.is_async) return error.RuntimeFailure;
@@ -6319,15 +6355,26 @@ pub const Interpreter = struct {
             try frame.put(self.gpa, p.name, values[idx], false);
         }
         try self.execStmtRun(world, &frame, method.body_start, method.body_len);
-        if (self.returning) {
-            self.returning = false;
-            const rv = self.return_value;
-            self.return_value = .{ .unit = {} };
-            return rv;
+        const result = blk: {
+            if (self.returning) {
+                self.returning = false;
+                const rv = self.return_value;
+                self.return_value = .{ .unit = {} };
+                break :blk rv;
+            }
+            if (self.thrown or self.control != .none) break :blk Value{ .unit = {} };
+            if (method.value.isNone()) break :blk Value{ .unit = {} };
+            break :blk try self.evalExpr(world, &frame, method.value);
+        };
+        // `self = v` in a `mut self` method replaces the caller's value
+        // (`etch-reference-part1.md` §8.3).
+        if (self_value != null and method.self_kind == .by_mut) {
+            if (self.ast.strings.find("self")) |self_id| {
+                const final = frame.get(self_id) orelse return error.RuntimeFailure;
+                if (!std.meta.eql(final, self_value.?)) try self.storeSlot(caller_locals, recv_slot, final);
+            }
         }
-        if (self.thrown or self.control != .none) return Value{ .unit = {} };
-        if (method.value.isNone()) return Value{ .unit = {} };
-        return try self.evalExpr(world, &frame, method.value);
+        return result;
     }
 
     /// Free every per-body runtime string, keeping the list's capacity
@@ -6550,13 +6597,127 @@ pub const Interpreter = struct {
     /// value holds, whoever keeps it next; a call's result is the callee's
     /// reference, transferred (§4.4).
     fn evalExpr(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!Value {
-        const v = try self.evalExprValue(world, locals, id);
+        var v = try self.evalExprValue(world, locals, id);
         switch (self.ast.exprKind(id)) {
             .fn_call, .method_call => {},
+            .ident, .field_access, .index => {
+                v = try self.copyValue(v, false);
+                try self.retainArena(v);
+            },
             else => try self.retainArena(v),
         }
         if (self.ast.implicit_wraps.count() == 0) return v;
         return self.wrapped(v, self.ast.implicit_wraps.get(id.raw()) orelse 0);
+    }
+
+    /// The value at `id` when it names a place — a binding, a field or an
+    /// element — without the copy a read as a value takes: a receiver, `self`
+    /// being a reference (`etch-reference-part1.md` §8.3).
+    fn evalPlace(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!Value {
+        return switch (self.ast.exprKind(id)) {
+            .ident, .field_access, .index => self.evalExprValue(world, locals, id),
+            else => self.evalExpr(world, locals, id),
+        };
+    }
+
+    /// Where a place's value is held, so it can be replaced.
+    const Slot = union(enum) {
+        none,
+        local: StringId,
+        struct_field: struct { handle: u32, index: usize },
+    };
+
+    /// `evalPlace`, with the slot holding the value.
+    fn evalPlaceSlot(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!struct { value: Value, slot: Slot } {
+        switch (self.ast.exprKind(id)) {
+            .ident => {
+                const name: StringId = self.ast.exprData(id);
+                if (locals.get(name)) |v| return .{ .value = v, .slot = .{ .local = name } };
+            },
+            .field_access => {
+                const fa = self.ast.field_accesses.items[self.ast.exprData(id)];
+                if (!fa.opt_chain and self.ast.exprKind(fa.receiver) != .path) {
+                    const recv = try self.evalPlace(world, locals, fa.receiver);
+                    if (recv == .struct_ref) {
+                        for (self.structs.list.items[recv.struct_ref].fields.items, 0..) |f, k| {
+                            if (f.name == fa.field_name) return .{ .value = f.value, .slot = .{ .struct_field = .{ .handle = recv.struct_ref, .index = k } } };
+                        }
+                        return error.RuntimeFailure;
+                    }
+                    return .{ .value = try self.fieldOf(world, recv, fa.field_name, id), .slot = .none };
+                }
+            },
+            else => {},
+        }
+        return .{ .value = try self.evalPlace(world, locals, id), .slot = .none };
+    }
+
+    /// Replace the value `slot` holds.
+    fn storeSlot(self: *Interpreter, locals: *Locals, slot: Slot, v: Value) StmtError!void {
+        switch (slot) {
+            .none => {},
+            .local => |name| replaceHeld(self.gpa, locals.getPtr(name) orelse return error.RuntimeFailure, v),
+            .struct_field => |f| self.structs.list.items[f.handle].fields.items[f.index].value = v,
+        }
+    }
+
+    /// A copy of `v` sharing no arena value with it (`etch-reference-part1.md`
+    /// §5.2): a struct, a rule-arena collection or an optional holding one is
+    /// copied with its contents. A persistent handle is shared, and counted as
+    /// a holder when `held`, the copy storing it.
+    fn copyValue(self: *Interpreter, v: Value, held: bool) StmtError!Value {
+        switch (v) {
+            .struct_ref => |h| {
+                const nh = try self.structs.newStruct(self.gpa, self.structs.list.items[h].type_name);
+                const n = self.structs.list.items[h].fields.items.len;
+                try self.structs.list.items[nh].fields.ensureTotalCapacity(self.gpa, n);
+                for (0..n) |k| {
+                    const f = self.structs.list.items[h].fields.items[k];
+                    const fv = try self.copyValue(f.value, true);
+                    self.structs.list.items[nh].fields.appendAssumeCapacity(.{ .name = f.name, .value = fv });
+                }
+                return .{ .struct_ref = nh };
+            },
+            .array_ref, .set_ref => |h| {
+                const lists = if (v == .array_ref) &self.collections.arrays else &self.collections.sets;
+                const nh = if (v == .array_ref) try self.collections.newArray(self.gpa) else try self.collections.newSet(self.gpa);
+                const n = lists.items[h].items.len;
+                try lists.items[nh].ensureTotalCapacity(self.gpa, n);
+                for (0..n) |i| {
+                    const ev = try self.copyValue(lists.items[h].items[i], true);
+                    lists.items[nh].appendAssumeCapacity(ev);
+                }
+                return if (v == .array_ref) .{ .array_ref = nh } else .{ .set_ref = nh };
+            },
+            .map_ref => |h| {
+                const nh = try self.collections.newMap(self.gpa);
+                const n = self.collections.maps.items[h].items.len;
+                try self.collections.maps.items[nh].ensureTotalCapacity(self.gpa, n);
+                for (0..n) |i| {
+                    const pair = self.collections.maps.items[h].items[i];
+                    const key = try self.copyValue(pair.key, true);
+                    const value = try self.copyValue(pair.value, true);
+                    self.collections.maps.items[nh].appendAssumeCapacity(.{ .key = key, .value = value });
+                }
+                return .{ .map_ref = nh };
+            },
+            .optional => |h| {
+                const payload = self.optionals.items[h] orelse return v;
+                switch (payload) {
+                    .struct_ref, .array_ref, .map_ref, .set_ref, .optional => {},
+                    else => return v,
+                }
+                const copied = try self.copyValue(payload, true);
+                const oh: u32 = @intCast(self.optionals.items.len);
+                try self.optionals.append(self.gpa, copied);
+                return .{ .optional = oh };
+            },
+            .array_persistent, .map_persistent, .set_persistent, .string_persistent => {
+                if (held) try self.retainArena(v);
+                return v;
+            },
+            else => return v,
+        }
     }
 
     /// `v` wrapped `layers` times into an optional.
@@ -6666,7 +6827,7 @@ pub const Interpreter = struct {
                         return error.RuntimeFailure;
                     }
                 }
-                const recv = try self.evalExpr(world, locals, fa.receiver);
+                const recv = try self.evalPlace(world, locals, fa.receiver);
                 // `recv?.field`, or a field read after one: `none`, or the
                 // payload's field, optional.
                 if (fa.opt_chain or (recv == .optional and self.ast.inOptionalChain(fa.receiver))) {
@@ -6928,7 +7089,7 @@ pub const Interpreter = struct {
                 // single element. Out-of-bounds is a
                 // runtime error (the debug panic of `etch-stdlib.md` §13.3).
                 const ix = self.ast.index_exprs.items[data];
-                const recv = try self.evalExpr(world, locals, ix.receiver);
+                const recv = try self.evalPlace(world, locals, ix.receiver);
                 if (recv == .map_ref) {
                     // `m[k] -> V?` (stdlib §14.2): scan
                     // the insertion-ordered pair list — found → some(value),
@@ -7018,10 +7179,7 @@ pub const Interpreter = struct {
                 errdefer captured.deinit(self.gpa);
                 var it = locals.map.iterator();
                 while (it.next()) |e| {
-                    // A captured local can hold a value no evaluation counted,
-                    // such as a loop element.
-                    try self.retainArena(e.value_ptr.value);
-                    try captured.put(self.gpa, e.key_ptr.*, e.value_ptr.value);
+                    try captured.put(self.gpa, e.key_ptr.*, try self.copyValue(e.value_ptr.value, true));
                 }
                 const handle = try self.closures.newClosure(self.gpa, id, captured);
                 return Value{ .closure = handle };
@@ -7100,7 +7258,7 @@ pub const Interpreter = struct {
                         return try self.evalSetAssociated(world, locals, mc);
                     }
                     const method = self.methods.get(methodKey(type_name, mc.method_name)) orelse return error.RuntimeFailure;
-                    return try self.callMethod(world, locals, method, mc, null);
+                    return try self.callMethod(world, locals, method, mc, null, .none);
                 }
                 // Tier 1 service call (`etch-abi-zig.md` §8.7): the receiver is
                 // a bare lowercase IDENT naming a registered service. Placed
@@ -7119,7 +7277,8 @@ pub const Interpreter = struct {
                         }
                     }
                 }
-                const recv = try self.evalExpr(world, locals, mc.receiver);
+                const place = try self.evalPlaceSlot(world, locals, mc.receiver);
+                const recv = place.value;
                 // `recv?.method(args)`, or a method called after one (part1
                 // §6.6): `none` short-circuits to a fresh `none` without
                 // dispatching; `some(p)` dispatches on the payload and
@@ -7131,11 +7290,11 @@ pub const Interpreter = struct {
                         try self.optionals.append(self.gpa, null);
                         return Value{ .optional = oh };
                     };
-                    const res = try self.dispatchMethodOnValue(world, locals, mc, payload);
+                    const res = try self.dispatchMethodOnValue(world, locals, mc, payload, .none);
                     if (res == .optional) return res;
                     return self.wrapped(res, 1);
                 }
-                return try self.dispatchMethodOnValue(world, locals, mc, recv);
+                return try self.dispatchMethodOnValue(world, locals, mc, recv, place.slot);
             },
             .loop_expr => {
                 // `loop { body }` — run the body repeatedly until a `break`
@@ -14649,29 +14808,6 @@ test "a sync for keeps iterating a resource array its body reassigns" {
     try std.testing.expectEqual(@as(i64, 6), readResourceIntNamed(&world, "R", "sum"));
 }
 
-test "a sync for over an arena array fails loud when its body shrinks it" {
-    const gpa = std.testing.allocator;
-    var world = World.init();
-    defer world.deinit(gpa);
-    var pr = try parser_mod.parse(gpa,
-        \\resource R { done: bool = false }
-        \\rule r() when resource R {
-        \\  if get(R).done == false {
-        \\    get_mut(R).done = true
-        \\    let mut xs = [1, 2, 3]
-        \\    for x in xs {
-        \\      let p = xs.pop()
-        \\    }
-        \\  }
-        \\}
-    );
-    defer pr.deinit(gpa);
-    var interp = try compileUnchecked(gpa, &pr, &world);
-    defer interp.deinit();
-    const report = try interp.runFor(&world, 1);
-    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
-}
-
 test "a sync for over a resource array fails loud when its body shrinks it" {
     const gpa = std.testing.allocator;
     var world = World.init();
@@ -18559,6 +18695,39 @@ test "a const is read at run time by either spelling" {
 
 const ScopeRun = struct { name: []const u8, out: i64, ticks: u32 = 1, src: []const u8 };
 
+/// Run each case, checked, and expect its `Out.n`.
+fn expectRuns(runs: []const ScopeRun) !void {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (runs) |c| {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa, c.src);
+        defer pr.deinit(gpa);
+        try std.testing.expect(pr.diagnostics.len == 0);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        if (diags.items.len != 0) {
+            wrong += 1;
+            for (diags.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+            continue;
+        }
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const report = try interp.runFor(&world, c.ticks);
+        const out = readResourceIntNamed(&world, "Out", "n");
+        if (report.runtime_errors != 0 or out != c.out) {
+            wrong += 1;
+            std.debug.print("{s}: {d} runtime errors, Out.n = {d}, expected {d}\n", .{ c.name, report.runtime_errors, out, c.out });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
 const scope_runs = [_]ScopeRun{
     .{ .name = "a nested block's shadow ends with the block", .out = 1, .src =
     \\resource Out { n: int = 0 }
@@ -18938,13 +19107,268 @@ const scope_runs = [_]ScopeRun{
     },
 };
 
-test "a binding ends with its scope at run time, and the one it shadowed returns" {
+const value_prelude =
+    \\resource Out { n: int = 0 }
+    \\struct P { x: int = 0 }
+    \\impl P {
+    \\  fn bump(mut self) { self.x = self.x + 1 }
+    \\  fn reset(mut self) { self = P { x: 7 } }
+    \\  fn keep(mut self) -> int {
+    \\    let q = self
+    \\    self.x = 2
+    \\    q.x
+    \\  }
+    \\  fn absorb(mut self, o: P) {
+    \\    self.x = self.x + 1
+    \\    self.x = self.x + o.x * 10
+    \\  }
+    \\}
+    \\struct In { v: int = 0 }
+    \\struct O { inner: In }
+    \\fn set9(p: P) -> int {
+    \\  let mut q = p
+    \\  q.x = 9
+    \\  q.x
+    \\}
+    \\
+;
+
+const value_runs = [_]ScopeRun{
+    .{ .name = "a struct read into a binding is a copy", .out = 12, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let p = P { x: 1 }
+        \\  let mut q = p
+        \\  q.x = 2
+        \\  get_mut(Out).n = p.x * 10 + q.x
+        \\}
+    },
+    .{ .name = "an array read into a binding is a copy", .out = 23, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let a: int[] = [1, 2]
+        \\  let mut b = a
+        \\  b.push(3)
+        \\  get_mut(Out).n = a.len() * 10 + b.len()
+        \\}
+    },
+    .{ .name = "a struct pushed is a copy", .out = 1, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut s = P { x: 1 }
+        \\  let mut xs: P[] = []
+        \\  xs.push(s)
+        \\  s.x = 9
+        \\  get_mut(Out).n = xs[0].x
+        \\}
+    },
+    .{ .name = "an element read out is a copy", .out = 1, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let xs: P[] = [P { x: 1 }]
+        \\  let mut e = xs[0]
+        \\  e.x = 5
+        \\  get_mut(Out).n = xs[0].x
+        \\}
+    },
+    .{ .name = "a struct inserted into a map is a copy", .out = 1, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut s = P { x: 1 }
+        \\  let mut m: [int: P] = [:]
+        \\  m.insert(1, s)
+        \\  s.x = 9
+        \\  get_mut(Out).n = (m[1] ?? P { x: 0 }).x
+        \\}
+    },
+    .{ .name = "a mut self method on a copy writes the copy", .out = 12, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let a = P { x: 1 }
+        \\  let mut b = a
+        \\  b.bump()
+        \\  get_mut(Out).n = a.x * 10 + b.x
+        \\}
+    },
+    .{ .name = "a closure captures a copy", .out = 1, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut s = P { x: 1 }
+        \\  let f = |k: int| s.x + k
+        \\  s.x = 10
+        \\  get_mut(Out).n = f(0)
+        \\}
+    },
+    .{ .name = "a for element read into a binding is a copy", .out = 1, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let ps: P[] = [P { x: 1 }]
+        \\  for p in ps {
+        \\    let mut q = p
+        \\    q.x = 9
+        \\  }
+        \\  get_mut(Out).n = ps[0].x
+        \\}
+    },
+    .{ .name = "an argument is a copy", .out = 19, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let s = P { x: 1 }
+        \\  let k = set9(s)
+        \\  get_mut(Out).n = s.x * 10 + k
+        \\}
+    },
+    .{ .name = "a string rebound is not written in place", .out = 12, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut s = "a"
+        \\  let t = s
+        \\  s = s + "b"
+        \\  get_mut(Out).n = t.len() * 10 + s.len()
+        \\}
+    },
+    .{ .name = "a struct field read into a binding is a copy", .out = 1, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let w = O { inner: In { v: 1 } }
+        \\  let mut i = w.inner
+        \\  i.v = 7
+        \\  get_mut(Out).n = w.inner.v
+        \\}
+    },
+    .{ .name = "a map read into a binding is a copy", .out = 12, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let m: [int: int] = [1: 10]
+        \\  let mut m2 = m
+        \\  m2.insert(2, 20)
+        \\  get_mut(Out).n = m.len() * 10 + m2.len()
+        \\}
+    },
+    .{ .name = "a set read into a binding is a copy", .out = 12, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let s: Set<int> = Set.from([1])
+        \\  let mut s2 = s
+        \\  s2.insert(2)
+        \\  get_mut(Out).n = s.len() * 10 + s2.len()
+        \\}
+    },
+    .{ .name = "a fixed array read into a dynamic one keeps its length", .out = 34, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let a = [1, 2, 3]
+        \\  let mut d: int[] = a
+        \\  d.push(4)
+        \\  get_mut(Out).n = a.len() * 10 + d.len()
+        \\}
+    },
+    .{ .name = "self is the caller's value, a copy of it is not", .out = 21, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut p = P { x: 1 }
+        \\  let k = p.keep()
+        \\  get_mut(Out).n = p.x * 10 + k
+        \\}
+    },
+    .{ .name = "self = v in a mut self method replaces the caller's value", .out = 7, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut p = P { x: 1 }
+        \\  p.reset()
+        \\  get_mut(Out).n = p.x
+        \\}
+    },
+    .{ .name = "a struct copy copies the struct it holds", .out = 15, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let a = O { inner: In { v: 1 } }
+        \\  let mut b = a
+        \\  b.inner.v = 5
+        \\  get_mut(Out).n = a.inner.v * 10 + b.inner.v
+        \\}
+    },
+    .{ .name = "a nested field write lands in the binding", .out = 5, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut o = O { inner: In { v: 1 } }
+        \\  o.inner.v = 5
+        \\  get_mut(Out).n = o.inner.v
+        \\}
+    },
+    .{ .name = "a mut self method on a field writes the field", .out = 2, .src = value_prelude ++
+        \\struct H { p: P }
+        \\rule r() when resource Out {
+        \\  let mut h = H { p: P { x: 1 } }
+        \\  h.p.bump()
+        \\  get_mut(Out).n = h.p.x
+        \\}
+    },
+    .{ .name = "self = v through a field replaces the field", .out = 7, .src = value_prelude ++
+        \\struct H { p: P }
+        \\rule r() when resource Out {
+        \\  let mut h = H { p: P { x: 1 } }
+        \\  h.p.reset()
+        \\  get_mut(Out).n = h.p.x
+        \\}
+    },
+    .{ .name = "an argument aliasing the receiver is a copy", .out = 12, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut c = P { x: 1 }
+        \\  c.absorb(c)
+        \\  get_mut(Out).n = c.x
+        \\}
+    },
+    .{ .name = "an assignment evaluates its right-hand side before its place", .out = 2, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut p = P { x: 1 }
+        \\  p.x = {
+        \\    p = P { x: 5 }
+        \\    2
+        \\  }
+        \\  get_mut(Out).n = p.x
+        \\}
+    },
+    .{ .name = "a compound assignment reads its place after its right-hand side", .out = 11, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut x = 1
+        \\  x += {
+        \\    x = 10
+        \\    1
+        \\  }
+        \\  get_mut(Out).n = x
+        \\}
+    },
+    .{ .name = "a for iterates its collection as at its entry while its body shrinks it", .out = 60, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let mut xs: int[] = [1, 2, 3]
+    \\  let mut k = 0
+    \\  for x in xs {
+    \\    let p = xs.pop()
+    \\    k += x
+    \\  }
+    \\  get_mut(Out).n = k * 10 + xs.len()
+    \\}
+    },
+};
+
+test "a value read as a value is a copy, and self is a reference" {
+    try expectRuns(&value_runs);
+}
+
+test "self = v in a mut self method replaces the caller's binding, sync and async" {
     const gpa = std.testing.allocator;
-    var wrong: usize = 0;
-    for (scope_runs) |c| {
+    const srcs = [_][:0]const u8{
+        \\trait Swap { fn swap(mut self, o: Entity) }
+        \\component L { to: Entity, n: int = 0 }
+        \\impl Swap for Entity {
+        \\  fn swap(mut self, o: Entity) { self = o }
+        \\}
+        \\rule r(entity: Entity) when entity has L {
+        \\  let mut e = entity
+        \\  e.swap(entity.get(L).to)
+        \\  entity.get_mut(L).n = if e == entity { 1 } else { 2 }
+        \\}
+        ,
+        \\trait Swap { async fn swap(mut self, o: Entity) }
+        \\component L { to: Entity, n: int = 0 }
+        \\impl Swap for Entity {
+        \\  async fn swap(mut self, o: Entity) { self = o }
+        \\}
+        \\async rule r(entity: Entity) when entity has L {
+        \\  let mut e = entity
+        \\  await e.swap(entity.get(L).to)
+        \\  entity.get_mut(L).n = if e == entity { 1 } else { 2 }
+        \\}
+        ,
+    };
+    for (srcs) |src| {
         var world = World.init();
         defer world.deinit(gpa);
-        var pr = try parser_mod.parse(gpa, c.src);
+        var pr = try parser_mod.parse(gpa, src);
         defer pr.deinit(gpa);
         try std.testing.expect(pr.diagnostics.len == 0);
         var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
@@ -18953,21 +19377,69 @@ test "a binding ends with its scope at run time, and the one it shadowed returns
             diags.deinit(gpa);
         }
         try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
-        if (diags.items.len != 0) {
-            wrong += 1;
-            for (diags.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
-            continue;
-        }
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
         var interp = try Interpreter.compile(gpa, &pr.ast, &world);
         defer interp.deinit();
-        const report = try interp.runFor(&world, c.ticks);
-        const out = readResourceIntNamed(&world, "Out", "n");
-        if (report.runtime_errors != 0 or out != c.out) {
-            wrong += 1;
-            std.debug.print("{s}: {d} runtime errors, Out.n = {d}, expected {d}\n", .{ c.name, report.runtime_errors, out, c.out });
-        }
+        const cid = world.registry.idOf("L").?;
+        const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+        const report = try interp.runFor(&world, 1);
+        try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+        var n: i64 = 0;
+        @memcpy(std.mem.asBytes(&n), componentBytes(&world, eid, cid)[8..16]);
+        try std.testing.expectEqual(@as(i64, 2), n);
     }
-    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a field write through an entity ref lands where the right-hand side left the ref" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component L { to: Entity, n: int = 0 }
+        \\component M { k: int = 0 }
+        \\rule r(entity: Entity) when entity has L and entity has M {
+        \\  let mut e = entity
+        \\  e.get_mut(L).n = {
+        \\    e = entity.get(L).to
+        \\    5
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const l = world.registry.idOf("L").?;
+    const m = world.registry.idOf("M").?;
+    const a = try world.spawnDynamic(gpa, &[_]ComponentId{ l, m });
+    const b = try world.spawnDynamic(gpa, &[_]ComponentId{l});
+    @memcpy(componentBytes(&world, a, l)[0..8], std.mem.asBytes(&b));
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    var n_a: i64 = 0;
+    var n_b: i64 = 0;
+    @memcpy(std.mem.asBytes(&n_a), componentBytes(&world, a, l)[8..16]);
+    @memcpy(std.mem.asBytes(&n_b), componentBytes(&world, b, l)[8..16]);
+    try std.testing.expectEqual(@as(i64, 0), n_a);
+    try std.testing.expectEqual(@as(i64, 5), n_b);
+}
+
+/// The bytes of `eid`'s component `cid`.
+fn componentBytes(world: *World, eid: CoreEntityId, cid: ComponentId) []u8 {
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    return arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+}
+
+test "a binding ends with its scope at run time, and the one it shadowed returns" {
+    try expectRuns(&scope_runs);
 }
 
 test "a binding a nested scope shadows keeps its reference until the scope closes" {
