@@ -17696,15 +17696,14 @@ test "a for-loop over a rule-arena value is refused when its body suspends" {
     , .rule_arena_value_escapes));
 }
 
-test "the iterator refusal covers only what a type can decide, and this pins the rest" {
+test "an async for over a collection of the rule's arena is refused, over a resource's accepted" {
     const gpa = std.testing.allocator;
-
-    // A NAMED local of an ambiguous type IS covered — by the sibling rule, not by
-    // this one. `xs` is `.array_dyn` and `m` is `.map_t`, both of which
-    // `isRuleArenaType` answers true for, so walking the locals catches them. The
-    // iterator rule only has to reach what is nobody's local.
-    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa,
+    const prelude =
         \\resource S { done: bool = false }
+        \\resource R { xs: int[] = [1, 2, 3] }
+        \\
+    ;
+    try std.testing.expectEqual(@as(usize, 2), try countDiagCode(gpa, prelude ++
         \\async rule holder()
         \\  when resource S
         \\{
@@ -17714,22 +17713,33 @@ test "the iterator refusal covers only what a type can decide, and this pins the
         \\  }
         \\}
     , .rule_arena_value_escapes));
-
-    // NOT COVERED, MEASURED AND PINNED RATHER THAN LEFT SILENT. An UNNAMED map
-    // literal is nobody's local, so the sibling rule cannot see it, and its
-    // resolved type `.map_t` is the one a resource `[K: V]` also produces — so this
-    // rule cannot separate it either. Refusing `.map_t` would remove the ability to
-    // iterate a resource map inside an async rule, a capability rather than a false
-    // refusal, and separating the two needs the iterable's provenance.
-    //
-    // Asserted as ZERO so the day `ResolvedType` carries the storage zone, this
-    // test fails and names exactly what to tighten.
-    try std.testing.expectEqual(@as(usize, 0), try countDiagCode(gpa,
-        \\resource S { done: bool = false }
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa, prelude ++
         \\async rule holder()
         \\  when resource S
         \\{
         \\  for k, v in [1: 10] {
+        \\    await wait(0.016s)
+        \\  }
+        \\}
+    , .rule_arena_value_escapes));
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa, prelude ++
+        \\async rule holder()
+        \\  when resource S and resource R
+        \\{
+        \\  for x in get(R).xs[0..2] {
+        \\    await wait(0.016s)
+        \\  }
+        \\}
+    , .rule_arena_value_escapes));
+    try std.testing.expectEqual(@as(usize, 0), try countDiagCode(gpa, prelude ++
+        \\async rule holder()
+        \\  when resource S and resource R
+        \\{
+        \\  for x in get(R).xs {
+        \\    await wait(0.016s)
+        \\  }
+        \\  let r = get(R)
+        \\  for x in r.xs {
         \\    await wait(0.016s)
         \\  }
         \\}

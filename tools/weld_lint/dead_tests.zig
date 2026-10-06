@@ -244,8 +244,8 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // line of `zig build test --summary all`, skipped tests included. Windows is
     // two lower, by the two `only_on = .windows` entries above.
     return switch (os) {
-        .windows => 2863,
-        else => 2865,
+        .windows => 2864,
+        else => 2866,
     };
 }
 

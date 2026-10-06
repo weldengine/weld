@@ -7097,7 +7097,7 @@ pub const TypeChecker = struct {
                 defer _ = self.break_frames.pop();
                 // The ITERATOR is what survives a suspension here, and it is
                 // nobody's local — `x` is the element, typically an `int`.
-                const iter_retained = iteratorRetainedAcrossSuspension(iter_t);
+                const iter_retained = self.iteratorRetainedAcrossSuspension(ctx, f.iterable, iter_t);
                 if (iter_retained) self.arena_iter_depth += 1;
                 defer if (iter_retained) {
                     self.arena_iter_depth -= 1;
@@ -7620,41 +7620,31 @@ pub const TypeChecker = struct {
         return ctx.scope_log.items.len;
     }
 
-    /// Does the `ForFrame` this loop pushes retain a handle into a per-body store
-    /// across a suspension?
-    ///
-    /// **THE QUESTION IS WHAT THE FRAME RETAINS, NOT WHAT THE AUTHOR NAMED.** The
-    /// interpreter's `ForIter` has five variants: `.range` is fully self-contained,
-    /// `.array` and `.map` carry an INDEX into the rule-arena collection store, and
-    /// `.array_persistent` / `.map_persistent` carry a block pointer that outlives
-    /// any body. Only the first is provably safe from a type alone, so everything
-    /// else is refused.
-    ///
-    /// **ONLY `.array_fixed` IS SEPARABLE, AND THE BOUNDARY WAS MEASURED CELL BY
-    /// CELL.** The resolved type does not carry the storage ZONE, so most iterables
-    /// cannot be told apart from their type alone:
-    ///
-    /// - `[1, 2, 3]` and a local bound to one resolve `.array_fixed`, and NO
-    ///   resource path produces that type — a `resource F { arr: int[3] }` field is
-    ///   not a collection field at all and its read is `undefined_symbol`. So
-    ///   `.array_fixed` is unambiguously rule-arena, and refusing it costs zero.
-    /// - `.array_dyn` is AMBIGUOUS: a resource `int[]` resolves there, and so does
-    ///   `let xs: int[] = [1, 2]`, a rule-arena literal given a slice type.
-    /// - `.map_t` is AMBIGUOUS the same way: a resource `[K: V]` and a local
-    ///   `let m = [1: 10]` are one type.
-    /// - `.range` is self-contained at runtime (`ForIter.range` holds two integers
-    ///   and a flag), so it is safe whatever its provenance.
-    ///
-    /// Separating the two ambiguous families needs the iterable's PROVENANCE, which
-    /// is a structural property of the expression and not of its type — and a
-    /// memory-safety verdict resting on a structural read is what this rule's
-    /// sibling refused. So this covers the half that is decidable from a type and
-    /// leaves the other half to the milestone entry that gives `ResolvedType` a
-    /// zone; refusing the ambiguous families instead would cost the ability to
-    /// iterate ANY resource collection inside an async rule, which is a capability
-    /// and not a false refusal.
-    fn iteratorRetainedAcrossSuspension(t: ResolvedType) bool {
-        return t == .array_fixed;
+    /// Whether the frame of a `for` over `iterable`, of type `t`, holds a handle
+    /// into the rule body's arena across a suspension: the `for` iterates a
+    /// copy, which only a resource's collection field keeps out of the arena.
+    fn iteratorRetainedAcrossSuspension(self: *TypeChecker, ctx: *const RuleCtx, iterable: NodeId, t: ResolvedType) bool {
+        return switch (t) {
+            .array_fixed => true,
+            .array_dyn, .map_t => !self.isResourceField(ctx, iterable),
+            else => false,
+        };
+    }
+
+    /// Whether `id` reads a field of a resource: `get(R).f`, `get_mut(R).f`,
+    /// or a field of a binding of one.
+    fn isResourceField(self: *TypeChecker, ctx: *const RuleCtx, id: NodeId) bool {
+        if (self.arena.exprKind(id) != .field_access) return false;
+        const fa = self.arena.field_accesses.items[self.arena.exprData(id)];
+        if (fa.opt_chain) return false;
+        return switch (self.arena.exprKind(fa.receiver)) {
+            .method_get, .method_get_mut => self.arena.method_gets.items[self.arena.exprData(fa.receiver)].receiver.isNone(),
+            .ident => blk: {
+                const local = ctx.locals.get(self.arena.exprData(fa.receiver)) orelse break :blk false;
+                break :blk local.type_ == .resource;
+            },
+            else => false,
+        };
     }
 
     fn isRuleArenaType(t: ResolvedType) bool {
@@ -8076,7 +8066,18 @@ pub const TypeChecker = struct {
                         }
                     }
                 }
-                const env = if (ctx_opt) |ctx| try self.recordClosureEnv(ctx) else ClosureType.no_env;
+                const ctx = ctx_opt orelse return .{ .closure = .{ .literal = id, .env = ClosureType.no_env } };
+                const env = try self.recordClosureEnv(ctx);
+                // Checked here, called or not: a call types it again with its
+                // arguments.
+                var param_types: std.ArrayListUnmanaged(ResolvedType) = .empty;
+                defer param_types.deinit(self.gpa);
+                i = 0;
+                while (i < ce.params_len) : (i += 1) {
+                    const p = self.arena.closure_params.items[ce.params_start + i];
+                    try param_types.append(self.gpa, if (p.type_node.isNone()) .unknown else self.namedTypeToResolved(p.type_node));
+                }
+                _ = try self.typeClosureBody(ctx, ce, env, param_types.items);
                 return .{ .closure = .{ .literal = id, .env = env } };
             },
             .fn_call => return try self.synthCall(id, data, ctx_opt),
@@ -8610,7 +8611,29 @@ pub const TypeChecker = struct {
             try arg_types.append(self.gpa, try self.synthExprE(@bitCast(self.arena.extra.items[call.args_start + i]), ctx));
         }
         if (callee_t.closure.env == ClosureType.no_env) return ResolvedType.unknown;
-        const env = &self.closure_envs.items[callee_t.closure.env];
+        i = 0;
+        while (i < ce.params_len) : (i += 1) {
+            const p = self.arena.closure_params.items[ce.params_start + i];
+            if (p.type_node.isNone()) continue;
+            const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
+            const ptype = self.namedTypeToResolved(p.type_node);
+            if (!try self.valueFits(ptype, arg, arg_types.items[i])) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "closure argument type does not match the parameter type", .{});
+            }
+            arg_types.items[i] = ptype;
+        }
+        // The body was checked at its literal; what typing it again here
+        // repeats is dropped.
+        const base = self.diagnostics.items.len;
+        const t = try self.typeClosureBody(ctx, ce, callee_t.closure.env, arg_types.items);
+        self.dropRepeatedDiagnostics(base);
+        return t;
+    }
+
+    /// Type a closure's body over the scope it is written in, its params bound
+    /// to `param_types`, and return its value's type.
+    fn typeClosureBody(self: *TypeChecker, ctx: *RuleCtx, ce: ast_mod.ClosureExpr, env_index: u32, param_types: []const ResolvedType) TypeError!ResolvedType {
+        const env = &self.closure_envs.items[env_index];
         // The body sees the scope the closure is written in, its params bound
         // over it. Copied: typing the body can record another closure.
         var own = try env.own.clone(self.gpa);
@@ -8634,17 +8657,8 @@ pub const TypeChecker = struct {
             ctx.scope_log = caller_log;
             ctx.scope_starts = caller_starts;
         }
-        i = 0;
-        while (i < ce.params_len) : (i += 1) {
+        for (param_types, 0..) |ptype, i| {
             const p = self.arena.closure_params.items[ce.params_start + i];
-            const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
-            var ptype = arg_types.items[i];
-            if (!p.type_node.isNone()) {
-                ptype = self.namedTypeToResolved(p.type_node);
-                if (!try self.valueFits(ptype, arg, arg_types.items[i])) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "closure argument type does not match the parameter type", .{});
-                }
-            }
             // A second param of one name is refused once, at the literal.
             _ = try ctx.bind(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
         }
@@ -8681,6 +8695,25 @@ pub const TypeChecker = struct {
         self.closure_calls += 1;
         defer self.closure_calls -= 1;
         return try self.synthBodyIn(ce.body, ctx);
+    }
+
+    /// Drop each diagnostic from `base` on that one before `base` already
+    /// says, at the same place.
+    fn dropRepeatedDiagnostics(self: *TypeChecker, base: usize) void {
+        var w = base;
+        for (self.diagnostics.items[base..]) |d| {
+            const seen = for (self.diagnostics.items[0..base]) |e| {
+                if (e.code == d.code and std.meta.eql(e.primary_span, d.primary_span) and std.mem.eql(u8, e.primary_message, d.primary_message)) break true;
+            } else false;
+            if (seen) {
+                var dropped = d;
+                dropped.deinit(self.gpa);
+            } else {
+                self.diagnostics.items[w] = d;
+                w += 1;
+            }
+        }
+        self.diagnostics.items.len = w;
     }
 
     /// Validate a call's argument BINDING against a parameter-name list
@@ -17837,6 +17870,45 @@ test "an index write through a mutable place is accepted" {
     const gpa = std.testing.allocator;
     var wrong: usize = 0;
     for (index_write_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const closure_body_refused = [_]PlaceCase{
+    .{ .name = "an uncalled closure writing a captured struct's field", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = |v: int| { p.x = v }\n}" },
+    .{ .name = "an uncalled closure binding an int as a string", .code = .type_mismatch, .needle = "let initializer", .src = "rule r() {\n  let f = |v: int| {\n    let s: string = v\n  }\n}" },
+    .{ .name = "an uncalled closure pushing onto a captured collection", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "rule r() {\n  let mut xs: int[] = [1]\n  let f = |v: int| { xs.push(v) }\n}" },
+    .{ .name = "a closure stored and never called", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = |v: int| { p.x = v }\n  let g = f\n}" },
+    .{ .name = "a closure called twice, its write reported once", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = |v: int| { p.x = v }\n  f(1)\n  f(2)\n}" },
+};
+
+const closure_body_accepted = [_]UnitCase{
+    .{ .name = "an uncalled closure reading its captures", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let p = P { x: 1 }\n  let f = |v: int| p.x + v\n}" },
+    .{ .name = "an uncalled closure writing its own binding", .code = .type_mismatch, .src = "rule r() {\n  let f = |v: int| {\n    let mut q = v\n    q = q + 1\n    q\n  }\n}" },
+};
+
+test "a closure body is checked where it is written, called or not" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (closure_body_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or countMessage(r.diagnostics.items, c.code, c.needle) != 1) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (closure_body_accepted) |c| {
         var r = try parseAndCheck(gpa, c.src);
         defer r.deinit(gpa);
         try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
