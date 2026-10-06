@@ -4891,22 +4891,7 @@ pub const Interpreter = struct {
         switch (kind) {
             .let_stmt => {
                 const let = self.ast.let_stmts.items[data];
-                // Anonymous `.{ … }` initializer: the
-                // let annotation supplies the struct type — the same logical
-                // point as the resolver's check mode and the codegen's
-                // qualified emission. The resolver guarantees a named struct
-                // annotation (E0210 otherwise); belt on the lookup.
-                const v = blk: {
-                    if (self.ast.exprKind(let.value) == .struct_lit) {
-                        const sl = self.ast.struct_lits.items[self.ast.exprData(let.value)];
-                        if (sl.type_name == 0) {
-                            if (let.type_annotation.isNone()) return error.RuntimeFailure;
-                            const annotated = self.ast.namedTypeName(let.type_annotation) orelse return error.RuntimeFailure;
-                            break :blk try self.evalStructLitAs(world, locals, sl, self.ast.resolveTypeAliasName(annotated));
-                        }
-                    }
-                    break :blk try self.evalExpr(world, locals, let.value);
-                };
+                const v = try self.evalExpr(world, locals, let.value);
                 try locals.put(self.gpa, let.name, v, let.is_mut or self.ast.exprKind(let.value) == .method_get_mut);
             },
             .assign_stmt => {
@@ -5507,11 +5492,7 @@ pub const Interpreter = struct {
     }
 
     /// Materialize a struct literal as a fresh `type_name` value in the
-    /// rule-body struct store (split out so
-    /// the anonymous `.{ … }` form evaluates through the same point with the
-    /// name supplied by its context — let annotation or typed field value,
-    /// the same logical point as the resolver's check mode and the codegen's
-    /// qualified emission). Every declared field is filled in declaration
+    /// rule-body struct store. Every declared field is filled in declaration
     /// order: the literal's value if given, else the field's const default
     /// (matching the Zig codegen, which relies on the `extern struct`
     /// default-fill). The handle is re-fetched after each field eval (a
@@ -5534,17 +5515,6 @@ pub const Interpreter = struct {
                     if (self.ast.exprKind(flit.value) == .tag_path) {
                         if (self.enumFieldShorthand(f, flit.value)) |ev| {
                             provided = ev;
-                            break;
-                        }
-                    }
-                    // Anonymous `.{ … }` in field-value position: resolved against
-                    // the declared
-                    // struct field type, recursively.
-                    if (self.ast.exprKind(flit.value) == .struct_lit) {
-                        const inner = self.ast.struct_lits.items[self.ast.exprData(flit.value)];
-                        if (inner.type_name == 0) {
-                            const sname = self.structFieldTypeName(f) orelse return error.RuntimeFailure;
-                            provided = try self.evalStructLitAs(world, locals, inner, sname);
                             break;
                         }
                     }
@@ -7358,12 +7328,8 @@ pub const Interpreter = struct {
             },
             .struct_lit => {
                 const sl = self.ast.struct_lits.items[data];
-                // Anonymous `.{ … }` (`type_name == 0`)
-                // only evaluates through a typed context (let annotation /
-                // typed field value) which supplies the name — the resolver
-                // rejects any other position (E0210); belt here.
-                if (sl.type_name == 0) return error.RuntimeFailure;
-                return try self.evalStructLitAs(world, locals, sl, sl.type_name);
+                const name = if (sl.type_name != 0) sl.type_name else self.ast.anonStruct(id) orelse return error.RuntimeFailure;
+                return try self.evalStructLitAs(world, locals, sl, name);
             },
             .method_call => {
                 // `recv.method(args)` / `Type.assoc(args)` — dispatch in the
@@ -19289,6 +19255,43 @@ const value_prelude =
     \\}
     \\
 ;
+
+const anon_runs = [_]ScopeRun{
+    .{ .name = "an anonymous literal into an optional", .out = 4, .src = value_prelude ++ "rule r() when resource Out {\n  let o: P? = .{ x: 4 }\n  get_mut(Out).n = if let p = o { p.x } else { 0 }\n}\n" },
+    .{ .name = "an anonymous literal under some", .out = 5, .src = value_prelude ++ "rule r() when resource Out {\n  let o: P? = some(.{ x: 5 })\n  get_mut(Out).n = if let p = o { p.x } else { 0 }\n}\n" },
+    .{ .name = "anonymous elements of a dynamic array", .out = 12, .src = value_prelude ++ "rule r() when resource Out {\n  let ps: P[] = [.{ x: 1 }, .{ x: 2 }]\n  get_mut(Out).n = ps[0].x * 10 + ps[1].x\n}\n" },
+    .{ .name = "an anonymous element beside a named one", .out = 34, .src = value_prelude ++ "rule r() when resource Out {\n  let ps: P[2] = [.{ x: 3 }, P { x: 4 }]\n  get_mut(Out).n = ps[0].x * 10 + ps[1].x\n}\n" },
+    .{ .name = "an anonymous fill", .out = 6, .src = value_prelude ++ "rule r() when resource Out {\n  let ps: P[3] = [.{ x: 2 }; 3]\n  get_mut(Out).n = ps[0].x + ps[1].x + ps[2].x\n}\n" },
+    .{ .name = "anonymous elements of an optional array", .out = 12, .src = value_prelude ++ "rule r() when resource Out {\n  let os: P[]? = [.{ x: 1 }, .{ x: 2 }]\n  get_mut(Out).n = if let xs = os { xs[0].x * 10 + xs[1].x } else { 0 }\n}\n" },
+    .{ .name = "an anonymous map value", .out = 6, .src = value_prelude ++ "rule r() when resource Out {\n  let m: [int: P] = [1: .{ x: 6 }]\n  let v = m[1] ?? P { x: 0 }\n  get_mut(Out).n = v.x\n}\n" },
+    .{ .name = "an anonymous literal pushed", .out = 7, .src = value_prelude ++ "rule r() when resource Out {\n  let mut ps: P[] = []\n  ps.push(.{ x: 7 })\n  get_mut(Out).n = ps[0].x\n}\n" },
+    .{ .name = "an anonymous literal inserted", .out = 8, .src = value_prelude ++ "rule r() when resource Out {\n  let mut m: [int: P] = [:]\n  m.insert(1, .{ x: 8 })\n  let v = m[1] ?? P { x: 0 }\n  get_mut(Out).n = v.x\n}\n" },
+    .{ .name = "an anonymous literal written to a map entry", .out = 9, .src = value_prelude ++ "rule r() when resource Out {\n  let mut m: [int: P] = [:]\n  m[2] = .{ x: 9 }\n  let v = m[2] ?? P { x: 0 }\n  get_mut(Out).n = v.x\n}\n" },
+    .{ .name = "an anonymous literal written to an element", .out = 10, .src = value_prelude ++ "rule r() when resource Out {\n  let mut ps: P[] = [P { x: 1 }]\n  ps[0] = .{ x: 10 }\n  get_mut(Out).n = ps[0].x\n}\n" },
+    .{ .name = "an anonymous literal assigned to a binding", .out = 11, .src = value_prelude ++ "rule r() when resource Out {\n  let mut p = P { x: 1 }\n  p = .{ x: 11 }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "an anonymous literal passed to a fn", .out = 12, .src = value_prelude ++ "fn px(p: P) -> int {\n  p.x\n}\nrule r() when resource Out {\n  get_mut(Out).n = px(.{ x: 12 })\n}\n" },
+    .{ .name = "an anonymous literal passed to a method", .out = 32, .src = value_prelude ++ "rule r() when resource Out {\n  let mut p = P { x: 1 }\n  p.absorb(.{ x: 3 })\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "an anonymous literal returned", .out = 14, .src = value_prelude ++ "fn mk() -> P {\n  return .{ x: 14 }\n}\nrule r() when resource Out {\n  get_mut(Out).n = mk().x\n}\n" },
+    .{ .name = "an anonymous literal as a fn's tail", .out = 15, .src = value_prelude ++ "fn mk2() -> P {\n  .{ x: 15 }\n}\nrule r() when resource Out {\n  get_mut(Out).n = mk2().x\n}\n" },
+    .{ .name = "an anonymous literal as a method's tail", .out = 24, .src = value_prelude ++ "struct M { y: int = 0 }\nimpl M {\n  fn next(self) -> M {\n    .{ y: self.y + 1 }\n  }\n}\nrule r() when resource Out {\n  let m = M { y: 23 }\n  let n = m.next()\n  get_mut(Out).n = n.y\n}\n" },
+    .{ .name = "anonymous if branches", .out = 16, .src = value_prelude ++ "rule r() when resource Out {\n  let c = get(Out).n == 0\n  let p: P = if c { .{ x: 16 } } else { .{ x: 0 } }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "anonymous match arms", .out = 17, .src = value_prelude ++ "rule r() when resource Out {\n  let p: P = match get(Out).n {\n    0 => .{ x: 17 },\n    _ => .{ x: 0 },\n  }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "an anonymous block value", .out = 18, .src = value_prelude ++ "rule r() when resource Out {\n  let p: P = {\n    let a = 18\n    while false {\n    }\n    .{ x: a }\n  }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "an anonymous literal in an optional field", .out = 19, .src = value_prelude ++ "struct H { o: P? = none }\nrule r() when resource Out {\n  let h = H { o: .{ x: 19 } }\n  get_mut(Out).n = if let p = h.o { p.x } else { 0 }\n}\n" },
+    .{ .name = "an anonymous default of ??", .out = 20, .src = value_prelude ++ "rule r() when resource Out {\n  let o: P? = none\n  let p = o ?? .{ x: 20 }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "an anonymous branch beside none", .out = 21, .src = value_prelude ++ "rule r() when resource Out {\n  let c = get(Out).n == 0\n  let o: P? = if c { .{ x: 21 } } else { none }\n  get_mut(Out).n = if let p = o { p.x } else { 0 }\n}\n" },
+    .{ .name = "an anonymous literal passed to a closure", .out = 22, .src = value_prelude ++ "rule r() when resource Out {\n  let f = |p: P| p.x\n  get_mut(Out).n = f(.{ x: 22 })\n}\n" },
+    .{ .name = "anonymous if-let branches", .out = 26, .src = value_prelude ++ "rule r() when resource Out {\n  let o: P? = some(P { x: 1 })\n  let p: P = if let q = o { .{ x: q.x + 25 } } else { .{ x: 0 } }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "an anonymous literal written to a field", .out = 27, .src = value_prelude ++ "rule r() when resource Out {\n  let mut h = O { inner: In { v: 1 } }\n  h.inner = .{ v: 27 }\n  get_mut(Out).n = h.inner.v\n}\n" },
+    .{ .name = "an anonymous literal assigned to self", .out = 28, .src = value_prelude ++ "struct R { x: int = 0 }\nimpl R {\n  fn redo(mut self) {\n    self = .{ x: 28 }\n  }\n}\nrule r() when resource Out {\n  let mut r = R { x: 1 }\n  r.redo()\n  get_mut(Out).n = r.x\n}\n" },
+    .{ .name = "an anonymous literal for a generic fn's concrete parameter", .out = 29, .src = value_prelude ++ "fn g<T>(p: P, t: T) -> int {\n  p.x\n}\nrule r() when resource Out {\n  get_mut(Out).n = g(.{ x: 29 }, 1)\n}\n" },
+    .{ .name = "an anonymous literal in a struct field", .out = 30, .src = value_prelude ++ "rule r() when resource Out {\n  let h = O { inner: .{ v: 30 } }\n  get_mut(Out).n = h.inner.v\n}\n" },
+    .{ .name = "an anonymous literal into a let", .out = 31, .src = value_prelude ++ "rule r() when resource Out {\n  let q: P = .{ x: 31 }\n  get_mut(Out).n = q.x\n}\n" },
+};
+
+test "an anonymous struct literal takes the struct its slot expects" {
+    try expectRuns(&anon_runs);
+}
 
 const value_runs = [_]ScopeRun{
     .{ .name = "a struct read into a binding is a copy", .out = 12, .src = value_prelude ++

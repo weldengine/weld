@@ -2599,6 +2599,8 @@ pub const AstArena = struct {
     tag_path_literals: std.AutoHashMapUnmanaged(u32, void) = .empty,
     /// Each `.variant` shorthand the checker resolved → the enum it names.
     enum_shorthands: std.AutoHashMapUnmanaged(u32, StringId) = .empty,
+    /// Each anonymous `.{ … }` the checker resolved → the struct it names.
+    anon_structs: std.AutoHashMapUnmanaged(u32, StringId) = .empty,
     /// The expressions whose value the checker found wrapped into an optional
     /// (`etch-reference-part1.md` §3.6) → how many times.
     implicit_wraps: std.AutoHashMapUnmanaged(u32, u8) = .empty,
@@ -2846,6 +2848,7 @@ pub const AstArena = struct {
         self.tag_path_segs.deinit(gpa);
         self.tag_path_literals.deinit(gpa);
         self.enum_shorthands.deinit(gpa);
+        self.anon_structs.deinit(gpa);
         self.implicit_wraps.deinit(gpa);
         self.tag_filters.deinit(gpa);
         self.tag_operands.deinit(gpa);
@@ -3787,6 +3790,10 @@ pub const AstArena = struct {
     /// The enum the checker resolved the shorthand `id` to.
     pub fn shorthandEnum(self: *const AstArena, id: NodeId) ?StringId {
         return self.enum_shorthands.get(id.raw());
+    }
+
+    pub fn anonStruct(self: *const AstArena, id: NodeId) ?StringId {
+        return self.anon_structs.get(id.raw());
     }
 
     /// Whether `id` is an access of an optional chain: a `?.` link, or a `.`

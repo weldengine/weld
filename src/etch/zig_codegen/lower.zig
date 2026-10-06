@@ -3284,11 +3284,8 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         return;
     }
 
-    // Anonymous `.{ … }` initializer: the let
-    // annotation supplies the struct type — emitted as the qualified
-    // `TypeName{ … }`, byte-identical to the explicit form's emission (the
-    // binding stays un-annotated, like every struct-literal let). The
-    // resolver guarantees a named struct annotation (E0210 otherwise).
+    // An anonymous `.{ … }` under an optional annotation fails loud: the
+    // codegen has no optional of a struct.
     if (ast.exprKind(let.value) == .struct_lit) {
         const sl = ast.struct_lits.items[ast.exprData(let.value)];
         if (sl.type_name == 0) {
@@ -3937,14 +3934,9 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try w.write(")");
         },
         .struct_lit => {
-            // `T { f: v, … }` → Zig `T{ .f = v, … }`. The
-            // anonymous `.{ … }` form (`type_name == 0`)
-            // is emitted by its typed context (let annotation / typed field
-            // value) through `emitStructLitAs` — the resolver rejects any
-            // other position (E0210); belt here.
             const sl = ast.struct_lits.items[data];
-            if (sl.type_name == 0) return CodegenError.UnsupportedConstruct;
-            try emitStructLitAs(w, ast, ctx, sl, sl.type_name);
+            const name = if (sl.type_name != 0) sl.type_name else ast.anonStruct(id) orelse return CodegenError.UnsupportedConstruct;
+            try emitStructLitAs(w, ast, ctx, sl, name);
         },
         .method_call => {
             // `recv.method(args)` / `Type.assoc(args)` → Zig method / associated
@@ -6685,10 +6677,9 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
             break :blk fnTypeZig(ast, decl.return_type) catch "";
         },
         .struct_lit => blk: {
-            // An explicit `T { … }` literal types as `T`; the anonymous `.{ … }` form
-            // keeps "" (context-typed).
             const sl = ast.struct_lits.items[data];
-            break :blk if (sl.type_name == 0) "" else ast.strings.slice(sl.type_name);
+            const name = if (sl.type_name != 0) sl.type_name else ast.anonStruct(expr) orelse break :blk "";
+            break :blk ast.strings.slice(name);
         },
         // A user method's call types as its declared return.
         .method_call => blk: {

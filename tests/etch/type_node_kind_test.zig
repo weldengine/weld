@@ -122,6 +122,13 @@ test "the codegen refuses an optional fn return" {
     );
 }
 
+test "the codegen refuses an anonymous literal under an optional annotation" {
+    try std.testing.expectError(
+        error.UnsupportedConstruct,
+        lowerSource(std.testing.allocator, "struct P { x: int = 0 }\nrule r() {\n  let o: P? = .{ x: 1 }\n}", true),
+    );
+}
+
 test "the same fn with scalar types lowers" {
     try lowerSource(std.testing.allocator, "fn total(xs: int) -> int { 0 }", true);
 }

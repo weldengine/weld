@@ -1,0 +1,87 @@
+component AnonPos {
+  arg: int = 0
+  method_arg: int = 0
+  ret: int = 0
+  tail: int = 0
+  reassign: int = 0
+  fixed_elem: int = 0
+  elem_write: int = 0
+  if_value: int = 0
+  arm: int = 0
+  block: int = 0
+  fill: int = 0
+  field_write: int = 0
+  self_write: int = 0
+}
+
+struct In {
+  v: int = 0
+}
+
+struct Box {
+  inner: In
+}
+
+impl In {
+  fn add(self, o: In) -> int {
+    self.v + o.v
+  }
+
+  fn reset(mut self) {
+    self = .{ v: 13 }
+  }
+}
+
+fn take(p: In) -> int {
+  p.v
+}
+
+fn give() -> In {
+  return .{ v: 3 }
+}
+
+fn tail() -> In {
+  .{ v: 4 }
+}
+
+rule positions(entity: Entity)
+  when entity has AnonPos
+{
+  let acc = entity.get_mut(AnonPos)
+  acc.arg = take(.{ v: 1 })
+  let base = In { v: 10 }
+  acc.method_arg = base.add(.{ v: 2 })
+  acc.ret = give().v
+  acc.tail = tail().v
+  let mut p = In { v: 0 }
+  p = .{ v: 5 }
+  acc.reassign = p.v
+  let ps: In[2] = [.{ v: 6 }, In { v: 60 }]
+  acc.fixed_elem = ps[0].v + ps[1].v
+  let mut qs = [In { v: 1 }, In { v: 2 }]
+  qs[1] = .{ v: 7 }
+  acc.elem_write = qs[1].v * 10 + qs[0].v
+  let c = acc.if_value == 0
+  let q: In = if c { .{ v: 8 } } else { .{ v: 80 } }
+  acc.if_value = q.v
+  let r: In = match acc.arm {
+    0 => .{ v: 9 },
+    _ => .{ v: 90 },
+  }
+  acc.arm = r.v
+  let s: In = {
+    let a = 11
+    while false {
+    }
+    .{ v: a }
+  }
+  acc.block = s.v
+  let fs: In[3] = [.{ v: 4 }; 3]
+  acc.fill = fs[0].v + fs[1].v + fs[2].v
+  let mut b = Box { inner: In { v: 1 } }
+  b.inner = .{ v: 14 }
+  acc.field_write = b.inner.v
+  let mut t = In { v: 0 }
+  t.reset()
+  acc.self_write = t.v
+}

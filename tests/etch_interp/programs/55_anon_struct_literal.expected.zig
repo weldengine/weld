@@ -1,15 +1,9 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the anonymous
-/// struct literal `.{ … }` (check mode, resolver-types §4 — the expected
-/// type comes from the context) in its two wired positions:
-///
-/// - `let q: Pt = .{ x: 40, y: 2 }` — the let annotation supplies the type
-///   (interp materializes a `Pt`, codegen emits the qualified `Pt{ … }`).
-/// - `Box { p: .{ x: 7, y: 5 }, k: 30 }` — the declared struct field type
-///   supplies it (the field-value propagation extended from the
-///   bare enum variant to the whole literal), through a struct-typed STRUCT
-///   field (part1 §5.5 nested POD structs).
+/// Diff-runner fixture: 1 tick. The anonymous struct literal `.{ … }` takes
+/// its struct from its slot (`etch-resolver-types.md` §4.2): a let annotation,
+/// `let q: Pt = .{ x: 40, y: 2 }`, and a struct-typed field of a struct,
+/// `Box { p: .{ x: 7, y: 5 }, k: 30 }` (part1 §5.5).
 pub const config: driver.Config = .{ .ticks = 1 };
 
 /// One entity carrying `AnonAcc` (all fields start at 0).
