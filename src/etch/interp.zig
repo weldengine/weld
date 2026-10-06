@@ -4258,13 +4258,11 @@ pub const Interpreter = struct {
                 return true;
             },
             .array_persistent => {
-                // Resource `T[]` in an async body: the frame holds a reference to
-                // the block; bounds-check the snapshotted length against the
-                // (possibly mutated) container, same as `.array`.
+                // Resource `T[]` in an async body: the frame counts the block, so
+                // a write lands in a copy and the block stays as at the entry.
                 const a = &ff.iter.array_persistent;
                 if (a.idx >= a.len) return false;
                 const list = persistentArrayOf(a.ptr);
-                if (a.idx >= list.items.len) return error.RuntimeFailure;
                 try locals.put(self.gpa, f.var_name, list.items[a.idx], false);
                 a.idx += 1;
                 return true;
@@ -4285,7 +4283,6 @@ pub const Interpreter = struct {
                 const m = &ff.iter.map_persistent;
                 if (m.idx >= m.len) return false;
                 const list = persistentMapOf(m.ptr);
-                if (m.idx >= list.items.len) return error.RuntimeFailure;
                 const pair = list.items[m.idx];
                 try locals.put(self.gpa, f.var_name, pair.key, false);
                 if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
@@ -4990,14 +4987,12 @@ pub const Interpreter = struct {
                         }
                     },
                     .array_persistent => |ptr| {
-                        // `for x in get(R).xs` over a resource collection. The block
-                        // pointer is stable; snapshot len and re-
-                        // fetch the list each iteration (a body push to the SAME
-                        // collection reallocs its internal buffer, not the block).
+                        // `for x in get(R).xs` over a resource collection: the
+                        // iterable counts the block, so a write through any place
+                        // lands in a copy and the block stays as at the loop's entry.
                         const len = persistentArrayOf(ptr).items.len;
                         var k: usize = 0;
                         parr_loop: while (k < len) : (k += 1) {
-                            if (k >= persistentArrayOf(ptr).items.len) return error.RuntimeFailure;
                             try self.forIteration(world, locals, f, persistentArrayOf(ptr).items[k], null);
                             if (self.thrown or self.returning) return;
                             switch (self.handleLoopControl(0)) {
@@ -5027,8 +5022,8 @@ pub const Interpreter = struct {
                         }
                     },
                     .map_persistent => |ptr| {
-                        // `for k, v in get(R).m` over a resource map:
-                        // insertion order, block pointer stable, re-fetch per step.
+                        // `for k, v in get(R).m` over a resource map, in insertion
+                        // order, as at the loop's entry.
                         const len = persistentMapOf(ptr).items.len;
                         var k: usize = 0;
                         pmap_loop: while (k < len) : (k += 1) {
@@ -6107,14 +6102,14 @@ pub const Interpreter = struct {
                 // rule-arena `.array_ref` arm but on the owned container block: the
                 // block pointer is stable across `append`, and a string element is
                 // promoted into an owned persistent string before storage (POD
-                // inline). `push`/`len` are the base surface; `pop` (ownership
-                // transfer out of a persistent collection) is deferred.
+                // inline).
                 const mname = self.ast.strings.slice(mc.method_name);
                 if (std.mem.eql(u8, mname, "push")) {
                     if (mc.args_len != 1) return error.RuntimeFailure;
                     const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
                     const v = try self.evalExpr(world, locals, arg);
-                    try self.pushPromoted(persistentArrayOf(ptr), v);
+                    const target = try self.writableBlock(world, locals, ptr, recv_slot);
+                    try self.pushPromoted(persistentArrayOf(target), v);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "len")) {
@@ -6130,7 +6125,7 @@ pub const Interpreter = struct {
                     // → only then commit (decref + remove the slot), so a failure
                     // leaves the element owned in place (no leak, no dangling).
                     if (mc.args_len != 0) return error.RuntimeFailure;
-                    const list = persistentArrayOf(ptr);
+                    const list = persistentArrayOf(try self.writableBlock(world, locals, ptr, recv_slot));
                     var popped: ?Value = null;
                     if (list.items.len > 0) {
                         const last = list.items[list.items.len - 1];
@@ -6165,7 +6160,8 @@ pub const Interpreter = struct {
                     const varg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + 1]);
                     const k = try self.evalExpr(world, locals, karg);
                     const v = try self.evalExpr(world, locals, varg);
-                    try self.mapInsertPromoted(persistentMapOf(ptr), k, v);
+                    const target = try self.writableBlock(world, locals, ptr, recv_slot);
+                    try self.mapInsertPromoted(persistentMapOf(target), k, v);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "len")) {
@@ -6185,7 +6181,8 @@ pub const Interpreter = struct {
                     if (mc.args_len != 1) return error.RuntimeFailure;
                     const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
                     const v = try self.evalExpr(world, locals, arg);
-                    try self.setInsertPromoted(persistentSetOf(ptr), v);
+                    const target = try self.writableBlock(world, locals, ptr, recv_slot);
+                    try self.setInsertPromoted(persistentSetOf(target), v);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "contains")) {
@@ -6625,6 +6622,7 @@ pub const Interpreter = struct {
         none,
         local: StringId,
         struct_field: struct { handle: u32, index: usize },
+        resource_field: struct { rid: u32, field: StringId, mutable: bool },
     };
 
     /// `evalPlace`, with the slot holding the value.
@@ -6644,6 +6642,10 @@ pub const Interpreter = struct {
                         }
                         return error.RuntimeFailure;
                     }
+                    if (recv == .resource_ref) {
+                        const r = recv.resource_ref;
+                        return .{ .value = try self.fieldOf(world, recv, fa.field_name, id), .slot = .{ .resource_field = .{ .rid = r.resource_id, .field = fa.field_name, .mutable = r.mutable } } };
+                    }
                     return .{ .value = try self.fieldOf(world, recv, fa.field_name, id), .slot = .none };
                 }
             },
@@ -6658,7 +6660,60 @@ pub const Interpreter = struct {
             .none => {},
             .local => |name| replaceHeld(self.gpa, locals.getPtr(name) orelse return error.RuntimeFailure, v),
             .struct_field => |f| self.structs.list.items[f.handle].fields.items[f.index].value = v,
+            .resource_field => return error.RuntimeFailure,
         }
+    }
+
+    /// Whether `slot` holds the persistent block `ptr`.
+    fn slotHolds(self: *Interpreter, world: *World, locals: *Locals, slot: Slot, ptr: u64) bool {
+        const v: Value = switch (slot) {
+            .none => return false,
+            .local => |name| locals.get(name) orelse return false,
+            .struct_field => |f| self.structs.list.items[f.handle].fields.items[f.index].value,
+            .resource_field => |r| Bridge.readResourceField(&world.registry, &world.resources, r.rid, self.ast.strings.slice(r.field)) catch return false,
+        };
+        const b = handleBlock(v) orelse return false;
+        return @intFromPtr(b) == ptr;
+    }
+
+    /// The block a write to the persistent collection `ptr`, reached through
+    /// `slot`, lands in (`etch-memory-model.md` §4.4): `ptr` when the slot
+    /// holds it and nothing else counts it, else a copy, which the slot is
+    /// rebound to when it holds `ptr`. A write through a resource field marks
+    /// the resource changed.
+    fn writableBlock(self: *Interpreter, world: *World, locals: *Locals, ptr: u64, slot: Slot) StmtError!u64 {
+        const block: [*]u8 = @ptrFromInt(ptr);
+        const held = self.slotHolds(world, locals, slot, ptr);
+        if (held and slot == .resource_field) {
+            if (!slot.resource_field.mutable) return error.RuntimeFailure;
+            _ = world.resources.getMutResource(slot.resource_field.rid) orelse return error.RuntimeFailure;
+        }
+        if (held and !persistent.isShared(block)) return ptr;
+        try self.deferred_decrefs.ensureUnusedCapacity(self.gpa, 1);
+        const copy = try clonePersistentBlock(self.gpa, block);
+        const copy_ptr: u64 = @intFromPtr(copy);
+        if (!held) {
+            self.deferred_decrefs.appendAssumeCapacity(copy);
+            return copy_ptr;
+        }
+        switch (slot) {
+            .none => unreachable,
+            .local => |name| {
+                const p = locals.getPtr(name).?;
+                releaseHandle(self.gpa, p.*);
+                p.* = withBlock(p.*, copy_ptr);
+            },
+            .struct_field => |f| {
+                const field = &self.structs.list.items[f.handle].fields.items[f.index];
+                field.value = withBlock(field.value, copy_ptr);
+                self.deferred_decrefs.appendAssumeCapacity(copy);
+            },
+            .resource_field => |r| Bridge.promoteResourceCollection(self.gpa, &world.registry, &world.resources, r.rid, self.ast.strings.slice(r.field), copy) catch {
+                persistent.decref(self.gpa, copy);
+                return error.RuntimeFailure;
+            },
+        }
+        return copy_ptr;
     }
 
     /// A copy of `v` sharing no arena value with it (`etch-reference-part1.md`
@@ -8079,6 +8134,43 @@ fn dropPersistentMap(gpa: std.mem.Allocator, p: [*]u8, size: usize) void {
         }
     }
     list.deinit(gpa);
+}
+
+/// A copy of the persistent collection block `src`, refcount 1, its string
+/// elements shared and counted once more.
+fn clonePersistentBlock(gpa: std.mem.Allocator, src: [*]u8) std.mem.Allocator.Error![*]u8 {
+    const src_ptr: u64 = @intFromPtr(src);
+    switch (persistent.typeId(src)) {
+        persistent.type_map => {
+            const block = try allocEmptyMapBlock(gpa);
+            errdefer persistent.decref(gpa, block);
+            const to = persistentMapOf(@intFromPtr(block));
+            try to.appendSlice(gpa, persistentMapOf(src_ptr).items);
+            for (to.items) |pair| {
+                retainHandle(pair.key);
+                retainHandle(pair.value);
+            }
+            return block;
+        },
+        else => {
+            const block = if (persistent.typeId(src) == persistent.type_set) try allocEmptySetBlock(gpa) else try allocEmptyArrayBlock(gpa);
+            errdefer persistent.decref(gpa, block);
+            const to = persistentArrayOf(@intFromPtr(block));
+            try to.appendSlice(gpa, persistentArrayOf(src_ptr).items);
+            for (to.items) |v| retainHandle(v);
+            return block;
+        },
+    }
+}
+
+/// `v`, a persistent collection handle, naming the block `ptr` instead.
+fn withBlock(v: Value, ptr: u64) Value {
+    return switch (v) {
+        .array_persistent => .{ .array_persistent = ptr },
+        .map_persistent => .{ .map_persistent = ptr },
+        .set_persistent => .{ .set_persistent = ptr },
+        else => unreachable,
+    };
 }
 
 /// One element of a collection default, stored: a string literal as an owned
@@ -14808,28 +14900,6 @@ test "a sync for keeps iterating a resource array its body reassigns" {
     try std.testing.expectEqual(@as(i64, 6), readResourceIntNamed(&world, "R", "sum"));
 }
 
-test "a sync for over a resource array fails loud when its body shrinks it" {
-    const gpa = std.testing.allocator;
-    var world = World.init();
-    defer world.deinit(gpa);
-    var pr = try checkCleanProgram(gpa,
-        \\resource R { xs: int[] = [1, 2, 3], done: bool = false }
-        \\rule r() when resource R {
-        \\  if get(R).done == false {
-        \\    get_mut(R).done = true
-        \\    for x in get(R).xs {
-        \\      let p = get_mut(R).xs.pop()
-        \\    }
-        \\  }
-        \\}
-    );
-    defer pr.deinit(gpa);
-    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
-    defer interp.deinit();
-    const report = try interp.runFor(&world, 1);
-    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
-}
-
 test "emit stabilizes a computed string so an @on_event observer reads it safely" {
     const gpa = std.testing.allocator;
     var world = World.init();
@@ -19337,6 +19407,214 @@ const value_runs = [_]ScopeRun{
 
 test "a value read as a value is a copy, and self is a reference" {
     try expectRuns(&value_runs);
+}
+
+const cow_prelude =
+    \\resource R {
+    \\  xs: int[] = [1, 2, 3],
+    \\  names: string[] = ["a", "b"],
+    \\  m: [string: int] = ["a": 1, "b": 2],
+    \\  s: Set<int> = Set.new(),
+    \\}
+    \\resource Out { n: int = 0, t: int = 0 }
+    \\struct Box<T> { value: T }
+    \\fn grow_len(a: int[]) -> int {
+    \\  let mut t = a
+    \\  t.push(4)
+    \\  t.len()
+    \\}
+    \\
+;
+
+const cow_runs = [_]ScopeRun{
+    .{ .name = "a binding of a resource collection is a copy", .out = 34, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut ys = get(R).xs
+        \\  ys.push(4)
+        \\  get_mut(Out).n = get(R).xs.len() * 10 + ys.len()
+        \\}
+    },
+    .{ .name = "a binding of a collection read through get_mut is a copy", .out = 34, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut ys = get_mut(R).xs
+        \\  ys.push(4)
+        \\  get_mut(Out).n = get(R).xs.len() * 10 + ys.len()
+        \\}
+    },
+    .{ .name = "a write to a resource collection leaves an earlier copy", .out = 34, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let snap = get(R).xs
+        \\  get_mut(R).xs.push(4)
+        \\  get_mut(Out).n = snap.len() * 10 + get(R).xs.len()
+        \\}
+    },
+    .{ .name = "an insert into a copy of a resource map leaves the map", .out = 23, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut m2 = get(R).m
+        \\  m2.insert("c", 3)
+        \\  get_mut(Out).n = get(R).m.len() * 10 + m2.len()
+        \\}
+    },
+    .{ .name = "an insert into a copy of a resource set leaves the set", .out = 1, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut t = get(R).s
+        \\  t.insert(7)
+        \\  let c = if get(R).s.contains(7) { 1 } else { 0 }
+        \\  get_mut(Out).n = c * 10 + t.len()
+        \\}
+    },
+    .{ .name = "a pop from a copy of a resource string array leaves the array", .out = 21, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut ns = get(R).names
+        \\  let p = ns.pop()
+        \\  let q = p ?? ""
+        \\  let b = if q == "b" { 1 } else { 0 }
+        \\  get_mut(Out).n = get(R).names.len() * 10 + b
+        \\}
+    },
+    .{ .name = "an argument copied and grown inside a fn leaves the resource", .out = 43, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  get_mut(Out).n = grow_len(get(R).xs) * 10 + get(R).xs.len()
+        \\}
+    },
+    .{ .name = "a closure growing a copy of a captured collection leaves both", .out = 443, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let ys = get(R).xs
+        \\  let f = || {
+        \\    let mut t = ys
+        \\    t.push(4)
+        \\    t.len()
+        \\  }
+        \\  let a = f()
+        \\  let b = f()
+        \\  get_mut(Out).n = a * 100 + b * 10 + get(R).xs.len()
+        \\}
+    },
+    .{ .name = "a copy of a collection read through a get_mut binding stays", .out = 34, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let r = get_mut(R)
+        \\  let snap = r.xs
+        \\  r.xs.push(4)
+        \\  get_mut(Out).n = snap.len() * 10 + get(R).xs.len()
+        \\}
+    },
+    .{ .name = "a collection held by a struct field is a copy", .out = 34, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut b = Box { value: get(R).xs }
+        \\  b.value.push(4)
+        \\  get_mut(Out).n = get(R).xs.len() * 10 + b.value.len()
+        \\}
+    },
+    .{ .name = "a for over a resource map iterates it as at its entry", .out = 399, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut k = 0
+        \\  for key, v in get(R).m {
+        \\    get_mut(R).m.insert("b", 99)
+        \\    k += v
+        \\  }
+        \\  let bv = get(R).m["b"] ?? 0
+        \\  get_mut(Out).n = k * 100 + bv
+        \\}
+    },
+    .{ .name = "a for over a resource array iterates it as at its entry while its body shrinks it", .out = 60, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut k = 0
+        \\  for x in get(R).xs {
+        \\    let p = get_mut(R).xs.pop()
+        \\    k += x
+        \\  }
+        \\  get_mut(Out).n = k * 10 + get(R).xs.len()
+        \\}
+    },
+    .{ .name = "an async for over a resource array iterates it as at its entry across an await", .out = 60, .ticks = 10, .src = cow_prelude ++
+        \\async rule r() when resource Out and resource R {
+        \\  if get(Out).n == 0 {
+        \\    let mut k = 0
+        \\    for x in get(R).xs {
+        \\      get_mut(R).xs.pop()
+        \\      await wait(0.016s)
+        \\      k += x
+        \\    }
+        \\    get_mut(Out).n = k * 10 + get(R).xs.len()
+        \\  }
+        \\}
+    },
+    .{ .name = "a pop from a copy leaves a runtime string the resource holds", .out = 31, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  get_mut(R).names.push("c" + "d")
+        \\  let mut ns = get(R).names
+        \\  let p = ns.pop()
+        \\  let b = if get(R).names[2] == "cd" { 1 } else { 0 }
+        \\  get_mut(Out).n = get(R).names.len() * 10 + b
+        \\}
+    },
+    .{ .name = "an insert into a copy leaves a runtime key the resource holds", .out = 5, .ticks = 2, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  get_mut(Out).t = get(Out).t + 1
+        \\  if get(Out).t == 1 {
+        \\    get_mut(R).m.insert("k" + "k", 5)
+        \\    let mut m2 = get(R).m
+        \\    m2.insert("z", 0)
+        \\  } else {
+        \\    get_mut(Out).n = get(R).m["kk"] ?? 0
+        \\  }
+        \\}
+    },
+    .{ .name = "a push whose argument rebinds its receiver leaves the resource", .out = 3, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut ys = get(R).xs
+        \\  ys.push({
+        \\    ys = [9]
+        \\    2
+        \\  })
+        \\  get_mut(Out).n = get(R).xs.len()
+        \\}
+    },
+    .{ .name = "a push to a resource collection marks the resource changed", .out = 3, .ticks = 5, .src = cow_prelude ++
+        \\rule a() when resource Out and resource R {
+        \\  get_mut(Out).t = get(Out).t + 1
+        \\  if get(Out).t == 3 {
+        \\    get_mut(R).xs.push(4)
+        \\  }
+        \\}
+        \\rule b() when resource R changed and resource Out {
+        \\  get_mut(Out).n = get(Out).t
+        \\}
+    },
+};
+
+test "a persistent value is shared until its first shared write" {
+    try expectRuns(&cow_runs);
+}
+
+test "a write through an unshared resource collection stays in its block" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\resource R { xs: int[] = [1, 2, 3] }
+        \\resource Done { d: bool = false }
+        \\rule r() when resource R and resource Done {
+        \\  if get(Done).d == false {
+        \\    get_mut(Done).d = true
+        \\    for i in 0..1000 {
+        \\      get_mut(R).xs.push(i)
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const rid = world.registry.idOf("R").?;
+    const before = try Bridge.readResourceField(&world.registry, &world.resources, rid, "xs");
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    const after = try Bridge.readResourceField(&world.registry, &world.resources, rid, "xs");
+    try std.testing.expectEqual(before.array_persistent, after.array_persistent);
+    try std.testing.expectEqual(@as(u32, 1), persistent.refcount(@ptrFromInt(after.array_persistent)));
+    try std.testing.expectEqual(@as(usize, 1003), persistentArrayOf(after.array_persistent).items.len);
 }
 
 test "self = v in a mut self method replaces the caller's binding, sync and async" {

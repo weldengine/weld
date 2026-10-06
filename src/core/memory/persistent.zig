@@ -230,6 +230,12 @@ pub fn refcount(p: [*]u8) u32 {
     return headerOf(p).refcount.load(.monotonic);
 }
 
+/// Whether a holder other than the caller counts `p`: a refcount above one,
+/// an immortal block included.
+pub fn isShared(p: [*]u8) bool {
+    return headerOf(p).refcount.load(.acquire) > 1;
+}
+
 /// The block's owning `TypeId`.
 pub fn typeId(p: [*]u8) TypeId {
     return headerOf(p).type_id;
