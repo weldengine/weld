@@ -1,0 +1,234 @@
+component Copies {
+  dyn_push: int = 0
+  dyn_last: int = 0
+  dyn_pop: int = 0
+  map_copy: int = 0
+  map_copy2: int = 0
+  set_copy: int = 0
+  slice: int = 0
+  for_dyn: int = 0
+  for_fixed: int = 0
+  for_map: int = 0
+  for_pop: int = 0
+  idx_copy: int = 0
+  fixed_struct: int = 0
+  absorb: int = 0
+  absorb_big: int = 0
+  self_assign: int = 0
+  rebind: int = 0
+  fn_empty: int = 0
+}
+
+struct In {
+  v: int
+}
+
+impl In {
+  fn bump(mut self) {
+    self.v += 1
+  }
+
+  fn absorb(mut self, o: In) {
+    self.v = self.v + 1
+    self.v = self.v + o.v * 10
+  }
+
+  fn reset(mut self) {
+    self = In { v: 7 }
+  }
+}
+
+struct Big {
+  a: int
+  b: int
+  c: int
+  d: int
+  e: int
+  f: int
+}
+
+impl Big {
+  fn absorb(mut self, o: Big) {
+    self.a = self.a + 1
+    self.a = self.a + o.a * 10
+  }
+}
+
+fn empty_copy_len() -> int {
+  let xs: int[] = []
+  let ys = xs
+  ys.len()
+}
+
+rule dyn_copy_push(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut xs: int[] = [10, 20]
+  let mut ys = xs
+  ys.push(30)
+  xs.push(99)
+  acc.dyn_push = xs.len() * 10 + ys.len()
+  acc.dyn_last = ys[2] * 1000 + xs[2]
+}
+
+rule dyn_copy_pop(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut xs: int[] = [10, 20]
+  let ys = xs
+  let p = xs.pop() ?? -1
+  acc.dyn_pop = p * 100 + ys.len() * 10 + xs.len()
+}
+
+rule map_copy(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut m: [int: int] = [1: 10]
+  let mut m2 = m
+  m2.insert(1, 11)
+  m2.insert(2, 20)
+  let a = m[1] ?? 0
+  acc.map_copy = m.len() * 1000 + m2.len() * 100 + a
+  acc.map_copy2 = m2[1] ?? 0
+}
+
+rule set_copy(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let s: Set<int> = Set.from([1, 2])
+  let mut s2 = s
+  s2.insert(3)
+  let c = if s.contains(3) { 1 } else { 0 }
+  acc.set_copy = s.len() * 100 + s2.len() * 10 + c
+}
+
+rule slice_copy(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut arr = [1, 2, 3, 4]
+  let s = arr[1..3]
+  arr[1] = 9
+  acc.slice = s[0] * 10 + s.len()
+}
+
+rule for_dyn(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut xs: int[] = [1, 2, 3]
+  let mut s = 0
+  for x in xs {
+    xs[2] = 100
+    s += x
+  }
+  acc.for_dyn = s * 1000 + xs[2]
+}
+
+rule for_fixed(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut f = [1, 2, 3]
+  let mut s = 0
+  for x in f {
+    f[2] = 100
+    s += x
+  }
+  acc.for_fixed = s * 1000 + f[2]
+}
+
+rule for_map(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut m: [int: int] = [1: 10, 2: 20]
+  let mut s = 0
+  for k, v in m {
+    m.insert(2, 99)
+    s += v
+  }
+  acc.for_map = s
+}
+
+rule for_pop(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut xs: int[] = [1, 2, 3]
+  let mut s = 0
+  for x in xs {
+    xs.pop()
+    s += x
+  }
+  acc.for_pop = s * 10 + xs.len()
+}
+
+rule index_after_copy(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut xs: int[] = [1, 2]
+  let ys = xs
+  xs[0] = 5
+  acc.idx_copy = xs[0] * 10 + ys[0]
+}
+
+rule fixed_struct(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let ps = [In { v: 1 }, In { v: 2 }]
+  let mut qs = ps
+  qs[0].v = 5
+  qs[1].bump()
+  acc.fixed_struct = ps[0].v * 100 + qs[0].v * 10 + qs[1].v
+}
+
+rule absorb(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut c = In { v: 1 }
+  c.absorb(c)
+  acc.absorb = c.v
+}
+
+rule absorb_big(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut c = Big { a: 1, b: 0, c: 0, d: 0, e: 0, f: 0 }
+  c.absorb(c)
+  acc.absorb_big = c.a
+}
+
+rule self_assign(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut p = In { v: 1 }
+  p.reset()
+  acc.self_assign = p.v
+}
+
+rule rebind(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  let mut xs: int[] = [1]
+  let ys: int[] = [2, 3]
+  xs = ys
+  acc.rebind = xs.len() * 10 + xs[0]
+}
+
+rule fn_empty(entity: Entity)
+  when entity has Copies
+{
+  let acc = entity.get_mut(Copies)
+  acc.fn_empty = empty_copy_len() + 1
+}

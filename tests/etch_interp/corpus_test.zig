@@ -24,3 +24,27 @@ test "differential corpus — every program reaches its expected final state" {
         };
     }
 }
+
+test "the interpreter runner fails on a runtime error, its expected state reached or not" {
+    const gpa = std.testing.allocator;
+    const source =
+        \\component Box { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Box
+        \\{
+        \\  let acc = entity.get_mut(Box)
+        \\  acc.n = 1
+        \\  let mut xs: int[] = [1]
+        \\  xs[3] = 0
+        \\}
+    ;
+    const spec: driver.WorldSpec = .{ .entities = &[_]driver.EntitySpec{
+        .{ .components = &[_]driver.ComponentSpec{.{ .name = "Box" }} },
+    } };
+    const expected: driver.ExpectedWorld = .{ .entities = &[_]driver.EntitySpec{
+        .{ .components = &[_]driver.ComponentSpec{
+            .{ .name = "Box", .fields = &[_]driver.FieldSpec{.{ .name = "n", .value = .{ .int_ = 1 } }} },
+        } },
+    } };
+    try std.testing.expectError(error.InterpreterRuntimeError, driver.runProgram(gpa, runner_mod.Runner, "runtime_error", source, .{ .ticks = 1 }, spec, expected));
+}

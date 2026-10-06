@@ -165,6 +165,7 @@ pub fn generateFile(
     // program that only inserts (or only reads) is harmless; map-free
     // programs stay byte-identical.
     if (ast.map_lits.items.len > 0) {
+        try emitCollectionTypesPrelude(&w, map_types_table);
         try emitMapInsertPrelude(&w);
         try emitMapGetPrelude(&w);
     }
@@ -175,6 +176,7 @@ pub fn generateFile(
     // Same over-emission tolerance as the map helpers; set-free programs
     // stay byte-identical.
     if (programUsesSet(ast)) {
+        try emitCollectionTypesPrelude(&w, set_types_table);
         try emitSetInsertPrelude(&w);
         try emitSetContainsPrelude(&w);
     }
@@ -399,6 +401,13 @@ fn emitErrorPrelude(w: *Writer) CodegenError!void {
     try w.line("source: ?*const Error = null,");
     w.indentBy(-1);
     try w.line("};");
+    try w.blankLine();
+}
+
+/// Name each map or set type of `table` once: a type spelled at each `let`
+/// would be a distinct anonymous struct, and a copy would not type-check.
+fn emitCollectionTypesPrelude(w: *Writer, comptime table: anytype) CodegenError!void {
+    inline for (table) |p| try w.printLine("const {s} = {s};", .{ p[p.len - 2], p[p.len - 1] });
     try w.blankLine();
 }
 
@@ -3363,7 +3372,7 @@ fn emitAssign(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Codeg
             try w.print("{{ const __rhs{d}: {s} = ", .{ data, kv.value });
             try emitExpr(w, ast, ctx, assign.value);
             try w.write("; __etchMapInsert(&(");
-            try emitExpr(w, ast, ctx, ix.receiver);
+            try emitPlace(w, ast, ctx, ix.receiver);
             try w.print("), {s}, ", .{fa});
             try emitExpr(w, ast, ctx, ix.index);
             try w.print(", __rhs{d}); }}\n", .{data});
@@ -3456,10 +3465,23 @@ fn assignTargetComponent(ast: *const AstArena, ctx: *const LocalCtx, target: Nod
 /// The place an assignment writes: a resource field through `getMutResource`
 /// when `resource` names one, the target expression otherwise.
 fn emitAssignTarget(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, target: NodeId, resource: ?[]const u8) CodegenError!void {
-    const rname = resource orelse return emitExpr(w, ast, ctx, target);
+    const rname = resource orelse return emitPlace(w, ast, ctx, target);
     const fa = ast.field_accesses.items[ast.exprData(target)];
     try w.print("@as(*{s}, @ptrCast(@alignCast(world.resources.getMutResource({s}_id).?.ptr))).", .{ rname, rname });
     try w.ident(ast.strings.slice(fa.field_name));
+}
+
+/// The storage a binding names, never a copy; any other expression is
+/// emitted as `emitExpr` emits it.
+fn emitPlace(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) CodegenError!void {
+    if (ast.exprKind(id) == .ident) {
+        if (ctx.lookup(ast.exprData(id))) |local| if (local.kind == .value) {
+            try w.ident(ast.strings.slice(ast.exprData(id)));
+            if (local.deref) try w.write(".*");
+            return;
+        };
+    }
+    try emitExpr(w, ast, ctx, id);
 }
 
 /// The place, operator and value of an assignment, the value `__rhs<n>`
@@ -3622,7 +3644,15 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             const name_id: StringId = data;
             if (ctx.lookup(name_id)) |local| {
                 switch (local.kind) {
-                    .value => {
+                    // A dynamic array, a map or a set read as a value is a
+                    // copy (`etch-reference-part1.md` §5.2). Without an arena
+                    // a collection is never filled, so it is read in place.
+                    .value => if (isListZigType(local.zig_type) and ctx.arena_param != null) {
+                        w.arena_used = true;
+                        try w.write("(");
+                        try w.ident(ast.strings.slice(name_id));
+                        try w.print(".clone({s}) catch unreachable)", .{ctx.arena_param.?});
+                    } else {
                         try w.ident(ast.strings.slice(name_id));
                         if (local.deref) try w.write(".*");
                     },
@@ -3714,7 +3744,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             if (mapKVZig(inferExprZigType(ast, ctx, ix.receiver)) != null) {
                 if (ast.exprKind(ix.index) == .range) return CodegenError.UnsupportedConstruct;
                 try w.write("__etchMapGet(");
-                try emitExpr(w, ast, ctx, ix.receiver);
+                try emitPlace(w, ast, ctx, ix.receiver);
                 try w.write(", ");
                 try emitExpr(w, ast, ctx, ix.index);
                 try w.write(")");
@@ -3725,7 +3755,15 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // array in the interpreter) is deferred — fail loud.
             const recv_is_dyn = dynArrayElemZig(inferExprZigType(ast, ctx, ix.receiver)) != null;
             if (recv_is_dyn and ast.exprKind(ix.index) == .range) return CodegenError.UnsupportedConstruct;
-            try emitExpr(w, ast, ctx, ix.receiver);
+            // A slice of a fixed array is a copy, a dynamic array of its elements.
+            const slice_list: ?[]const u8 = if (ast.exprKind(ix.index) == .range) inferExprZigType(ast, ctx, id) else null;
+            if (slice_list) |list| {
+                if (list.len == 0) return CodegenError.UnsupportedConstruct;
+                const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+                w.arena_used = true;
+                try w.print("{s}.fromOwnedSlice({s}.dupe({s}, ", .{ list, fa, dynArrayElemZig(list).? });
+            }
+            try emitPlace(w, ast, ctx, ix.receiver);
             if (recv_is_dyn) try w.write(".items");
             if (ast.exprKind(ix.index) == .range) {
                 const r = ast.ranges.items[ast.exprData(ix.index)];
@@ -3734,6 +3772,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try w.write("))..@as(usize, @intCast(");
                 try emitExpr(w, ast, ctx, r.end);
                 try w.write(if (r.inclusive) " + 1))]" else "))]");
+                if (slice_list != null) try w.write(") catch unreachable)");
             } else {
                 try w.write("[@as(usize, @intCast(");
                 try emitExpr(w, ast, ctx, ix.index);
@@ -3944,7 +3983,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                     const mname = ast.strings.slice(mc.method_name);
                     if (std.mem.eql(u8, mname, "pop") and mc.args_len == 0) {
                         try w.write("(");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.write(").pop()");
                         return;
                     }
@@ -3952,7 +3991,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                         const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
                         w.arena_used = true;
                         try w.write("(");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.print(").append({s}, ", .{fa});
                         try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
                         try w.write(") catch unreachable");
@@ -3960,7 +3999,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                     }
                     if (std.mem.eql(u8, mname, "len") and mc.args_len == 0) {
                         try w.write("@as(i64, @intCast((");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.write(").items.len))");
                         return;
                     }
@@ -3972,7 +4011,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                         const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
                         w.arena_used = true;
                         try w.write("__etchMapInsert(&(");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.print("), {s}, ", .{fa});
                         try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
                         try w.write(", ");
@@ -3982,7 +4021,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                     }
                     if (std.mem.eql(u8, mname, "len") and mc.args_len == 0) {
                         try w.write("@as(i64, @intCast((");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.write(").items.len))");
                         return;
                     }
@@ -4001,7 +4040,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                         const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
                         w.arena_used = true;
                         try w.write("__etchSetInsert(&(");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.print("), {s}, ", .{fa});
                         try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
                         try w.write(")");
@@ -4009,7 +4048,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                     }
                     if (std.mem.eql(u8, mname, "contains") and mc.args_len == 1) {
                         try w.write("__etchSetContains(");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.write(", ");
                         try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
                         try w.write(")");
@@ -4017,7 +4056,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                     }
                     if (std.mem.eql(u8, mname, "len") and mc.args_len == 0) {
                         try w.write("@as(i64, @intCast((");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.write(").items.len))");
                         return;
                     }
@@ -4070,7 +4109,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 if (std.mem.eql(u8, tname, "Set")) return CodegenError.UnsupportedConstruct;
                 try w.write(tname);
             } else {
-                try emitExpr(w, ast, ctx, mc.receiver);
+                try emitPlace(w, ast, ctx, mc.receiver);
             }
             try w.write(".");
             try w.ident(ast.strings.slice(mc.method_name));
@@ -4843,6 +4882,11 @@ fn optionalOf(zig_scalar: []const u8) ?[]const u8 {
 /// builtin element scalars (+ string); any other element type is deferred
 /// (fail loud). Static strings keep the emitter allocation-free and make the
 /// reverse lookup (`dynArrayElemZig`) exact.
+/// Whether `zig_t` is the type of a dynamic array, a map or a set.
+fn isListZigType(zig_t: []const u8) bool {
+    return dynArrayElemZig(zig_t) != null or mapKVZig(zig_t) != null or setElemZig(zig_t) != null;
+}
+
 fn dynArrayZigType(elem_zig: []const u8) ?[]const u8 {
     inline for (dyn_array_types) |p| {
         if (std.mem.eql(u8, elem_zig, p[0])) return p[1];
@@ -4892,14 +4936,14 @@ fn mapKVZig(zig_t: []const u8) ?struct { key: []const u8, value: []const u8 } {
 }
 
 const map_types_table = .{
-    .{ "i64", "i64", "std.ArrayListUnmanaged(struct { key: i64, value: i64 })" },
-    .{ "i64", "f64", "std.ArrayListUnmanaged(struct { key: i64, value: f64 })" },
-    .{ "i64", "bool", "std.ArrayListUnmanaged(struct { key: i64, value: bool })" },
-    .{ "i64", "[]const u8", "std.ArrayListUnmanaged(struct { key: i64, value: []const u8 })" },
-    .{ "bool", "i64", "std.ArrayListUnmanaged(struct { key: bool, value: i64 })" },
-    .{ "bool", "f64", "std.ArrayListUnmanaged(struct { key: bool, value: f64 })" },
-    .{ "bool", "bool", "std.ArrayListUnmanaged(struct { key: bool, value: bool })" },
-    .{ "bool", "[]const u8", "std.ArrayListUnmanaged(struct { key: bool, value: []const u8 })" },
+    .{ "i64", "i64", "__EtchMap_i64_i64", "std.ArrayListUnmanaged(struct { key: i64, value: i64 })" },
+    .{ "i64", "f64", "__EtchMap_i64_f64", "std.ArrayListUnmanaged(struct { key: i64, value: f64 })" },
+    .{ "i64", "bool", "__EtchMap_i64_bool", "std.ArrayListUnmanaged(struct { key: i64, value: bool })" },
+    .{ "i64", "[]const u8", "__EtchMap_i64_str", "std.ArrayListUnmanaged(struct { key: i64, value: []const u8 })" },
+    .{ "bool", "i64", "__EtchMap_bool_i64", "std.ArrayListUnmanaged(struct { key: bool, value: i64 })" },
+    .{ "bool", "f64", "__EtchMap_bool_f64", "std.ArrayListUnmanaged(struct { key: bool, value: f64 })" },
+    .{ "bool", "bool", "__EtchMap_bool_bool", "std.ArrayListUnmanaged(struct { key: bool, value: bool })" },
+    .{ "bool", "[]const u8", "__EtchMap_bool_str", "std.ArrayListUnmanaged(struct { key: bool, value: []const u8 })" },
 };
 
 /// The list declaration type for a `T[]` slice annotation with a builtin
@@ -4949,8 +4993,8 @@ fn setElemZig(zig_t: []const u8) ?[]const u8 {
 }
 
 const set_types_table = .{
-    .{ "i64", "std.ArrayListUnmanaged(struct { item: i64 })" },
-    .{ "bool", "std.ArrayListUnmanaged(struct { item: bool })" },
+    .{ "i64", "__EtchSet_i64", "std.ArrayListUnmanaged(struct { item: i64 })" },
+    .{ "bool", "__EtchSet_bool", "std.ArrayListUnmanaged(struct { item: bool })" },
 };
 
 /// The list declaration type for a `Set<T>` annotation, or `null` when
@@ -6460,7 +6504,7 @@ fn emitNamedMethodCall(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, mc: ast
     if (ast.exprKind(mc.receiver) == .path) {
         try w.write(ast.strings.slice(ast.exprData(mc.receiver)));
     } else {
-        try emitExpr(w, ast, ctx, mc.receiver);
+        try emitPlace(w, ast, ctx, mc.receiver);
     }
     try w.write(".");
     try w.ident(ast.strings.slice(mc.method_name));
@@ -6590,15 +6634,16 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         // An array literal is emitted without a `let` type annotation — Zig infers
         // it. Returning "" makes `emitLet` drop the `: T`.
         .array_lit => "",
-        // An element types as its array's element; a slice and a map entry are
-        // left to Zig.
+        // An element types as its array's element and a slice of a fixed array
+        // as a dynamic array of it; a map entry is left to Zig.
         .index => blk: {
             const ix = ast.index_exprs.items[data];
-            if (ast.exprKind(ix.index) == .range) break :blk "";
-            if (dynArrayElemZig(inferExprZigType(ast, ctx, ix.receiver))) |e| break :blk e;
+            const range = ast.exprKind(ix.index) == .range;
+            if (dynArrayElemZig(inferExprZigType(ast, ctx, ix.receiver))) |e| break :blk if (range) "" else e;
             if (ast.exprKind(ix.receiver) != .ident) break :blk "";
             const local = ctx.lookup(ast.exprData(ix.receiver)) orelse break :blk "";
-            break :blk local.fixed_elem;
+            if (!range) break :blk local.fixed_elem;
+            break :blk dynArrayZigType(local.fixed_elem) orelse "";
         },
         // A closure is an anonymous struct type, left to Zig inference.
         .closure => "",

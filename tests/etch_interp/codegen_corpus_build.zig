@@ -126,4 +126,5 @@ pub const programs = [_]CodegenProgram{
     // A copy of each kind of value, read and never written.
     .{ .name = "p90_value_copies", .etch_path = "tests/etch_interp/programs/90_value_copies.etch" },
     .{ .name = "p91_index_writes", .etch_path = "tests/etch_interp/programs/91_index_writes.etch" },
+    .{ .name = "p92_collection_copies", .etch_path = "tests/etch_interp/programs/92_collection_copies.etch" },
 };
