@@ -1,0 +1,150 @@
+component Writes {
+  dyn: int = 0
+  dyn_compound: int = 0
+  fixed: int = 0
+  fixed_compound: int = 0
+  elem_field: int = 0
+  elem_method: int = 0
+  map: int = 0
+  rhs_first: int = 0
+  compound_rhs_first: int = 0
+  index_once: int = 0
+  float_fixed: float = 0.0
+  float_dyn: float = 0.0
+}
+
+struct In {
+  v: int
+}
+
+impl In {
+  fn bump(mut self) {
+    self.v += 1
+  }
+}
+
+rule dyn_store(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let mut xs: int[] = [1, 2, 3]
+  xs[0] = 9
+  acc.dyn = xs[0]
+}
+
+rule dyn_compound(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let mut xs: int[] = [1, 2, 3]
+  xs[1] += 5
+  acc.dyn_compound = xs[1]
+}
+
+rule fixed_store(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let mut f = [1, 2, 3]
+  f[2] = 0
+  acc.fixed = f[2] * 10 + f[0]
+}
+
+rule fixed_compound(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let mut f = [1, 2, 3]
+  f[1] *= 4
+  acc.fixed_compound = f[1]
+}
+
+rule elem_field(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let mut ps = [In { v: 1 }]
+  ps[0].v = 2
+  acc.elem_field = ps[0].v
+}
+
+rule elem_method(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let mut ps = [In { v: 1 }]
+  ps[0].bump()
+  acc.elem_method = ps[0].v
+}
+
+rule map_store(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let mut m: [int: int] = [1: 10]
+  m[1] = 11
+  m[2] = 20
+  let a = m[1] ?? 0
+  let b = m[2] ?? 0
+  acc.map = a * 100 + b
+}
+
+rule rhs_first(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let mut xs: int[] = [1]
+  let ys: int[] = [2]
+  xs[0] = {
+    for i in 0..20 {
+      xs.push(i)
+    }
+    5
+  }
+  acc.rhs_first = xs[0] * 100 + xs[20] * 10 + ys[0]
+}
+
+rule compound_rhs_first(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let mut n = 1
+  n += {
+    n = 10
+    1
+  }
+  acc.compound_rhs_first = n
+}
+
+rule index_once(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let mut k = 0
+  let mut xs: int[] = [1, 2, 3]
+  xs[{
+    k += 1
+    k
+  }] += 5
+  acc.index_once = k * 100 + xs[1] * 10 + xs[2]
+}
+
+rule float_fixed(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let fs = [1.5, 2.5]
+  let e = fs[1]
+  let g = e
+  acc.float_fixed = g
+}
+
+rule float_dyn(entity: Entity)
+  when entity has Writes
+{
+  let acc = entity.get_mut(Writes)
+  let fs: float[] = [1.5, 2.5]
+  let e = fs[1]
+  let g = e
+  acc.float_dyn = g
+}

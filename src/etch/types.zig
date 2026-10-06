@@ -6996,20 +6996,23 @@ pub const TypeChecker = struct {
                         const name = self.arena.strings.slice(name_id);
                         try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(assign.target), "unknown binding '{s}'", .{name});
                     }
-                } else if (target_kind == .field_access) {
+                } else if (target_kind == .field_access or target_kind == .index) {
                     const place = self.placeOf(ctx, assign.target);
                     const span = self.arena.exprSpan(assign.target);
                     switch (place.verdict) {
                         .ok => {},
-                        .immutable_binding, .not_a_place => try self.emit(.type_mismatch, .error_, span, "assignment target field must be accessed via entity.get_mut(T) or a mutable binding", .{}),
+                        .immutable_binding, .not_a_place => try self.emit(.type_mismatch, .error_, span, "an assignment target must be reached through entity.get_mut(T) or a mutable binding", .{}),
                         .read_only_ref => try self.emit(.type_mismatch, .error_, span, "cannot write through a read-only ECS ref (get(T)); write through get_mut(T)", .{}),
                         .through_optional => try self.emit(.type_mismatch, .error_, span, "cannot write through '?.': unwrap the optional first", .{}),
+                        .through_slice => try self.emit(.type_mismatch, .error_, span, "cannot write through a slice: a slice is a copy", .{}),
                         .captured => try self.emitCapturedWrite(span, place.root),
                     }
-                    // Synthesize the field type and check the value matches it.
-                    const lhs_type = try self.synthExprE(assign.target, ctx);
+                    const lhs_type = if (target_kind == .index and place.verdict != .through_slice)
+                        try self.synthIndex(assign.target, self.arena.exprData(assign.target), ctx, if (assign.op == .assign) .write else .compound)
+                    else
+                        try self.synthExprE(assign.target, ctx);
                     const rhs_type = try self.synthExprE(assign.value, ctx);
-                    if (place.verdict != .through_optional) {
+                    if (place.verdict != .through_optional and place.verdict != .through_slice) {
                         const fits = if (assign.op == .assign) try self.valueFits(lhs_type, assign.value, rhs_type) else try self.valueCompares(lhs_type, assign.value, rhs_type);
                         if (!fits) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match field type", .{});
@@ -8059,7 +8062,7 @@ pub const TypeChecker = struct {
             },
             .array_lit => return try self.synthArrayLit(data, ctx_opt),
             .map_lit => return try self.synthMapLit(id, data, ctx_opt),
-            .index => return try self.synthIndex(id, data, ctx_opt),
+            .index => return try self.synthIndex(id, data, ctx_opt, .read),
             .closure => {
                 const ce = self.arena.closure_exprs.items[data];
                 var i: u32 = 0;
@@ -10059,22 +10062,31 @@ pub const TypeChecker = struct {
             .immutable_binding, .not_a_place => try self.emit(.immutable_receiver_for_mut_self, .error_, span, "{s}", .{immutable_message}),
             .read_only_ref => try self.emit(.immutable_receiver_for_mut_self, .error_, span, "cannot call a mutating method through a read-only ECS ref (get(T)); call it through get_mut(T)", .{}),
             .through_optional => try self.emit(.immutable_receiver_for_mut_self, .error_, span, "cannot write through '?.': unwrap the optional first", .{}),
+            .through_slice => try self.emit(.immutable_receiver_for_mut_self, .error_, span, "cannot write through a slice: a slice is a copy", .{}),
             .captured => try self.emitCapturedWrite(span, place.root),
         }
     }
 
-    const PlaceVerdict = enum { ok, immutable_binding, read_only_ref, through_optional, captured, not_a_place };
+    const PlaceVerdict = enum { ok, immutable_binding, read_only_ref, through_optional, through_slice, captured, not_a_place };
 
-    /// The verdict on writing through `id`, a field chain: its root must be a
-    /// `get_mut`, a binding of one, or a mutable binding the closure body
-    /// being typed did not capture. `root` names the root binding.
+    /// The verdict on writing through `id`, a chain of fields and elements:
+    /// its root must be a `get_mut`, a binding of one, or a mutable binding
+    /// the closure body being typed did not capture. An ECS ref reached
+    /// through a field or an element is read-only. `root` names the root
+    /// binding.
     fn placeOf(self: *TypeChecker, ctx: *const RuleCtx, id: NodeId) struct { verdict: PlaceVerdict, root: StringId = 0 } {
         var cur = id;
         while (true) switch (self.arena.exprKind(cur)) {
             .field_access => {
                 const fa = self.arena.field_accesses.items[self.arena.exprData(cur)];
                 if (fa.opt_chain) return .{ .verdict = .through_optional };
+                if (self.heldRef(ctx, fa.receiver)) return .{ .verdict = .read_only_ref };
                 cur = fa.receiver;
+            },
+            .index => {
+                const ix = self.arena.index_exprs.items[self.arena.exprData(cur)];
+                if (self.arena.exprKind(ix.index) == .range) return .{ .verdict = .through_slice };
+                cur = ix.receiver;
             },
             .method_get_mut => return .{ .verdict = .ok },
             .method_get => return .{ .verdict = .read_only_ref },
@@ -10089,6 +10101,57 @@ pub const TypeChecker = struct {
             },
             else => return .{ .verdict = .not_a_place },
         };
+    }
+
+    /// Whether `id` is an ECS ref held by a field or an element, whose mode no
+    /// binding records.
+    fn heldRef(self: *TypeChecker, ctx: *const RuleCtx, id: NodeId) bool {
+        switch (self.arena.exprKind(id)) {
+            .field_access, .index => {},
+            else => return false,
+        }
+        return switch (self.placeType(ctx, id)) {
+            .component, .resource, .builtin_resource => true,
+            else => false,
+        };
+    }
+
+    /// The type of `id`, a chain of fields and elements over a binding,
+    /// without a diagnostic; `unknown` past what the chain names.
+    fn placeType(self: *TypeChecker, ctx: *const RuleCtx, id: NodeId) ResolvedType {
+        switch (self.arena.exprKind(id)) {
+            .ident => {
+                const local = ctx.locals.get(self.arena.exprData(id)) orelse return .unknown;
+                return local.type_;
+            },
+            .field_access => {
+                const fa = self.arena.field_accesses.items[self.arena.exprData(id)];
+                return switch (self.placeType(ctx, fa.receiver)) {
+                    .component => |ref| blk: {
+                        const c = componentOf(ref);
+                        break :blk self.fieldTypeIn(c.arena, c.decl.fields_start, c.decl.fields_len, fa.field_name) orelse .unknown;
+                    },
+                    .resource => |ref| blk: {
+                        const r = resourceOf(ref);
+                        break :blk self.fieldTypeIn(r.arena, r.decl.fields_start, r.decl.fields_len, fa.field_name) orelse .unknown;
+                    },
+                    .struct_t => |ref| blk: {
+                        const target = structOf(ref);
+                        break :blk self.fieldTypeIn(target.arena, target.decl.fields_start, target.decl.fields_len, fa.field_name) orelse .unknown;
+                    },
+                    else => .unknown,
+                };
+            },
+            .index => {
+                const ix = self.arena.index_exprs.items[self.arena.exprData(id)];
+                return switch (self.placeType(ctx, ix.receiver)) {
+                    .array_fixed => |info| info.elem.*,
+                    .array_dyn => |elem| elem.*,
+                    else => .unknown,
+                };
+            },
+            else => return .unknown,
+        }
     }
 
     /// Whether `name` is a binding the closure body being typed captured
@@ -10155,7 +10218,9 @@ pub const TypeChecker = struct {
     /// Type an index / slice access. A range index
     /// (`arr[0..3]`) yields a dynamic-array slice of the element type; a scalar
     /// index (`arr[i]`) yields the element type. The index must be an integer.
-    fn synthIndex(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    /// An element read, or the element an assignment writes: `m[k]` reads
+    /// `V?` and is written `V`, and a compound operator does not write it.
+    fn synthIndex(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx, mode: enum { read, write, compound }) TypeError!ResolvedType {
         const ix = self.arena.index_exprs.items[data];
         const recv_t = try self.synthExprE(ix.receiver, ctx_opt);
         if (self.arena.exprKind(ix.index) == .range) {
@@ -10184,7 +10249,14 @@ pub const TypeChecker = struct {
                 if (!try self.valueFits(mi.key.*, ix.index, idx_t)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "map index key type does not match the map key type", .{});
                 }
-                return .{ .optional = mi.value };
+                return switch (mode) {
+                    .read => .{ .optional = mi.value },
+                    .write => mi.value.*,
+                    .compound => blk: {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "a map entry reads as an optional: a compound operator does not write it (write `m[k] = (m[k] ?? d) op v`)", .{});
+                        break :blk .unknown;
+                    },
+                };
             },
             .unknown => return ResolvedType.unknown,
             else => {
@@ -17711,6 +17783,60 @@ test "a write through a get_mut, a copy or a binding of the body is accepted" {
     const gpa = std.testing.allocator;
     var wrong: usize = 0;
     for (write_place_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const index_write_refused = [_]PlaceCase{
+    .{ .name = "an element of an immutable binding written", .code = .type_mismatch, .needle = "mutable binding", .src = "rule r() {\n  let a: int[] = [1]\n  a[0] = 2\n}" },
+    .{ .name = "an element of a set written", .code = .type_mismatch, .needle = "cannot index", .src = "rule r() {\n  let mut s = Set.from([1, 2])\n  s[0] = 3\n}" },
+    .{ .name = "a slice written", .code = .type_mismatch, .needle = "slice", .src = "rule r() {\n  let mut a: int[] = [1, 2]\n  a[0..1] = [5]\n}" },
+    .{ .name = "an element of a slice written", .code = .type_mismatch, .needle = "slice", .src = "rule r() {\n  let mut a: int[] = [1, 2]\n  a[0..1][0] = 5\n}" },
+    .{ .name = "a mut self method on an element of a slice", .code = .immutable_receiver_for_mut_self, .needle = "slice", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nrule r() {\n  let mut ps: P[] = [P { x: 1 }]\n  ps[0..1][0].bump()\n}" },
+    .{ .name = "a map entry written by a compound operator", .code = .type_mismatch, .needle = "map entry", .src = "rule r() {\n  let mut m: [int: int] = [1: 10]\n  m[1] += 5\n}" },
+    .{ .name = "a field of a map entry written", .code = .type_mismatch, .needle = "optional", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nrule r() {\n  let mut m: [int: P] = [1: P { x: 1 }]\n  m[1].x = 5\n}" },
+    .{ .name = "a ref held in a collection written", .code = .type_mismatch, .needle = "read-only", .src = "component H { v: int = 0 }\nrule r(entity: Entity) when entity has H {\n  let mut hs = [entity.get_mut(H)]\n  hs[0].v = 5\n}" },
+    .{ .name = "a ref held in a collection written by a compound operator", .code = .type_mismatch, .needle = "read-only", .src = "component H { v: int = 0 }\nrule r(entity: Entity) when entity has H {\n  let mut hs = [entity.get_mut(H)]\n  hs[0].v += 1\n}" },
+    .{ .name = "a closure writing an element of a capture", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "rule r() {\n  let mut a: int[] = [1]\n  let f = |v: int| { a[0] = v }\n  f(2)\n}" },
+    .{ .name = "an element written through a read-only resource ref", .code = .type_mismatch, .needle = "read-only", .src = "resource R { xs: int[] = [1, 2] }\nrule r() when resource R {\n  let r = get(R)\n  r.xs[0] = 5\n}" },
+};
+
+const index_write_accepted = [_]UnitCase{
+    .{ .name = "an element of a fixed array written", .code = .type_mismatch, .src = "rule r() {\n  let mut f: int[3] = [1, 2, 3]\n  f[2] = 0\n  f[1] += 2\n}" },
+    .{ .name = "an element of a nested array written", .code = .type_mismatch, .src = "rule r() {\n  let mut g = [[1, 2], [3, 4]]\n  g[1][0] = 7\n}" },
+    .{ .name = "a map entry inserted by index", .code = .type_mismatch, .src = "rule r() {\n  let mut m: [int: int] = [1: 10]\n  m[1] = 11\n  m[2] = 20\n}" },
+    .{ .name = "an element of a resource collection written through get_mut", .code = .type_mismatch, .src = "resource R { xs: int[] = [1, 2] }\nrule r() when resource R {\n  get_mut(R).xs[0] = 5\n  let r = get_mut(R)\n  r.xs[1] += 6\n}" },
+    .{ .name = "a field and a mut self method of an element", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nrule r() {\n  let mut ps: P[] = [P { x: 1 }]\n  ps[0].x = 2\n  ps[0].bump()\n}" },
+};
+
+test "an index write is refused through an immutable binding, a slice, a map entry or a held ref" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (index_write_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or countMessage(r.diagnostics.items, c.code, c.needle) != 1) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "an index write through a mutable place is accepted" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (index_write_accepted) |c| {
         var r = try parseAndCheck(gpa, c.src);
         defer r.deinit(gpa);
         try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);

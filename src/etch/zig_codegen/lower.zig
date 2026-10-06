@@ -2495,6 +2495,8 @@ const LocalInfo = struct {
     aggregate: bool = false,
     /// `self` of a `mut self` method, a pointer read as the value it points to.
     deref: bool = false,
+    /// The element type of a fixed array bound by `let`.
+    fixed_elem: []const u8 = "",
 };
 
 const LocalKey = union(enum) {
@@ -2613,10 +2615,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             const let = ast.let_stmts.items[data];
             try emitLet(w, ast, ctx, let);
         },
-        .assign_stmt => {
-            const assign = ast.assign_stmts.items[data];
-            try emitAssign(w, ast, ctx, assign);
-        },
+        .assign_stmt => try emitAssign(w, ast, ctx, data),
         .expr_stmt => {
             const eid: NodeId = @bitCast(data);
             const ek = ast.exprKind(eid);
@@ -3336,11 +3335,41 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
                 .ident => if (ctx.lookup(ast.exprData(let.value))) |src| src.aggregate else false,
                 else => false,
             },
+            .fixed_elem = switch (value_kind) {
+                .array_lit => blk: {
+                    const al = ast.array_lits.items[ast.exprData(let.value)];
+                    if (al.elements_len == 0) break :blk "";
+                    break :blk inferExprZigType(ast, ctx, @bitCast(ast.extra.items[al.elements_start]));
+                },
+                .ident => if (ctx.lookup(ast.exprData(let.value))) |src| src.fixed_elem else "",
+                else => "",
+            },
         },
     });
 }
 
-fn emitAssign(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.AssignStmt) CodegenError!void {
+/// An assignment, its right-hand side evaluated before its place
+/// (`etch-reference-part1.md` §7.9): a right-hand side that is not pure is bound
+/// to `__rhs<n>` first, `n` the statement's slab index.
+fn emitAssign(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
+    const assign = ast.assign_stmts.items[data];
+    if (ast.exprKind(assign.target) == .index) {
+        const ix = ast.index_exprs.items[ast.exprData(assign.target)];
+        if (mapKVZig(inferExprZigType(ast, ctx, ix.receiver))) |kv| {
+            if (assign.op != .assign) return CodegenError.UnsupportedConstruct;
+            const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+            w.arena_used = true;
+            try w.writeIndent();
+            try w.print("{{ const __rhs{d}: {s} = ", .{ data, kv.value });
+            try emitExpr(w, ast, ctx, assign.value);
+            try w.write("; __etchMapInsert(&(");
+            try emitExpr(w, ast, ctx, ix.receiver);
+            try w.print("), {s}, ", .{fa});
+            try emitExpr(w, ast, ctx, ix.index);
+            try w.print(", __rhs{d}); }}\n", .{data});
+            return;
+        }
+    }
     // Resource-field write — `get_mut(R).f = …` direct
     // or through a mutable `let s = get_mut(R)` alias: the write target is a
     // `*R` formed through `getMutResource`, which sets the dirty bit
@@ -3348,15 +3377,20 @@ fn emitAssign(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.
     // interpreter's `writeResourceField` (a pure read never dirties), so
     // `when resource R changed` gating is byte-exact by construction.
     const resource = assignTargetResource(ast, ctx, assign.target);
-    if (resource != null) {
-        try w.writeIndent();
-        try emitAssignTarget(w, ast, ctx, assign.target, resource);
-        try emitAssignOperator(w, ast, ctx, assign, resource);
-        return;
-    }
+    const rhs: ?u32 = if (exprIsPure(ast, assign.value)) null else data;
+    const ptr: ?u32 = if (assign.op != .assign and ast.exprKind(assign.target) == .index) data else null;
     try w.writeIndent();
-    try emitAssignTarget(w, ast, ctx, assign.target, null);
-    try emitAssignOperator(w, ast, ctx, assign, null);
+    if (rhs != null or ptr != null) try w.write("{ ");
+    if (rhs) |n| {
+        try w.print("const __rhs{d}: @TypeOf(", .{n});
+        try emitAssignTarget(w, ast, ctx, assign.target, resource);
+        try w.write(") = ");
+        try emitExpr(w, ast, ctx, assign.value);
+        try w.write("; ");
+    }
+    try emitAssignOperator(w, ast, ctx, assign, resource, rhs, ptr);
+    try w.write(if (rhs != null or ptr != null) "; }\n" else ";\n");
+    if (resource != null) return;
     // Change detection: right after a component-field write, stamp
     // the slot's `changed_tick` so an `entity has T changed` rule sees it. The
     // marking is co-located with the assignment (so it executes exactly when
@@ -3428,10 +3462,11 @@ fn emitAssignTarget(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, target: No
     try w.ident(ast.strings.slice(fa.field_name));
 }
 
-/// The operator and value of an assignment, ending the statement. An integer
+/// The place, operator and value of an assignment, the value `__rhs<n>`
+/// when `rhs` is `n`, the place `__p<n>.*` when `ptr` is `n`. An integer
 /// compound assignment goes through the prelude helper of its operator, and a
 /// float `%=` through `@rem`, as the binary operators do.
-fn emitAssignOperator(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.AssignStmt, resource: ?[]const u8) CodegenError!void {
+fn emitAssignOperator(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.AssignStmt, resource: ?[]const u8, rhs: ?u32, ptr: ?u32) CodegenError!void {
     const bin: ?ast_mod.BinaryOp = switch (assign.op) {
         .assign => null,
         .add_assign => .add,
@@ -3441,22 +3476,59 @@ fn emitAssignOperator(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: 
         .rem_assign => .rem,
     };
     const target_zig = inferExprZigType(ast, ctx, assign.target);
+    if (ptr) |n| {
+        try w.print("const __p{d} = &", .{n});
+        try emitAssignTarget(w, ast, ctx, assign.target, resource);
+        try w.write("; ");
+    }
+    const place = struct {
+        fn emit(pw: *Writer, past: *const AstArena, pctx: *LocalCtx, a: ast_mod.AssignStmt, res: ?[]const u8, p: ?u32) CodegenError!void {
+            if (p) |n| return pw.print("__p{d}.*", .{n});
+            try emitAssignTarget(pw, past, pctx, a.target, res);
+        }
+    };
+    try place.emit(w, ast, ctx, assign, resource, ptr);
     if (bin) |op| {
         const is_int = type_map.isIntLikeZigType(target_zig);
         if (is_int or op == .rem) {
             if (is_int) try w.print(" = {s}({s}, ", .{ intArithHelper(op).?, target_zig }) else try w.write(" = @rem(");
-            try emitAssignTarget(w, ast, ctx, assign.target, resource);
+            try place.emit(w, ast, ctx, assign, resource, ptr);
             try w.write(", ");
-            try emitExpr(w, ast, ctx, assign.value);
-            try w.write(");\n");
+            try emitAssignValue(w, ast, ctx, assign.value, rhs);
+            try w.write(")");
             return;
         }
     }
     try w.write(" ");
     try w.write(assignOpText(assign.op));
     try w.write(" ");
-    try emitExpr(w, ast, ctx, assign.value);
-    try w.write(";\n");
+    try emitAssignValue(w, ast, ctx, assign.value, rhs);
+}
+
+fn emitAssignValue(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, value: NodeId, rhs: ?u32) CodegenError!void {
+    if (rhs) |n| return w.print("__rhs{d}", .{n});
+    try emitExpr(w, ast, ctx, value);
+}
+
+/// Whether evaluating `id` writes nothing and calls nothing: a literal, a
+/// binding, a read through a field or an element of one, or an operator on
+/// such operands.
+fn exprIsPure(ast: *const AstArena, id: NodeId) bool {
+    const data = ast.exprData(id);
+    return switch (ast.exprKind(id)) {
+        .int_lit, .float_lit, .bool_lit, .string_lit, .ident, .tag_path, .none_lit => true,
+        .field_access => exprIsPure(ast, ast.field_accesses.items[data].receiver),
+        .index => blk: {
+            const ix = ast.index_exprs.items[data];
+            break :blk ast.exprKind(ix.index) != .range and exprIsPure(ast, ix.receiver) and exprIsPure(ast, ix.index);
+        },
+        .binary => blk: {
+            const bin = ast.binary_exprs.items[data];
+            break :blk exprIsPure(ast, bin.lhs) and exprIsPure(ast, bin.rhs);
+        },
+        .unary => exprIsPure(ast, ast.unary_exprs.items[data].operand),
+        else => false,
+    };
 }
 
 fn assignOpText(op: ast_mod.AssignOp) []const u8 {
@@ -6515,11 +6587,19 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
             const z = fieldZigTypeOnComponent(ast, comp_name, fname) orelse break :blk "i64";
             break :blk z;
         },
-        // Array literals and index/slice results are emitted without a `let` type
-        // annotation — Zig infers the array / element / slice type. Returning "" makes
-        // `emitLet` drop the `: T`.
+        // An array literal is emitted without a `let` type annotation — Zig infers
+        // it. Returning "" makes `emitLet` drop the `: T`.
         .array_lit => "",
-        .index => "",
+        // An element types as its array's element; a slice and a map entry are
+        // left to Zig.
+        .index => blk: {
+            const ix = ast.index_exprs.items[data];
+            if (ast.exprKind(ix.index) == .range) break :blk "";
+            if (dynArrayElemZig(inferExprZigType(ast, ctx, ix.receiver))) |e| break :blk e;
+            if (ast.exprKind(ix.receiver) != .ident) break :blk "";
+            const local = ctx.lookup(ast.exprData(ix.receiver)) orelse break :blk "";
+            break :blk local.fixed_elem;
+        },
         // A closure is an anonymous struct type, left to Zig inference.
         .closure => "",
         // A top-level fn's call types as its declared return.

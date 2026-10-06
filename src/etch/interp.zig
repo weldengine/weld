@@ -5190,6 +5190,39 @@ pub const Interpreter = struct {
             replaceHeld(self.gpa, ptr, new_v);
             return;
         }
+        if (target_kind == .index) {
+            const ix = self.ast.index_exprs.items[self.ast.exprData(assign.target)];
+            const rhs = try self.evalExpr(world, locals, assign.value);
+            if (self.thrown) return; // see `assignRhsThrew`
+            const place = try self.evalPlaceSlot(world, locals, ix.receiver);
+            const key = try self.evalExpr(world, locals, ix.index);
+            const span = self.ast.exprSpan(assign.target);
+            switch (place.value) {
+                .array_ref => |h| {
+                    const i = elementIndex(key, self.collections.arrays.items[h].items.len) orelse return error.RuntimeFailure;
+                    const elem = &self.collections.arrays.items[h].items[i];
+                    elem.* = applyAssignOp(elem.*, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, elem.*, rhs), span);
+                },
+                .array_persistent => |ptr| {
+                    const list = persistentArrayOf(try self.writableBlock(world, locals, ptr, place.slot));
+                    const i = elementIndex(key, list.items.len) orelse return error.RuntimeFailure;
+                    const new_v = applyAssignOp(list.items[i], assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, list.items[i], rhs), span);
+                    const owned = try self.promoteForCollection(new_v);
+                    releaseHandle(self.gpa, list.items[i]);
+                    list.items[i] = owned;
+                },
+                .map_ref => |h| {
+                    if (assign.op != .assign) return error.RuntimeFailure;
+                    try self.mapInsert(h, key, rhs);
+                },
+                .map_persistent => |ptr| {
+                    if (assign.op != .assign) return error.RuntimeFailure;
+                    try self.mapInsertPromoted(persistentMapOf(try self.writableBlock(world, locals, ptr, place.slot)), key, rhs);
+                },
+                else => return error.RuntimeFailure,
+            }
+            return;
+        }
         if (target_kind == .field_access) {
             const fa = self.ast.field_accesses.items[self.ast.exprData(assign.target)];
             if (self.isRefPlace(locals, fa.receiver)) return self.assignRefField(world, locals, assign, fa);
@@ -6246,17 +6279,7 @@ pub const Interpreter = struct {
                     const varg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + 1]);
                     const k = try self.evalExpr(world, locals, karg);
                     const v = try self.evalExpr(world, locals, varg);
-                    // Re-index after the arg evals (a nested collection
-                    // could have grown the outer store vector).
-                    var replaced = false;
-                    for (self.collections.maps.items[handle].items) |*pair| {
-                        if (self.valueEql(pair.key, k)) {
-                            pair.value = v;
-                            replaced = true;
-                            break;
-                        }
-                    }
-                    if (!replaced) try self.collections.maps.items[handle].append(self.gpa, .{ .key = k, .value = v });
+                    try self.mapInsert(handle, k, v);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "len")) {
@@ -6316,6 +6339,18 @@ pub const Interpreter = struct {
     /// the single mechanics shared by the `Set.from` seeding and `s.insert(x)`,
     /// mirrored by the codegen's `__etchSetInsert` helper — element order is
     /// byte-exact across the two backends by construction.
+    /// Insert `k` → `v` into the rule-arena map `handle`, the value replaced
+    /// when the key is present.
+    fn mapInsert(self: *Interpreter, handle: u32, k: Value, v: Value) !void {
+        for (self.collections.maps.items[handle].items) |*pair| {
+            if (self.valueEql(pair.key, k)) {
+                pair.value = v;
+                return;
+            }
+        }
+        try self.collections.maps.items[handle].append(self.gpa, .{ .key = k, .value = v });
+    }
+
     fn setInsert(self: *Interpreter, handle: u32, item: Value) !void {
         for (self.collections.sets.items[handle].items) |existing| {
             if (self.valueEql(existing, item)) return;
@@ -6622,6 +6657,7 @@ pub const Interpreter = struct {
         none,
         local: StringId,
         struct_field: struct { handle: u32, index: usize },
+        array_elem: struct { handle: u32, index: usize },
         resource_field: struct { rid: u32, field: StringId, mutable: bool },
     };
 
@@ -6649,6 +6685,18 @@ pub const Interpreter = struct {
                     return .{ .value = try self.fieldOf(world, recv, fa.field_name, id), .slot = .none };
                 }
             },
+            .index => {
+                const ix = self.ast.index_exprs.items[self.ast.exprData(id)];
+                if (self.ast.exprKind(ix.index) != .range) {
+                    const recv = try self.evalPlace(world, locals, ix.receiver);
+                    if (recv == .array_ref) {
+                        const key = try self.evalExpr(world, locals, ix.index);
+                        const arr = self.collections.arrays.items[recv.array_ref];
+                        const i = elementIndex(key, arr.items.len) orelse return error.RuntimeFailure;
+                        return .{ .value = arr.items[i], .slot = .{ .array_elem = .{ .handle = recv.array_ref, .index = i } } };
+                    }
+                }
+            },
             else => {},
         }
         return .{ .value = try self.evalPlace(world, locals, id), .slot = .none };
@@ -6660,6 +6708,11 @@ pub const Interpreter = struct {
             .none => {},
             .local => |name| replaceHeld(self.gpa, locals.getPtr(name) orelse return error.RuntimeFailure, v),
             .struct_field => |f| self.structs.list.items[f.handle].fields.items[f.index].value = v,
+            .array_elem => |e| {
+                const arr = &self.collections.arrays.items[e.handle];
+                if (e.index >= arr.items.len) return error.RuntimeFailure;
+                arr.items[e.index] = v;
+            },
             .resource_field => return error.RuntimeFailure,
         }
     }
@@ -6670,6 +6723,11 @@ pub const Interpreter = struct {
             .none => return false,
             .local => |name| locals.get(name) orelse return false,
             .struct_field => |f| self.structs.list.items[f.handle].fields.items[f.index].value,
+            .array_elem => |e| blk: {
+                const arr = self.collections.arrays.items[e.handle];
+                if (e.index >= arr.items.len) return false;
+                break :blk arr.items[e.index];
+            },
             .resource_field => |r| Bridge.readResourceField(&world.registry, &world.resources, r.rid, self.ast.strings.slice(r.field)) catch return false,
         };
         const b = handleBlock(v) orelse return false;
@@ -6706,6 +6764,11 @@ pub const Interpreter = struct {
             .struct_field => |f| {
                 const field = &self.structs.list.items[f.handle].fields.items[f.index];
                 field.value = withBlock(field.value, copy_ptr);
+                self.deferred_decrefs.appendAssumeCapacity(copy);
+            },
+            .array_elem => |e| {
+                const elem = &self.collections.arrays.items[e.handle].items[e.index];
+                elem.* = withBlock(elem.*, copy_ptr);
                 self.deferred_decrefs.appendAssumeCapacity(copy);
             },
             .resource_field => |r| Bridge.promoteResourceCollection(self.gpa, &world.registry, &world.resources, r.rid, self.ast.strings.slice(r.field), copy) catch {
@@ -7100,7 +7163,8 @@ pub const Interpreter = struct {
                     if (count_v != .int_ or count_v.int_ < 0) return error.RuntimeFailure;
                     var k: i64 = 0;
                     while (k < count_v.int_) : (k += 1) {
-                        try self.collections.arrays.items[handle].append(self.gpa, elem_v);
+                        const slot_v = if (k == 0) elem_v else try self.copyValue(elem_v, true);
+                        try self.collections.arrays.items[handle].append(self.gpa, slot_v);
                     }
                 } else {
                     var i: u32 = 0;
@@ -8161,6 +8225,13 @@ fn clonePersistentBlock(gpa: std.mem.Allocator, src: [*]u8) std.mem.Allocator.Er
             return block;
         },
     }
+}
+
+/// `key` as an index into a collection of `len` elements, if it is one.
+fn elementIndex(key: Value, len: usize) ?usize {
+    if (key != .int_) return null;
+    const i = std.math.cast(usize, key.int_) orelse return null;
+    return if (i < len) i else null;
 }
 
 /// `v`, a persistent collection handle, naming the block `ptr` instead.
@@ -19585,6 +19656,204 @@ const cow_runs = [_]ScopeRun{
 
 test "a persistent value is shared until its first shared write" {
     try expectRuns(&cow_runs);
+}
+
+const index_runs = [_]ScopeRun{
+    .{ .name = "an element written", .out = 9, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut a: int[] = [1, 2, 3]
+        \\  a[0] = 9
+        \\  get_mut(Out).n = a[0]
+        \\}
+    },
+    .{ .name = "an element written by a compound operator", .out = 7, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut a: int[] = [1, 2, 3]
+        \\  a[1] += 5
+        \\  get_mut(Out).n = a[1]
+        \\}
+    },
+    .{ .name = "an element of a fixed array written", .out = 1, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut f: int[3] = [1, 2, 3]
+        \\  f[2] = 0
+        \\  get_mut(Out).n = f[2] * 10 + f[0]
+        \\}
+    },
+    .{ .name = "a field of an element written", .out = 2, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut ps: P[] = [P { x: 1 }]
+        \\  ps[0].x = 2
+        \\  get_mut(Out).n = ps[0].x
+        \\}
+    },
+    .{ .name = "a mut self method on an element", .out = 2, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut ps: P[] = [P { x: 1 }]
+        \\  ps[0].bump()
+        \\  get_mut(Out).n = ps[0].x
+        \\}
+    },
+    .{ .name = "an element of a nested array written", .out = 7, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut g = [[1, 2], [3, 4]]
+        \\  g[1][0] = 7
+        \\  get_mut(Out).n = g[1][0]
+        \\}
+    },
+    .{ .name = "a map entry inserted by index", .out = 1120, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut m: [int: int] = [1: 10]
+        \\  m[1] = 11
+        \\  m[2] = 20
+        \\  let a = m[1] ?? 0
+        \\  let b = m[2] ?? 0
+        \\  get_mut(Out).n = a * 100 + b
+        \\}
+    },
+    .{ .name = "an element of a resource collection written through get_mut", .out = 56, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  get_mut(R).xs[0] = 5
+        \\  let r = get_mut(R)
+        \\  r.xs[1] = 6
+        \\  get_mut(Out).n = get(R).xs[0] * 10 + get(R).xs[1]
+        \\}
+    },
+    .{ .name = "an element of a copy of a resource collection written", .out = 19, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut ys = get(R).xs
+        \\  ys[0] = 9
+        \\  get_mut(Out).n = get(R).xs[0] * 10 + ys[0]
+        \\}
+    },
+    .{ .name = "an element of a copy written", .out = 15, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let a: int[] = [1, 2]
+        \\  let mut b = a
+        \\  b[0] = 5
+        \\  get_mut(Out).n = a[0] * 10 + b[0]
+        \\}
+    },
+    .{ .name = "a field of an element of a copy written", .out = 15, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let a: P[] = [P { x: 1 }]
+        \\  let mut b = a
+        \\  b[0].x = 5
+        \\  get_mut(Out).n = a[0].x * 10 + b[0].x
+        \\}
+    },
+    .{ .name = "each element of a fill is its own value", .out = 21, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut ps = [P { x: 1 }; 2]
+        \\  ps[0].bump()
+        \\  get_mut(Out).n = ps[0].x * 10 + ps[1].x
+        \\}
+    },
+    .{ .name = "an element passed to its own mut self method is a copy", .out = 12, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut cs: P[] = [P { x: 1 }]
+        \\  cs[0].absorb(cs[0])
+        \\  get_mut(Out).n = cs[0].x
+        \\}
+    },
+    .{ .name = "self = v through an element replaces the element", .out = 7, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut ps: P[] = [P { x: 1 }]
+        \\  ps[0].reset()
+        \\  get_mut(Out).n = ps[0].x
+        \\}
+    },
+    .{ .name = "an index write evaluates its right-hand side before its place", .out = 59, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut xs: int[] = [1]
+        \\  xs[0] = {
+        \\    xs.push(9)
+        \\    5
+        \\  }
+        \\  get_mut(Out).n = xs[0] * 10 + xs[1]
+        \\}
+    },
+    .{ .name = "an index write lands where its right-hand side left its receiver", .out = 58, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut xs: int[] = [1, 2]
+        \\  xs[0] = {
+        \\    xs = [7, 8]
+        \\    5
+        \\  }
+        \\  get_mut(Out).n = xs[0] * 10 + xs[1]
+        \\}
+    },
+    .{ .name = "a for iterates its entry copy while its body writes an element", .out = 6100, .src = value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut xs: int[] = [1, 2, 3]
+        \\  let mut s = 0
+        \\  for x in xs {
+        \\    xs[2] = 100
+        \\    s += x
+        \\  }
+        \\  get_mut(Out).n = s * 1000 + xs[2]
+        \\}
+    },
+    .{ .name = "an element holding a resource collection is rebound to its copy", .out = 34, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut a: int[][] = [get(R).xs]
+        \\  a[0].push(4)
+        \\  get_mut(Out).n = get(R).xs.len() * 10 + a[0].len()
+        \\}
+    },
+    .{ .name = "a push whose argument removes its receiver element leaves the resource", .out = 30, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut a: int[][] = [get(R).xs]
+        \\  a[0].push({
+        \\    let p = a.pop()
+        \\    1
+        \\  })
+        \\  get_mut(Out).n = get(R).xs.len() * 10 + a.len()
+        \\}
+    },
+    .{ .name = "a resource map entry inserted by index", .out = 3, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  get_mut(R).m["c"] = 3
+        \\  get_mut(Out).n = get(R).m.len()
+        \\}
+    },
+    .{ .name = "an entry of a copy of a resource map written", .out = 23, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut m2 = get(R).m
+        \\  m2["c"] = 3
+        \\  get_mut(Out).n = get(R).m.len() * 10 + m2.len()
+        \\}
+    },
+    .{ .name = "a runtime string element of a resource replaced", .out = 1, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  get_mut(R).names.push("x" + "y")
+        \\  get_mut(R).names[2] = "z" + ""
+        \\  get_mut(Out).n = if get(R).names[2] == "z" { 1 } else { 0 }
+        \\}
+    },
+};
+
+test "an element is a place an assignment or a method writes" {
+    try expectRuns(&index_runs);
+}
+
+test "an index write out of bounds fails loud" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, value_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut a: int[] = [1, 2, 3]
+        \\  a[3] = 9
+        \\  get_mut(Out).n = 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "Out", "n"));
 }
 
 test "a write through an unshared resource collection stays in its block" {

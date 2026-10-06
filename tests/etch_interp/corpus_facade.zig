@@ -101,6 +101,7 @@ const p88 = @import("programs/88_runtime_arith.expected.zig");
 const p89 = @import("programs/89_string_match.expected.zig");
 // A copy of each kind of value, read and never written.
 const p90 = @import("programs/90_value_copies.expected.zig");
+const p91 = @import("programs/91_index_writes.expected.zig");
 
 /// Embedded list of the differential corpus programs, consumed by the
 /// interpreter test and by the codegen parity test.
@@ -176,4 +177,5 @@ pub const programs = [_]Program{
     .{ .name = "88_runtime_arith", .source = @embedFile("programs/88_runtime_arith.etch"), .config = p88.config, .initial = p88.initial, .expected = p88.expected },
     .{ .name = "89_string_match", .source = @embedFile("programs/89_string_match.etch"), .config = p89.config, .initial = p89.initial, .expected = p89.expected },
     .{ .name = "90_value_copies", .source = @embedFile("programs/90_value_copies.etch"), .config = p90.config, .initial = p90.initial, .expected = p90.expected },
+    .{ .name = "91_index_writes", .source = @embedFile("programs/91_index_writes.etch"), .config = p91.config, .initial = p91.initial, .expected = p91.expected },
 };
