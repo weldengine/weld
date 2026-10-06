@@ -1,0 +1,54 @@
+component ArrEq {
+  zero: float = 0.0
+  same: int = 0
+  diff: int = 0
+  neq: int = 0
+  restored: int = 0
+  fill: int = 0
+  floats: int = 0
+  bools: int = 0
+  nan_self: int = 0
+  rhs_only: int = 0
+}
+
+rule compare(entity: Entity)
+  when entity has ArrEq
+{
+  let acc = entity.get_mut(ArrEq)
+  let a = [1, 2, 3]
+  let mut b = a
+  if a == b {
+    acc.same = 1
+  }
+  b[2] = 4
+  if a == b {
+    acc.diff = 1
+  }
+  if a != b {
+    acc.neq = 1
+  }
+  b[2] = 3
+  if b == [1, 2, 3] {
+    acc.restored = 1
+  }
+  if [0; 3] == [0, 0, 0] {
+    acc.fill = 1
+  }
+  let f = [1.5, 2.5]
+  if f == [1.5, 2.5] {
+    acc.floats = 1
+  }
+  let t = [true, false]
+  if t != [true, true] {
+    acc.bools = 1
+  }
+  let w = acc.zero / acc.zero
+  let nan_pair = [w, 1.0]
+  if nan_pair == nan_pair {
+    acc.nan_self = 1
+  }
+  let c = if acc.zero == 0.0 { [1, 2] } else { [3, 4] }
+  if c == [1, 2] {
+    acc.rhs_only = 1
+  }
+}

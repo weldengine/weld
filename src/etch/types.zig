@@ -8228,6 +8228,7 @@ pub const TypeChecker = struct {
             .unknown, .generic, .enum_t => true,
             .builtin => |b| b.isEq() and !b.isFloat(),
             .optional => |p| isKeyType(p.*),
+            .array_fixed => |info| isKeyType(info.elem.*),
             else => false,
         };
     }
@@ -8438,9 +8439,8 @@ pub const TypeChecker = struct {
         return try self.synthExprE(arg, ctx_opt);
     }
 
-    /// Whether a type has a meaningful runtime equality for `assert_eq`/`assert_neq`:
-    /// scalars/strings (`.builtin`, incl. `string_`/`Entity`), enums, or `unknown`
-    /// (already-diagnosed). Aggregates lack a structural `Value.eql`.
+    /// Whether a type has an equality for `assert_eq`/`assert_neq`: an `Eq`
+    /// type, or `unknown` (already-diagnosed).
     fn assertComparable(t: ResolvedType) bool {
         return t == .unknown or isEqType(t);
     }
@@ -8493,13 +8493,8 @@ pub const TypeChecker = struct {
             } else {
                 const ta = try self.synthArg(call, 0, ctx_opt);
                 const tb = try self.synthArg(call, 1, ctx_opt);
-                // Only scalar / enum / string values compare at runtime:
-                // aggregates (struct/array/map/set/optional/closure)
-                // have no structural `Value.eql`, so an aggregate operand would
-                // false-fail `assert_eq` and false-PASS `assert_neq`. Reject them
-                // fail-loud rather than mis-compare.
                 if (!assertComparable(ta) or !assertComparable(tb)) {
-                    try self.emit(.type_mismatch, .error_, span, "{s} compares two values of a type with equality (structs, arrays, maps and sets have none)", .{name});
+                    try self.emit(.type_mismatch, .error_, span, "{s} compares two values of a type with equality (structs, dynamic arrays, maps and sets have none)", .{name});
                 } else if (ta != .unknown and tb != .unknown and !ResolvedType.eql(ta, tb)) {
                     try self.emit(.type_mismatch, .error_, span, "{s} compares two values of the same type", .{name});
                 }
@@ -10526,6 +10521,7 @@ pub const TypeChecker = struct {
         return switch (t) {
             .builtin => |b| b.isEq(),
             .optional => |p| isEqType(p.*),
+            .array_fixed => |info| isEqType(info.elem.*),
             .enum_t => true,
             else => false,
         };
@@ -17874,6 +17870,66 @@ test "an index write through a mutable place is accepted" {
         defer r.deinit(gpa);
         try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
         if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const fixed_key_accepted = [_]UnitCase{
+    .{ .name = "a map literal keyed by a fixed array", .code = .type_mismatch, .src = "rule r() {\n  let m = [[1, 2]: 10]\n}" },
+    .{ .name = "a map annotation keyed by a fixed array", .code = .type_mismatch, .src = "rule r() {\n  let m: [int[2]: int] = [:]\n}" },
+    .{ .name = "a set annotation of fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  let s: Set<bool[3]> = Set.new()\n}" },
+    .{ .name = "Set.from of fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  let s = Set.from([[1, 2], [3, 4]])\n}" },
+    .{ .name = "a fixed-array key inserted, indexed and contained", .code = .type_mismatch, .src = "rule r() {\n  let mut m: [int[2]: int] = [:]\n  m.insert([1, 2], 5)\n  m[[3, 4]] = 6\n  let v = m[[1, 2]] ?? 0\n  let mut s: Set<int[2]> = Set.new()\n  s.insert([1, 2])\n  let b = s.contains([1, 2])\n}" },
+    .{ .name = "a for over a map keyed by fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  for k, v in [[1, 2]: 10] {\n    let t = k[0] + v\n  }\n}" },
+    .{ .name = "a fn taking a map keyed by fixed arrays", .code = .type_mismatch, .src = "fn f(m: [int[2]: int]) -> Set<string[2]> {\n  Set.new()\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "a key of nested fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  let m = [[[1, 2], [3, 4]]: 1]\n}" },
+    .{ .name = "an optional fixed-array key", .code = .type_mismatch, .src = "rule r() {\n  let m: [int[2]?: int] = [:]\n}" },
+    .{ .name = "string and enum fixed-array keys", .code = .type_mismatch, .src = "enum Dir { north, south }\nrule r() {\n  let m = [[\"a\", \"b\"]: 1]\n  let n = [[Dir.north, Dir.south]: 1]\n}" },
+    .{ .name = "two fixed arrays compared", .code = .type_mismatch, .src = "rule r() {\n  let a = [1, 2]\n  let e = a == [1, 2]\n  let d = a != [2, 1]\n}" },
+    .{ .name = "two float arrays compared", .code = .type_mismatch, .src = "rule r() {\n  let e = [1.5] == [1.5]\n}" },
+    .{ .name = "an optional fixed array compared", .code = .type_mismatch, .src = "rule r() {\n  let o: int[2]? = some([1, 2])\n  let e = o == none\n  let f = o == some([1, 2])\n}" },
+    .{ .name = "assert_eq on fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  assert_eq([1, 2], [1, 2])\n  assert_neq([1, 2], [2, 1])\n}" },
+    .{ .name = "nested fixed arrays compared", .code = .type_mismatch, .src = "rule r() {\n  let e = [[1], [2]] == [[1], [2]]\n}" },
+    .{ .name = "a struct field of an optional fixed array compared", .code = .type_mismatch, .src = "struct S { o: int[2]? = none }\nrule r() {\n  let s = S { o: some([1, 2]) }\n  let e = s.o == some([1, 2])\n}" },
+    .{ .name = "a struct field of an optional map keyed by fixed arrays", .code = .type_mismatch, .src = "struct S { m: [int[2]: int]? = none }\nrule r() {\n  let x = 1\n}" },
+};
+
+const fixed_key_refused = [_]PlaceCase{
+    .{ .name = "a float fixed-array key", .code = .bound_not_satisfied, .needle = "Hash", .src = "rule r() {\n  let m: [float[2]: int] = [:]\n}" },
+    .{ .name = "Set.from of float arrays", .code = .bound_not_satisfied, .needle = "Hash", .src = "rule r() {\n  let s = Set.from([[1.5, 2.5]])\n}" },
+    .{ .name = "a struct fixed-array key", .code = .bound_not_satisfied, .needle = "Hash", .src = "struct P { x: int = 0 }\nrule r() {\n  let m = [[P { x: 1 }]: 1]\n}" },
+    .{ .name = "a dynamic-array key", .code = .bound_not_satisfied, .needle = "Hash", .src = "rule r() {\n  let m: [int[]: int] = [:]\n}" },
+    .{ .name = "keys of two lengths", .code = .bound_not_satisfied, .needle = "Hash", .src = "rule r() {\n  let m = [[1, 2]: 1, [1, 2, 3]: 2]\n}" },
+    .{ .name = "a key of another length inserted", .code = .type_mismatch, .needle = "", .src = "rule r() {\n  let mut m: [int[2]: int] = [:]\n  m.insert([1, 2, 3], 1)\n}" },
+    .{ .name = "a resource map keyed by a fixed array", .code = .collection_field_element_invalid, .needle = "", .src = "resource R { m: [int[2]: int] = [:] }\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "two dynamic arrays compared", .code = .type_mismatch, .needle = "equality", .src = "rule r() {\n  let a: int[] = [1]\n  let e = a == a\n}" },
+    .{ .name = "fixed arrays of two lengths compared", .code = .type_mismatch, .needle = "equality", .src = "rule r() {\n  let e = [1, 2] == [1, 2, 3]\n}" },
+    .{ .name = "struct arrays compared", .code = .type_mismatch, .needle = "equality", .src = "struct P { x: int = 0 }\nrule r() {\n  let e = [P { x: 1 }] == [P { x: 1 }]\n}" },
+    .{ .name = "fixed arrays ordered", .code = .type_mismatch, .needle = "", .src = "rule r() {\n  let e = [1] < [2]\n}" },
+};
+
+test "a fixed array of a hashable element is a key, and of an Eq element is Eq" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (fixed_key_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (fixed_key_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or countMessage(r.diagnostics.items, c.code, c.needle) != 1) {
             wrong += 1;
             std.debug.print("{s}:\n", .{c.name});
             for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });

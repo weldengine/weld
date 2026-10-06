@@ -127,4 +127,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p90_value_copies", .etch_path = "tests/etch_interp/programs/90_value_copies.etch" },
     .{ .name = "p91_index_writes", .etch_path = "tests/etch_interp/programs/91_index_writes.etch" },
     .{ .name = "p92_collection_copies", .etch_path = "tests/etch_interp/programs/92_collection_copies.etch" },
+    .{ .name = "p93_fixed_array_eq", .etch_path = "tests/etch_interp/programs/93_fixed_array_eq.etch" },
 };

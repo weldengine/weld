@@ -4212,6 +4212,20 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try w.write(" }) catch unreachable)");
                 return;
             }
+            // Two fixed arrays compare element by element; `std.meta.eql`
+            // compares a string by its pointer, so a string element fails loud.
+            if (b.op == .eq or b.op == .neq) {
+                if (fixedArrayElem(ast, ctx, b.lhs) orelse fixedArrayElem(ast, ctx, b.rhs)) |elem| {
+                    const scalar = type_map.isIntLikeZigType(elem) or std.mem.eql(u8, elem, "f64") or std.mem.eql(u8, elem, "f32") or std.mem.eql(u8, elem, "bool");
+                    if (!scalar) return CodegenError.UnsupportedConstruct;
+                    try w.write(if (b.op == .eq) "std.meta.eql(" else "!std.meta.eql(");
+                    try emitExpr(w, ast, ctx, b.lhs);
+                    try w.write(", ");
+                    try emitExpr(w, ast, ctx, b.rhs);
+                    try w.write(")");
+                    return;
+                }
+            }
             const operand_zig = inferExprZigType(ast, ctx, b.lhs);
             if (intArithHelper(b.op)) |helper| {
                 if (type_map.isIntLikeZigType(operand_zig)) {
@@ -4882,6 +4896,21 @@ fn optionalOf(zig_scalar: []const u8) ?[]const u8 {
 /// builtin element scalars (+ string); any other element type is deferred
 /// (fail loud). Static strings keep the emitter allocation-free and make the
 /// reverse lookup (`dynArrayElemZig`) exact.
+/// The element type of `id` when it is a fixed array whose element the codegen
+/// knows: an array literal, or a binding of one.
+fn fixedArrayElem(ast: *const AstArena, ctx: *LocalCtx, id: NodeId) ?[]const u8 {
+    const elem = switch (ast.exprKind(id)) {
+        .array_lit => blk: {
+            const al = ast.array_lits.items[ast.exprData(id)];
+            if (al.elements_len == 0) return null;
+            break :blk inferExprZigType(ast, ctx, @bitCast(ast.extra.items[al.elements_start]));
+        },
+        .ident => (ctx.lookup(ast.exprData(id)) orelse return null).fixed_elem,
+        else => return null,
+    };
+    return if (elem.len == 0) null else elem;
+}
+
 /// Whether `zig_t` is the type of a dynamic array, a map or a set.
 fn isListZigType(zig_t: []const u8) bool {
     return dynArrayElemZig(zig_t) != null or mapKVZig(zig_t) != null or setElemZig(zig_t) != null;

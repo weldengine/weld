@@ -5834,8 +5834,7 @@ pub const Interpreter = struct {
             if (call.args_len < 2) return error.RuntimeFailure;
             const a = try self.evalArg(world, locals, call, 0);
             const b = try self.evalArg(world, locals, call, 1);
-            // Aggregates are rejected at type-check (`synthBuiltinCall`), so only
-            // comparable values arrive.
+            // Only an `Eq` value arrives (`synthBuiltinCall`).
             if (self.valueEql(a, b) != want_eq) {
                 self.test_msg_buf.clearRetainingCapacity();
                 try self.msgAssertPrefix(world, locals, call, 2, name);
@@ -6506,9 +6505,9 @@ pub const Interpreter = struct {
     }
 
     /// Runtime value equality: two strings compare by bytes, whatever their
-    /// tags; two optionals by what they hold; anything else by `Value.eql`,
-    /// which compares a `.string_id` by pool id and never matches a
-    /// `.string_run`.
+    /// tags; two optionals by what they hold; two fixed arrays element by
+    /// element; anything else by `Value.eql`, which compares a `.string_id` by
+    /// pool id and never matches a `.string_run`.
     fn valueEql(self: *const Interpreter, a: Value, b: Value) bool {
         const ab = self.stringBytes(a);
         const bb = self.stringBytes(b);
@@ -6517,6 +6516,13 @@ pub const Interpreter = struct {
             const pa = self.optionals.items[a.optional] orelse return self.optionals.items[b.optional] == null;
             const pb = self.optionals.items[b.optional] orelse return false;
             return self.valueEql(pa, pb);
+        }
+        if (a == .array_ref and b == .array_ref) {
+            const xs = self.collections.arrays.items[a.array_ref].items;
+            const ys = self.collections.arrays.items[b.array_ref].items;
+            if (xs.len != ys.len) return false;
+            for (xs, ys) |x, y| if (!self.valueEql(x, y)) return false;
+            return true;
         }
         return a.eql(b);
     }
@@ -19845,6 +19851,158 @@ const index_runs = [_]ScopeRun{
 
 test "an element is a place an assignment or a method writes" {
     try expectRuns(&index_runs);
+}
+
+const fixed_key_prelude =
+    \\resource Out { n: int = 0 }
+    \\enum Dir { north, south }
+    \\fn same(a: int[2], b: int[2]) -> bool {
+    \\  a == b
+    \\}
+    \\
+;
+
+const fixed_key_runs = [_]ScopeRun{
+    .{ .name = "a lookup by an equal fixed array finds its key", .out = 2012, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let m = [[1, 2]: 10, [3, 4]: 20]
+        \\  let k = [3, 4]
+        \\  let a = m[k] ?? 0
+        \\  let b = m[[1, 2]] ?? 0
+        \\  get_mut(Out).n = a * 100 + b + m.len()
+        \\}
+    },
+    .{ .name = "two equal fixed-array keys in a literal are one entry", .out = 120, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let m = [[1, 2]: 10, [1, 2]: 20]
+        \\  let a = m[[1, 2]] ?? 0
+        \\  get_mut(Out).n = m.len() * 100 + a
+        \\}
+    },
+    .{ .name = "an insert and an index write by an equal fixed array replace", .out = 279, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut m: [int[2]: int] = [:]
+        \\  m.insert([1, 2], 5)
+        \\  m.insert([1, 2], 6)
+        \\  m[[1, 2]] = 7
+        \\  m[[2, 1]] = 9
+        \\  let a = m[[1, 2]] ?? 0
+        \\  let b = m[[2, 1]] ?? 0
+        \\  get_mut(Out).n = m.len() * 100 + a * 10 + b
+        \\}
+    },
+    .{ .name = "a key inserted from a binding later written stays", .out = 50, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut m: [int[2]: int] = [:]
+        \\  let mut k = [1, 2]
+        \\  m.insert(k, 5)
+        \\  k[0] = 9
+        \\  let a = m[[1, 2]] ?? 0
+        \\  let b = m[k] ?? 0
+        \\  get_mut(Out).n = a * 10 + b
+        \\}
+    },
+    .{ .name = "a set of fixed arrays keeps one of each", .out = 31, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut s = Set.from([[1, 2], [1, 2], [3, 4]])
+        \\  s.insert([3, 4])
+        \\  s.insert([5, 6])
+        \\  let c = if s.contains([5, 6]) { 1 } else { 0 }
+        \\  get_mut(Out).n = s.len() * 10 + c
+        \\}
+    },
+    .{ .name = "a for reads the fixed-array keys of a map", .out = 44, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut t = 0
+        \\  for k, v in [[1, 2]: 10, [3, 4]: 20] {
+        \\    t += k[0] * k[1] + v
+        \\  }
+        \\  get_mut(Out).n = t
+        \\}
+    },
+    .{ .name = "nested fixed arrays compare element by element", .out = 11, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let e = if [[1, 2], [3, 4]] == [[1, 2], [3, 4]] { 1 } else { 0 }
+        \\  let d = if [[1, 2], [3, 4]] != [[1, 2], [3, 5]] { 1 } else { 0 }
+        \\  get_mut(Out).n = e * 10 + d
+        \\}
+    },
+    .{ .name = "string elements of a key compare by bytes", .out = 4, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let a = "a"
+        \\  let k = [a + "b", "c"]
+        \\  let m = [["ab", "c"]: 4]
+        \\  get_mut(Out).n = m[k] ?? 0
+        \\}
+    },
+    .{ .name = "an optional fixed array compares with some and none", .out = 10, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let o: int[2]? = some([1, 2])
+        \\  let e = if o == some([1, 2]) { 1 } else { 0 }
+        \\  let f = if o == none { 1 } else { 0 }
+        \\  get_mut(Out).n = e * 10 + f
+        \\}
+    },
+    .{ .name = "an optional fixed-array key", .out = 21, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let mut m: [int[2]?: int] = [:]
+        \\  m.insert(some([1, 2]), 2)
+        \\  m.insert(none, 1)
+        \\  let a = m[some([1, 2])] ?? 0
+        \\  let b = m[none] ?? 0
+        \\  get_mut(Out).n = a * 10 + b
+        \\}
+    },
+    .{ .name = "assert_eq on equal fixed arrays passes", .out = 1, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  assert_eq([1, 2], [1, 2])
+        \\  assert_neq([1, 2], [2, 1])
+        \\  get_mut(Out).n = 1
+        \\}
+    },
+    .{ .name = "a fixed array holding NaN is not equal to itself", .out = 1, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let z = 0.0
+        \\  let w = z / z
+        \\  let a = if [w] == [w] { 1 } else { 0 }
+        \\  let b = if [1.5] == [1.5] { 1 } else { 0 }
+        \\  get_mut(Out).n = a * 10 + b
+        \\}
+    },
+    .{ .name = "a set of enum fixed arrays keeps one of each", .out = 11, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let s = Set.from([[Dir.north, Dir.south], [Dir.north, Dir.south]])
+        \\  let c = if s.contains([Dir.north, Dir.south]) { 1 } else { 0 }
+        \\  get_mut(Out).n = s.len() * 10 + c
+        \\}
+    },
+    .{ .name = "an element compared with a fixed array", .out = 1, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let g = [[1, 2], [3, 4]]
+        \\  get_mut(Out).n = if g[0] == [1, 2] { 1 } else { 0 }
+        \\}
+    },
+    .{ .name = "fixed arrays compared through parameters", .out = 1, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  get_mut(Out).n = if same([1, 2], [1, 2]) { 1 } else { 0 }
+        \\}
+    },
+    .{ .name = "a map value compared with some fixed array", .out = 1, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let m: [int: int[2]] = [1: [1, 2]]
+        \\  get_mut(Out).n = if m[1] == some([1, 2]) { 1 } else { 0 }
+        \\}
+    },
+    .{ .name = "an unwrapped fixed array compared", .out = 1, .src = fixed_key_prelude ++
+        \\rule r() when resource Out {
+        \\  let o: int[2]? = some([1, 2])
+        \\  get_mut(Out).n = if (o ?? [0, 0]) == [1, 2] { 1 } else { 0 }
+        \\}
+    },
+};
+
+test "a fixed array is compared and looked up element by element" {
+    try expectRuns(&fixed_key_runs);
 }
 
 test "an index write out of bounds fails loud" {
