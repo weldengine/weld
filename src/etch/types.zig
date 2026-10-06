@@ -5493,6 +5493,7 @@ pub const TypeChecker = struct {
             try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "'.{s}' names an enum variant where no enum is expected", .{self.arena.strings.slice(self.arena.exprData(value))});
             return true;
         }
+        if (self.lengthMisfits(declared, value)) return false;
         if (declared == .unknown or actual == .unknown or declared == .generic) return true;
         // A `T` fits a `T?` by the implicit wrap (`etch-reference-part1.md` §3.6),
         // which the interpreter applies to `value` once per layer. A generic
@@ -5544,7 +5545,7 @@ pub const TypeChecker = struct {
             .array_fixed, .array_dyn => {
                 const want = arrayElem(declared);
                 const have = arrayElem(actual);
-                if (declared == .array_fixed and actual == .array_fixed and declared.array_fixed.len != actual.array_fixed.len) return false;
+                if (declared == .array_fixed and (actual != .array_fixed or declared.array_fixed.len != actual.array_fixed.len)) return false;
                 if (kind == .array_lit) return self.runFits(want.*, self.arena.array_lits.items[self.arena.exprData(value)], have.*);
                 return self.sameElement(want.*, have.*);
             },
@@ -5577,6 +5578,54 @@ pub const TypeChecker = struct {
             },
             .range => |want| return want == actual.range,
             else => return true,
+        }
+    }
+
+    /// Whether an array literal `value` yields, at any depth, has another length
+    /// than the fixed array `want` gives it there.
+    fn lengthMisfits(self: *TypeChecker, want: ResolvedType, value: NodeId) bool {
+        if (value.isNone()) return false;
+        var slot = want;
+        while (slot == .optional) slot = slot.optional.*;
+        const data = self.arena.exprData(value);
+        switch (self.arena.exprKind(value)) {
+            .block_expr => return self.lengthMisfits(slot, self.arena.block_exprs.items[data].value),
+            .if_expr => {
+                const ife = self.arena.if_exprs.items[data];
+                return self.lengthMisfits(slot, ife.then_block) or self.lengthMisfits(slot, ife.else_branch);
+            },
+            .match_expr => {
+                const m = self.arena.match_exprs.items[data];
+                var i: u32 = 0;
+                while (i < m.arms_len) : (i += 1) {
+                    if (self.lengthMisfits(slot, self.arena.match_arms.items[m.arms_start + i].body)) return true;
+                }
+                return false;
+            },
+            .some_lit => return self.lengthMisfits(slot, @bitCast(data)),
+            .array_lit => {
+                if (!isArray(slot)) return false;
+                const al = self.arena.array_lits.items[data];
+                if (slot == .array_fixed) {
+                    const len: u64 = if (al.is_fill) (self.constArrayLen(al.fill_count) orelse return false) else al.elements_len;
+                    if (len != slot.array_fixed.len) return true;
+                }
+                var i: u32 = 0;
+                while (i < al.elements_len) : (i += 1) {
+                    if (self.lengthMisfits(arrayElem(slot).*, @bitCast(self.arena.extra.items[al.elements_start + i]))) return true;
+                }
+                return false;
+            },
+            .map_lit => {
+                if (slot != .map_t) return false;
+                const ml = self.arena.map_lits.items[data];
+                var i: u32 = 0;
+                while (i < ml.entries_len) : (i += 1) {
+                    if (self.lengthMisfits(slot.map_t.value.*, self.arena.map_entries.items[ml.entries_start + i].value)) return true;
+                }
+                return false;
+            },
+            else => return false,
         }
     }
 
@@ -5676,37 +5725,58 @@ pub const TypeChecker = struct {
 
     /// Whether `value` yields `none` on every path.
     fn yieldsNone(self: *TypeChecker, value: NodeId) bool {
+        return self.everyPathYields(value, isNoneLit);
+    }
+
+    /// Whether `value` yields `[]` on every path.
+    fn yieldsEmptyArray(self: *TypeChecker, value: NodeId) bool {
+        return self.everyPathYields(value, isEmptyArrayLit);
+    }
+
+    fn isNoneLit(a: *const AstArena, value: NodeId) bool {
+        return a.exprKind(value) == .none_lit;
+    }
+
+    fn isEmptyArrayLit(a: *const AstArena, value: NodeId) bool {
+        if (a.exprKind(value) != .array_lit) return false;
+        const al = a.array_lits.items[a.exprData(value)];
+        return !al.is_fill and al.elements_len == 0;
+    }
+
+    fn everyPathYields(self: *TypeChecker, value: NodeId, comptime leaf: fn (*const AstArena, NodeId) bool) bool {
         if (value.isNone()) return false;
         const data = self.arena.exprData(value);
         switch (self.arena.exprKind(value)) {
-            .none_lit => return true,
-            .block_expr => return self.yieldsNone(self.arena.block_exprs.items[data].value),
+            .block_expr => return self.everyPathYields(self.arena.block_exprs.items[data].value, leaf),
             .if_expr => {
                 const ife = self.arena.if_exprs.items[data];
-                return self.yieldsNone(ife.then_block) and self.yieldsNone(ife.else_branch);
+                return self.everyPathYields(ife.then_block, leaf) and self.everyPathYields(ife.else_branch, leaf);
             },
             .match_expr => {
                 const m = self.arena.match_exprs.items[data];
                 var i: u32 = 0;
                 while (i < m.arms_len) : (i += 1) {
-                    if (!self.yieldsNone(self.arena.match_arms.items[m.arms_start + i].body)) return false;
+                    if (!self.everyPathYields(self.arena.match_arms.items[m.arms_start + i].body, leaf)) return false;
                 }
                 return m.arms_len != 0;
             },
-            else => return false,
+            else => return leaf(self.arena, value),
         }
     }
 
     /// The type `branches` join to (`etch-reference-part1.md` §3.6): the first
     /// value's, the optional of it that a later value is, the dynamic array two
-    /// arrays of one element and two lengths are, and the optional of it when a
-    /// branch yields `none`.
+    /// arrays of one element and two lengths are (`[]` being of length zero),
+    /// and the optional of it when a branch yields `none`.
     fn joinBranches(self: *TypeChecker, branches: []const Branch) TypeError!ResolvedType {
         var join: ?ResolvedType = null;
         var none = false;
+        var empty = false;
         for (branches) |b| {
             if (self.yieldsNone(b.node)) {
                 none = true;
+            } else if (self.yieldsEmptyArray(b.node)) {
+                empty = true;
             } else if (join) |j| {
                 if (optionalDepth(b.t) > optionalDepth(j) and try self.valueFits(b.t, NodeId.none, j)) {
                     join = b.t;
@@ -5715,7 +5785,8 @@ pub const TypeChecker = struct {
                 }
             } else join = b.t;
         }
-        const t = join orelse return ResolvedType.unknown;
+        const first = join orelse return ResolvedType.unknown;
+        const t: ResolvedType = if (empty and first == .array_fixed and first.array_fixed.len != 0) .{ .array_dyn = first.array_fixed.elem } else first;
         if (none and t != .optional and t != .unknown and t != .unit) return self.optionalOf(t);
         return t;
     }
@@ -17932,6 +18003,104 @@ test "a fixed array of a hashable element is a key, and of an Eq element is Eq" 
         if (r.diagnostics.items.len != 1 or countMessage(r.diagnostics.items, c.code, c.needle) != 1) {
             wrong += 1;
             std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const fixed_length_refused = [_]UnitCase{
+    .{ .name = "a dynamic array into a let of a fixed length", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let a: int[3] = d\n}" },
+    .{ .name = "a slice into a let of a fixed length", .code = .type_mismatch, .src = "rule r() {\n  let xs = [1, 2, 3, 4]\n  let a: int[3] = xs[0..3]\n}" },
+    .{ .name = "a dynamic array assigned to a fixed array", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let mut a: int[3] = [1, 2, 3]\n  a = d\n}" },
+    .{ .name = "a dynamic array written to a fixed element", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let mut g = [[1, 2, 3], [4, 5, 6]]\n  g[0] = d\n}" },
+    .{ .name = "a dynamic array passed for a fixed parameter", .code = .type_mismatch, .src = "fn f(a: int[3]) -> int {\n  a.len()\n}\nrule r() {\n  let d: int[] = [1]\n  let k = f(d)\n}" },
+    .{ .name = "a dynamic array returned for a fixed return", .code = .return_type_mismatch, .src = "fn g() -> int[3] {\n  let d: int[] = [1]\n  return d\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "a dynamic array as the tail of a fixed return", .code = .return_type_mismatch, .src = "fn g() -> int[3] {\n  let d: int[] = [1]\n  d\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "a dynamic array passed to a method's fixed parameter", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nimpl P {\n  fn take(self, a: int[3]) -> int {\n    a.len()\n  }\n}\nrule r() {\n  let d: int[] = [1]\n  let p = P { x: 1 }\n  let k = p.take(d)\n}" },
+    .{ .name = "a dynamic array passed to a closure's fixed parameter", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let f = |a: int[3]| a.len()\n  let k = f(d)\n}" },
+    .{ .name = "a dynamic array returned through a generic into a fixed let", .code = .type_mismatch, .src = "fn id<T>(x: T) -> T {\n  x\n}\nrule r() {\n  let d: int[] = [1]\n  let a: int[3] = id(d)\n}" },
+    .{ .name = "a dynamic array wrapped into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let o: int[3]? = d\n}" },
+    .{ .name = "some of a dynamic array into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let o: int[3]? = some(d)\n}" },
+    .{ .name = "a dynamic array pushed onto fixed elements", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let mut g: int[3][] = []\n  g.push(d)\n}" },
+    .{ .name = "a dynamic array inserted as a fixed value", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let mut m: [int: int[3]] = [:]\n  m.insert(1, d)\n}" },
+    .{ .name = "a dynamic array written as a fixed map entry", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let mut m: [int: int[3]] = [:]\n  m[1] = d\n}" },
+    .{ .name = "a dynamic array as a fixed map literal value", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let m: [int: int[3]] = [1: d]\n}" },
+    .{ .name = "a dynamic array as a fixed literal element", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let a: int[3][1] = [d]\n}" },
+    .{ .name = "a short literal element", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = [[1, 2, 3], [4, 5]]\n}" },
+    .{ .name = "an empty literal element beside a full one", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = [[1, 2, 3], []]\n}" },
+    .{ .name = "branches of two lengths into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[2] = if c { [1, 2] } else { [1, 2, 3] }\n}" },
+    .{ .name = "an empty else branch into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = if c { [1, 2, 3] } else { [] }\n}" },
+    .{ .name = "an empty then branch into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = if c { [] } else { [1, 2, 3] }\n}" },
+    .{ .name = "a resource's dynamic array into a fixed let", .code = .type_mismatch, .src = "resource R { xs: int[] = [1, 2, 3] }\nrule r() when resource R {\n  let a: int[3] = get(R).xs\n}" },
+    .{ .name = "an empty literal into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = []\n}" },
+    .{ .name = "an empty literal passed for a fixed parameter", .code = .type_mismatch, .src = "fn f(a: int[3]) -> int {\n  a.len()\n}\nrule r() {\n  let k = f([])\n}" },
+    .{ .name = "an empty literal as the tail of a fixed return", .code = .return_type_mismatch, .src = "fn g() -> int[3] {\n  []\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "an empty block value into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = {\n    []\n  }\n}" },
+    .{ .name = "empty branches into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = if c { [] } else { [] }\n}" },
+    .{ .name = "an empty literal into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let o: int[3]? = []\n}" },
+    .{ .name = "an empty literal pushed onto fixed elements", .code = .type_mismatch, .src = "rule r() {\n  let mut g: int[3][] = []\n  g.push([])\n}" },
+    .{ .name = "empty elements of a fixed length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = [[], []]\n}" },
+    .{ .name = "empty elements of the wrong count", .code = .type_mismatch, .src = "rule r() {\n  let a: int[0][3] = [[], []]\n}" },
+    .{ .name = "a fill of empty elements of a fixed length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = [[]; 2]\n}" },
+    .{ .name = "a dynamic array as a struct literal's fixed field", .code = .type_mismatch, .src = "struct S { a: int[3]? = none }\nrule r() {\n  let d: int[] = [1]\n  let s = S { a: d }\n}" },
+    .{ .name = "an empty literal as a struct literal's fixed field", .code = .type_mismatch, .src = "struct S { a: int[3]? = none }\nrule r() {\n  let s = S { a: [] }\n}" },
+    .{ .name = "a dynamic array as the tail of a method's fixed return", .code = .return_type_mismatch, .src = "struct Q { y: int = 0 }\nimpl Q {\n  fn three(self) -> int[3] {\n    let d: int[] = [1]\n    d\n  }\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "dynamic elements into fixed elements", .code = .type_mismatch, .src = "rule r() {\n  let h: int[][] = [[1]]\n  let g: int[3][] = h\n}" },
+    .{ .name = "an optional dynamic array into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let p: int[]? = some(d)\n  let o: int[3]? = p\n}" },
+    .{ .name = "a generic dynamic array as the tail of a fixed return", .code = .return_type_mismatch, .src = "fn h<T>(xs: T[]) -> T[3] {\n  xs\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "an empty element of dynamic fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  let g: int[3][] = [[]]\n}" },
+    .{ .name = "an empty map value of a fixed type", .code = .type_mismatch, .src = "rule r() {\n  let m: [int: int[3]] = [1: []]\n}" },
+    .{ .name = "some of an empty literal into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let o: int[3]? = some([])\n}" },
+    .{ .name = "an empty map value of an optional fixed type", .code = .type_mismatch, .src = "rule r() {\n  let m: [int: int[3]?] = [1: []]\n}" },
+    .{ .name = "empty elements in both branches", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3][1] = if c { [[]] } else { [[]] }\n}" },
+    .{ .name = "a dynamic array passed for a generic fixed parameter", .code = .type_mismatch, .src = "fn f<T>(xs: T[3]) -> int {\n  xs.len()\n}\nrule r() {\n  let d: int[] = [1]\n  let k = f(d)\n}" },
+    .{ .name = "an else branch of another length, every branch untyped", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[0][1] = if c { [[]] } else { [[], []] }\n}" },
+    .{ .name = "a later arm of another length, every arm untyped", .code = .type_mismatch, .src = "rule r() {\n  let k = 0\n  let a: int[0][1] = match k {\n    0 => [[]],\n    _ => [[], []],\n  }\n}" },
+    .{ .name = "an empty literal as a data entry's fixed field", .code = .entry_field_type_invalid, .src = "struct Item { a: int[3]? = none }\ndata Db: Item {\n  e: { a: [] },\n}" },
+};
+
+const fixed_length_accepted = [_]UnitCase{
+    .{ .name = "a literal of the length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = [1, 2, 3]\n}" },
+    .{ .name = "a fill of the length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = [0; 3]\n}" },
+    .{ .name = "a fixed array of the length", .code = .type_mismatch, .src = "rule r() {\n  let b: int[3] = [1, 2, 3]\n  let a: int[3] = b\n}" },
+    .{ .name = "nested literals of the lengths", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = [[1, 2, 3], [4, 5, 6]]\n}" },
+    .{ .name = "branches of the length", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = if c { [1, 2, 3] } else { [4, 5, 6] }\n}" },
+    .{ .name = "an empty literal of length zero", .code = .type_mismatch, .src = "rule r() {\n  let a: int[0] = []\n}" },
+    .{ .name = "a length-zero array beside an empty literal", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let e: int[0] = []\n  let z: int[0] = if c { e } else { [] }\n}" },
+    .{ .name = "branches of a length and empty, joined dynamic", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let x = if c { [1, 2, 3] } else { [] }\n  let d: int[] = x\n}" },
+    .{ .name = "elements of a length and empty, joined dynamic", .code = .type_mismatch, .src = "rule r() {\n  let g = [[1, 2, 3], []]\n}" },
+    .{ .name = "arms of a length and empty, joined dynamic", .code = .type_mismatch, .src = "rule r() {\n  let k = 0\n  let x = match k {\n    0 => [1, 2, 3],\n    _ => [],\n  }\n}" },
+    .{ .name = "a literal and a fill passed for a fixed parameter", .code = .type_mismatch, .src = "fn f(a: int[3]) -> int {\n  a.len()\n}\nrule r() {\n  let k = f([1, 2, 3])\n  let j = f([0; 3])\n}" },
+    .{ .name = "a literal and some of one into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let o: int[3]? = [1, 2, 3]\n  let p: int[3]? = some([1, 2, 3])\n}" },
+    .{ .name = "a literal as a fixed map value", .code = .type_mismatch, .src = "rule r() {\n  let m: [int: int[3]] = [1: [1, 2, 3]]\n}" },
+    .{ .name = "a literal returned through a generic", .code = .type_mismatch, .src = "fn id<T>(x: T) -> T {\n  x\n}\nrule r() {\n  let a: int[3] = id([1, 2, 3])\n}" },
+    .{ .name = "a fixed binding beside a literal element", .code = .type_mismatch, .src = "rule r() {\n  let b: int[3] = [1, 2, 3]\n  let a: int[3][2] = [b, [4, 5, 6]]\n}" },
+    .{ .name = "a literal assigned to a fixed binding", .code = .type_mismatch, .src = "rule r() {\n  let mut a: int[3] = [1, 2, 3]\n  a = [4, 5, 6]\n}" },
+    .{ .name = "a fill of empty elements of length zero", .code = .type_mismatch, .src = "rule r() {\n  let a: int[0][2] = [[]; 2]\n}" },
+    .{ .name = "a fixed array into a dynamic let", .code = .type_mismatch, .src = "rule r() {\n  let a = [1, 2, 3]\n  let d: int[] = a\n}" },
+};
+
+test "a fixed array's slot takes only a value of its length" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (fixed_length_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("refused {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (fixed_length_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("accepted {s}:\n", .{c.name});
             for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
         }
     }
