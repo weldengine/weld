@@ -145,14 +145,7 @@ fn recompile(watcher: *Watcher, name: []const u8) !void {
     var reader = file.reader(watcher.config.io, &read_buf);
     reader.interface.readSliceAll(source) catch return;
 
-    const stage: compiler.Stage = if (std.mem.indexOf(u8, name, ".vert") != null)
-        .vertex
-    else if (std.mem.indexOf(u8, name, ".frag") != null)
-        .fragment
-    else if (std.mem.indexOf(u8, name, ".comp") != null)
-        .compute
-    else
-        return;
+    const stage = compiler.Stage.ofFileName(name) orelse return;
 
     var result = compiler.compile(watcher.allocator, watcher.config.io, source, stage, null) catch |e| {
         const msg = std.fmt.allocPrint(watcher.allocator, "compile failed: {t}", .{e}) catch return;

@@ -119,4 +119,18 @@ pub const programs = [_]CodegenProgram{
     // Triple-quote with a multi-line interpolation: the dedent must touch the
     // literal segments and never the interpolation's own bytes.
     .{ .name = "p87_triple_quote_multiline_interp", .etch_path = "tests/etch_interp/programs/87_triple_quote_multiline_interp.etch" },
+    // Runtime integer division and remainder, float remainder, narrowing casts.
+    .{ .name = "p88_runtime_arith", .etch_path = "tests/etch_interp/programs/88_runtime_arith.etch" },
+    // A match on a runtime-built string, expression and statement.
+    .{ .name = "p89_string_match", .etch_path = "tests/etch_interp/programs/89_string_match.etch" },
+    // A copy of each kind of value, read and never written.
+    .{ .name = "p90_value_copies", .etch_path = "tests/etch_interp/programs/90_value_copies.etch" },
+    .{ .name = "p91_index_writes", .etch_path = "tests/etch_interp/programs/91_index_writes.etch" },
+    .{ .name = "p92_collection_copies", .etch_path = "tests/etch_interp/programs/92_collection_copies.etch" },
+    .{ .name = "p93_fixed_array_eq", .etch_path = "tests/etch_interp/programs/93_fixed_array_eq.etch" },
+    .{ .name = "p94_anon_struct_positions", .etch_path = "tests/etch_interp/programs/94_anon_struct_positions.etch" },
+    .{ .name = "p95_method_call_order", .etch_path = "tests/etch_interp/programs/95_method_call_order.etch" },
+    .{ .name = "p96_unused_lets", .etch_path = "tests/etch_interp/programs/96_unused_lets.etch" },
+    .{ .name = "p97_loop_break_slots", .etch_path = "tests/etch_interp/programs/97_loop_break_slots.etch" },
+    .{ .name = "p98_optional_elements", .etch_path = "tests/etch_interp/programs/98_optional_elements.etch" },
 };

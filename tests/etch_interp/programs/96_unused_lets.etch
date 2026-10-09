@@ -1,0 +1,222 @@
+component Unused {
+  popped: int = 0
+  copy: int = 0
+  agg: int = 0
+  block: int = 0
+  shadow: int = 0
+  loops: int = 0
+  mapfor: int = 0
+  arm: int = 0
+  thrown: int = 0
+  caught: int = 0
+  safe: int = 0
+  closure_throw: int = 0
+  fn_tail: int = 0
+  method_tail: int = 0
+  closure_tail: int = 0
+  closure_read: int = 0
+  some_read: int = 0
+  map_read: int = 0
+  write_only: int = 0
+  walk: int = 0
+}
+
+component Gone {
+  x: int = 0
+}
+
+struct In {
+  v: int = 0
+}
+
+impl In {
+  fn grown(self) -> int {
+    let unused_m = self.v
+    let d = self.v * 2
+    d + 1
+  }
+}
+
+fn twice_plus(n: int) -> int {
+  let unused_fn = n + 7
+  let e: int[] = []
+  let d = n * 2
+  d + 1
+}
+
+fn risky(n: int) throws -> int {
+  if n > 2 {
+    throw Error { message: "too big", code: ErrorCode.io_fail }
+  }
+  return n * 10
+}
+
+rule values(entity: Entity)
+  when entity has Unused
+{
+  let acc = entity.get_mut(Unused)
+  let mut xs: int[] = [1, 2, 3]
+  let p = xs.pop()
+  acc.popped = xs.len()
+  let c = acc.copy == 0
+  let k = if c { 1 } else { 2 }
+  let a = 6
+  let b = a
+  acc.copy = a
+  let fs: int[2] = [4, 5]
+  let gs = fs
+  acc.agg = fs[0] + fs[1]
+  let s = {
+    let z = a + 1
+    a
+  }
+  acc.block = a * 2
+  let sh = {
+    let sh = 3
+    sh
+  }
+  acc.shadow = 1
+  let mut unused_mut = 1
+  let em: [int: int] = [:]
+  let es: Set<int> = Set.new()
+  let q: In = .{ v: 4 }
+  let f = |x: int| x + 1
+  let _ = a + 2
+}
+
+rule scopes(entity: Entity)
+  when entity has Unused
+{
+  let acc = entity.get_mut(Unused)
+  let c = true
+  if c {
+    let t = 9
+  }
+  if c {
+    let t2 = 3
+    t2
+  } else {
+    0
+  }
+  for i in 0..2 {
+    let sq = i * i
+    acc.loops += 1
+  }
+  let fs: int[2] = [1, 2]
+  for v in fs {
+    let w = v
+    acc.loops += 1
+  }
+  let mut n = 0
+  while n < 2 {
+    let half = n
+    n += 1
+  }
+  let lv: int = loop {
+    let inner = 5
+    break 7
+  }
+  acc.loops += lv
+  let mm: [int: int] = [1: 2]
+  for k2, v2 in mm {
+    let kk = k2
+    acc.mapfor += v2
+  }
+  acc.arm = match n {
+    2 => {
+      let t3 = 1
+      20
+    },
+    _ => 0,
+  }
+  match n {
+    2 => {
+      let t4 = 4
+      t4
+    },
+    _ => {
+      0
+    },
+  }
+}
+
+rule errors(entity: Entity)
+  when entity has Unused
+{
+  let acc = entity.get_mut(Unused)
+  try {
+    let r = risky(1)
+    acc.thrown = 1
+    let boom = risky(5)
+    acc.thrown = boom
+  } catch err {
+    let note = 3
+    acc.caught = 1
+  }
+  let only_in_catch = 8
+  try {
+    let u = 4
+    acc.safe = 1
+  } catch e {
+    acc.safe = only_in_catch
+  }
+  try {
+    let risky_c = |x: int| {
+      if x > 0 {
+        throw Error { message: "boom", code: ErrorCode.io_fail }
+      }
+      x
+    }
+    let rc = risky_c(0)
+    acc.closure_throw = 1
+  } catch err2 {
+    acc.closure_throw = 2
+  }
+}
+
+rule tails(entity: Entity)
+  when entity has Unused
+{
+  let acc = entity.get_mut(Unused)
+  acc.fn_tail = twice_plus(3)
+  let i = In { v: 5 }
+  acc.method_tail = i.grown()
+  let g = |x: int| {
+    let unused_c = x
+    let y = x * 2
+    y + 1
+  }
+  acc.closure_tail = g(4)
+  let base = 10
+  let add_base = |x: int| x + base
+  acc.closure_read = add_base(1)
+  let inner = 5
+  let o: int? = some(inner)
+  acc.some_read = o ?? 0
+  let key = 2
+  let m: [int: int] = [key: 20]
+  acc.map_read = m[2] ?? 0
+  let mut wo = 0
+  wo = 5
+  acc.write_only = 1
+}
+
+rule walk(entity: Entity)
+  when entity has Unused and not entity has Gone
+{
+  let acc = entity.get_mut(Unused)
+  let w = 3
+  acc.walk = 1
+}
+
+rule unread_alias(entity: Entity)
+  when entity has Unused
+{
+  let h = entity.get(Unused)
+}
+
+rule unread_alias_walk(entity: Entity)
+  when entity has Unused and not entity has Gone
+{
+  let h = entity.get_mut(Unused)
+}

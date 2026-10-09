@@ -95,6 +95,20 @@ const p86 = @import("programs/86_triple_quote_multiline.expected.zig");
 // the literal segments and never the interpolation's inner bytes. Byte-exact
 // across interp ↔ codegen.
 const p87 = @import("programs/87_triple_quote_multiline_interp.expected.zig");
+// Runtime integer division and remainder, float remainder, narrowing casts.
+const p88 = @import("programs/88_runtime_arith.expected.zig");
+// A match on a runtime-built string, expression and statement.
+const p89 = @import("programs/89_string_match.expected.zig");
+// A copy of each kind of value, read and never written.
+const p90 = @import("programs/90_value_copies.expected.zig");
+const p91 = @import("programs/91_index_writes.expected.zig");
+const p92 = @import("programs/92_collection_copies.expected.zig");
+const p93 = @import("programs/93_fixed_array_eq.expected.zig");
+const p94 = @import("programs/94_anon_struct_positions.expected.zig");
+const p95 = @import("programs/95_method_call_order.expected.zig");
+const p96 = @import("programs/96_unused_lets.expected.zig");
+const p97 = @import("programs/97_loop_break_slots.expected.zig");
+const p98 = @import("programs/98_optional_elements.expected.zig");
 
 /// Embedded list of the differential corpus programs, consumed by the
 /// interpreter test and by the codegen parity test.
@@ -167,4 +181,15 @@ pub const programs = [_]Program{
     .{ .name = "85_match_binding", .source = @embedFile("programs/85_match_binding.etch"), .config = p85.config, .initial = p85.initial, .expected = p85.expected },
     .{ .name = "86_triple_quote_multiline", .source = @embedFile("programs/86_triple_quote_multiline.etch"), .config = p86.config, .initial = p86.initial, .expected = p86.expected },
     .{ .name = "87_triple_quote_multiline_interp", .source = @embedFile("programs/87_triple_quote_multiline_interp.etch"), .config = p87.config, .initial = p87.initial, .expected = p87.expected },
+    .{ .name = "88_runtime_arith", .source = @embedFile("programs/88_runtime_arith.etch"), .config = p88.config, .initial = p88.initial, .expected = p88.expected },
+    .{ .name = "89_string_match", .source = @embedFile("programs/89_string_match.etch"), .config = p89.config, .initial = p89.initial, .expected = p89.expected },
+    .{ .name = "90_value_copies", .source = @embedFile("programs/90_value_copies.etch"), .config = p90.config, .initial = p90.initial, .expected = p90.expected },
+    .{ .name = "91_index_writes", .source = @embedFile("programs/91_index_writes.etch"), .config = p91.config, .initial = p91.initial, .expected = p91.expected },
+    .{ .name = "92_collection_copies", .source = @embedFile("programs/92_collection_copies.etch"), .config = p92.config, .initial = p92.initial, .expected = p92.expected },
+    .{ .name = "93_fixed_array_eq", .source = @embedFile("programs/93_fixed_array_eq.etch"), .config = p93.config, .initial = p93.initial, .expected = p93.expected },
+    .{ .name = "94_anon_struct_positions", .source = @embedFile("programs/94_anon_struct_positions.etch"), .config = p94.config, .initial = p94.initial, .expected = p94.expected },
+    .{ .name = "95_method_call_order", .source = @embedFile("programs/95_method_call_order.etch"), .config = p95.config, .initial = p95.initial, .expected = p95.expected },
+    .{ .name = "96_unused_lets", .source = @embedFile("programs/96_unused_lets.etch"), .config = p96.config, .initial = p96.initial, .expected = p96.expected },
+    .{ .name = "97_loop_break_slots", .source = @embedFile("programs/97_loop_break_slots.etch"), .config = p97.config, .initial = p97.initial, .expected = p97.expected },
+    .{ .name = "98_optional_elements", .source = @embedFile("programs/98_optional_elements.etch"), .config = p98.config, .initial = p98.initial, .expected = p98.expected },
 };

@@ -1,6 +1,6 @@
 //! Codegen error set: the closed `CodegenError` covering
-//! `UnsupportedConstruct`, `SparseStorageUnsupported`, `NonPodComponent` and
-//! `InternalCodegenBug`.
+//! `UnsupportedConstruct`, `SparseStorageUnsupported`, `RequiresUnsupported`,
+//! `NonPodComponent` and `InternalCodegenBug`.
 //!
 //! The codegen is fed an AST the two-pass type-checker has already accepted, so
 //! structural and POD violations should not reach here. They are surfaced as
@@ -30,6 +30,10 @@ pub const CodegenError = error{
     /// ECS image contradicts its own source with nothing to say so. Parity is
     /// unimplemented.
     SparseStorageUnsupported,
+    /// A `component` declaration carries `@requires`. The emitted `register()`
+    /// records no requisite and resolves no closure, so the cooked program would
+    /// add the component without the types its declaration requires.
+    RequiresUnsupported,
     /// A component declaration carries a non-POD field type. The type-checker
     /// rejects these; the variant exists so an un-type-checked AST surfaces a
     /// clean error instead of a panic.

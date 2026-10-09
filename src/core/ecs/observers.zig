@@ -143,6 +143,16 @@ pub const ComponentUnionIter = struct {
     }
 };
 
+fn removeListeners(list: *Listeners, ctx: *anyopaque) void {
+    var kept: usize = 0;
+    for (list.items) |l| {
+        if (l.ctx == @as(?*anyopaque, ctx)) continue;
+        list.items[kept] = l;
+        kept += 1;
+    }
+    list.shrinkRetainingCapacity(kept);
+}
+
 /// Registry holding the five kinds of observer lists. Lives next to
 /// the `World` (typically as a field) and is consulted during every
 /// command buffer flush.
@@ -243,6 +253,17 @@ pub const ObserverRegistry = struct {
         callback: ObserverFn,
     ) !void {
         try self.registerInMap(gpa, &self.on_replaced, cid, ctx, callback);
+    }
+
+    /// Remove every listener registered with `ctx`, keeping the others in
+    /// firing order. Allocates nothing.
+    pub fn unregister(self: *ObserverRegistry, ctx: *anyopaque) void {
+        removeListeners(&self.on_spawned, ctx);
+        removeListeners(&self.on_despawned, ctx);
+        inline for (.{ &self.on_add, &self.on_remove, &self.on_replaced }) |map| {
+            var lists = map.valueIterator();
+            while (lists.next()) |list| removeListeners(list, ctx);
+        }
     }
 
     fn registerInMap(
@@ -496,6 +517,26 @@ fn applyRawCommand(world: *World, gpa: std.mem.Allocator, c_in: Command) !void {
 }
 
 const testing = std.testing;
+
+test "unregister removes one context's listeners and keeps the others in order" {
+    const gpa = testing.allocator;
+    var reg = ObserverRegistry.init();
+    defer reg.deinit(gpa);
+    var gone: u8 = 0;
+    var kept_a: u8 = 0;
+    var kept_b: u8 = 0;
+    const cid: ComponentId = 3;
+    for ([_]*u8{ &gone, &kept_a, &gone, &kept_b }) |ctx| {
+        try reg.registerOnAdd(gpa, cid, ctx, &e3CaptureObserver);
+        try reg.registerOnSpawned(gpa, ctx, &e3CaptureObserver);
+    }
+    reg.unregister(&gone);
+    for ([_][]const Listener{ reg.on_add.get(cid).?.items, reg.on_spawned.items }) |left| {
+        try testing.expectEqual(@as(usize, 2), left.len);
+        try testing.expectEqual(@as(?*anyopaque, &kept_a), left[0].ctx);
+        try testing.expectEqual(@as(?*anyopaque, &kept_b), left[1].ctx);
+    }
+}
 
 test "ObserverRegistry init/deinit round-trip is leak-free" {
     const gpa = testing.allocator;

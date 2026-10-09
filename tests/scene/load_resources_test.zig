@@ -1,10 +1,4 @@
-//! Resource `string` fields round-trip through the Tier-0 persistent
-//! heap. Cooks (in-memory, via the writer) a scene with one resource carrying a
-//! `string` field, loads it, and asserts the field reads back the cooked value:
-//! the loaded string is interned into `weld_core.memory.persistent` as a
-//! **refcounted** block owned by the resource's `StringSlot` and NOT by
-//! `LoadResult`, released here at test teardown exactly as the resource's real
-//! owner — the interpreter — would. `weld_core` only.
+//! `weld_core` only: cooks in memory through the writer, then loads.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -32,6 +26,7 @@ test "resource string fields round-trip through the persistent heap" {
         .fields = &[_]registry.FieldDesc{
             .{ .name = "title", .offset = 0, .kind = .string_ },
         },
+        .kind = .resource,
     });
 
     const title_value = "Verdant Keep";
@@ -71,11 +66,6 @@ test "resource string fields round-trip through the persistent heap" {
     try std.testing.expectEqual(@as(u32, title_value.len), ss.len);
     const loaded: [*]const u8 = @ptrFromInt(ss.ptr);
     try std.testing.expectEqualStrings(title_value, loaded[0..ss.len]);
-
-    // D1: the loaded block is refcounted and owned by the slot (not by
-    // `LoadResult`). Release it here — parity with the interp's resource-string
-    // teardown — so `std.testing.allocator` sees no leak.
-    persistent.decref(gpa, @ptrFromInt(ss.ptr));
 }
 
 test "loader rejects a resource collection field (guard)" {
@@ -95,6 +85,7 @@ test "loader rejects a resource collection field (guard)" {
         .fields = &[_]registry.FieldDesc{
             .{ .name = "items", .offset = 0, .kind = .array_ },
         },
+        .kind = .resource,
     });
 
     var arena = std.heap.ArenaAllocator.init(gpa);

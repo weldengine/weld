@@ -1,10 +1,16 @@
 //! `scene_cook` — thin CLI shim around the scene cook and the prefab cook.
 //! Parses args + does file I/O; all real work is
-//! `weld_etch.scene_cook.{cook,cookPrefab}` + `weld_core.scene.writer.write`
-//! in-process. Mirrors `tools/etch_cook` / `tools/asset_cook`.
+//! `weld_etch.scene_cook.{cookSceneInProject,cookPrefabInProject}` +
+//! `weld_core.scene.writer.write` in-process. Mirrors `tools/etch_cook` /
+//! `tools/asset_cook`.
 //!
-//!   scene_cook --output <out.scene.bin>  <in.scene.etch>
-//!   scene_cook --output <out.prefab.bin> [--prefab-dir <dir>] <in.prefab.etch>
+//!   scene_cook --output <out.scene.bin>  [--prefab-dir <dir>] [--module <m.etch>]... <in.scene.etch>
+//!   scene_cook --output <out.prefab.bin> [--prefab-dir <dir>] [--module <m.etch>]... <in.prefab.etch>
+//!
+//! Each `--module` file joins the input in one project, against which the
+//! input's `import`s resolve as `etch check` resolves them. A module path comes
+//! from the file path as given, a leading `src/` stripped, so paths are written
+//! from the project root.
 //!
 //! The input kind is taken from its extension: `*.prefab.etch` → prefab cook,
 //! `*.scene.etch` → scene cook. A `prefab "Y" of "X"` variant resolves its base
@@ -50,6 +56,7 @@ pub fn main(init: std.process.Init) !void {
     var output: ?[]const u8 = null;
     var input: ?[]const u8 = null;
     var prefab_dir: ?[]const u8 = null;
+    var modules: std.ArrayListUnmanaged([]const u8) = .empty;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -61,6 +68,10 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) return die(io, "missing path after --prefab-dir");
             prefab_dir = args[i];
+        } else if (std.mem.eql(u8, a, "--module")) {
+            i += 1;
+            if (i >= args.len) return die(io, "missing path after --module");
+            try modules.append(init.arena.allocator(), args[i]);
         } else if (std.mem.startsWith(u8, a, "--")) {
             return die(io, "unknown flag");
         } else {
@@ -72,11 +83,15 @@ pub fn main(init: std.process.Init) !void {
     const in_path = input orelse return die(io, "missing <in.{scene,prefab}.etch>");
 
     const dir = std.Io.Dir.cwd();
-    const source = readWholeFile(gpa, io, dir, in_path) catch |err| {
-        try printErr(io, "cannot read input: ", @errorName(err));
-        return err;
-    };
-    defer gpa.free(source);
+    const files = try init.arena.allocator().alloc(scene_cook.ProjectFile, 1 + modules.items.len);
+    for (files, 0..) |*f, k| {
+        const path = if (k == 0) in_path else modules.items[k - 1];
+        const source = readWholeFile(init.arena.allocator(), io, dir, path) catch |err| {
+            try printErr(io, "cannot read input: ", @errorName(err));
+            return err;
+        };
+        f.* = .{ .name = path, .source = source };
+    }
 
     const is_prefab = std.mem.endsWith(u8, in_path, ".prefab.etch");
 
@@ -94,12 +109,12 @@ pub fn main(init: std.process.Init) !void {
     var diag: []const u8 = "";
     var cooked = blk: {
         if (is_prefab) {
-            break :blk scene_cook.cookPrefab(gpa, source, resolver.base(), &diag) catch |err| {
+            break :blk scene_cook.cookPrefabInProject(gpa, files, 0, resolver.base(), &diag) catch |err| {
                 try printErr(io, "prefab cook failed: ", if (diag.len > 0) diag else @errorName(err));
                 return err;
             };
         } else {
-            break :blk scene_cook.cookScene(gpa, source, resolver.base(), &diag) catch |err| {
+            break :blk scene_cook.cookSceneInProject(gpa, files, 0, resolver.base(), &diag) catch |err| {
                 try printErr(io, "cook failed: ", if (diag.len > 0) diag else @errorName(err));
                 return err;
             };

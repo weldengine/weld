@@ -149,3 +149,41 @@ pub const CountingAllocator = struct {
         _ = self.bytes_freed.fetchAdd(memory.len, .acq_rel);
     }
 };
+
+/// Fails allocation number `fail_at` and no other, and refuses every resize and
+/// remap so that each growth goes through a counted allocation. `failed` records
+/// whether the failure was reached: a caller that succeeds with it set swallowed
+/// an `OutOfMemory`.
+pub const OneShotFailing = struct {
+    backing: std.mem.Allocator,
+    fail_at: usize,
+    count: usize = 0,
+    failed: bool = false,
+
+    pub fn allocator(self: *OneShotFailing) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *OneShotFailing = @ptrCast(@alignCast(ctx));
+        defer self.count += 1;
+        if (self.count == self.fail_at) {
+            self.failed = true;
+            return null;
+        }
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *OneShotFailing = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, ra);
+    }
+};

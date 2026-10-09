@@ -185,7 +185,7 @@ test "extends prefab cooks with components, hooks and requires" {
 
     var acc = try Accessor.open(bytes);
     try std.testing.expect(acc.verifyHash());
-    try std.testing.expectEqual(@as(u16, 2), acc.header.version); // format v2
+    try std.testing.expectEqual(@as(u16, 3), acc.header.version);
 
     // The added component (Weapon) is in an archetype.
     try std.testing.expectEqual(@as(u32, 1), acc.archetypeCount());
@@ -292,6 +292,39 @@ const MultiResolver = struct {
         return .{ .ctx = self, .resolveFn = MultiResolver.resolve };
     }
 };
+
+test "an extends prefab with two entities does not cook" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var resolver = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const twin =
+        \\component Weapon { damage: i32 = 0 }
+        \\prefab "TwinModule" extends "BaseCharacter" {
+        \\  entity "a" { uuid: "00000000-0000-0000-0000-0000000000f1" Weapon { damage: 1 } }
+        \\  entity "b" { uuid: "00000000-0000-0000-0000-0000000000f2" Weapon { damage: 2 } }
+        \\}
+    ;
+    try std.testing.expectError(error.MultiEntityExtensionUnsupported, scene_cook.cookPrefab(gpa, twin, resolver.base(), null));
+}
+
+test "an extends prefab with no entity does not cook" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var resolver = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const hollow =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\prefab "HollowModule" extends "BaseCharacter" requires Health {
+        \\  on_attach { entity.get_mut(Health).max += 1 }
+        \\}
+    ;
+    try std.testing.expectError(error.EmptyExtension, scene_cook.cookPrefab(gpa, hollow, resolver.base(), null));
+}
 
 /// Cook an `extends` prefab source to its `.prefab.bin` bytes (caller frees). No
 /// `requires` → the base need not exist, cookable with a null resolver. The bytes
@@ -705,18 +738,6 @@ fn cookCombatModule(gpa: std.mem.Allocator) ![]const u8 {
     return scene.writer.write(gpa, cooked.model, &cooked.registry);
 }
 
-/// Compile + bind an interpreter declaring `Health` + `Weapon` (WITH fields, so a
-/// hook's `Health.max` resolves) into `world`, registering the real on_attach /
-/// on_detach execution seam. The caller owns `pr` (parse result) and `interp`.
-const HookEnv = struct {
-    pr: parser.ParseResult,
-    interp: Interpreter,
-    fn deinit(self: *HookEnv, gpa: std.mem.Allocator) void {
-        self.interp.deinit();
-        self.pr.deinit(gpa);
-    }
-};
-
 fn spawnHealth(world: *World, gpa: std.mem.Allocator, current: i32, max: i32) !EntityId {
     const cid = world.componentId("Health").?;
     var hv = [_]i32{ current, max };
@@ -853,6 +874,48 @@ test "has_extension / active_extensions (Etch methods) reflect activation" {
     try std.testing.expectEqual(@as(i32, 1), std.mem.readInt(i32, pb[4..8], .little)); // active_extensions().len() == 1
 }
 
+test "has_extension reads the entity its argument rebound" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const prog =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+        \\component Link { to: Entity, seen: bool = false }
+        \\rule probe(entity: Entity) when entity has Link {
+        \\  let mut e = entity
+        \\  let h = e.has_extension({
+        \\    e = entity.get(Link).to
+        \\    "CombatModule"
+        \\  })
+        \\  entity.get_mut(Link).seen = h
+        \\}
+    ;
+    var pr = try parser.parse(gpa, prog);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    interp.setExtensionResolver(res.ext());
+
+    const health_id = world.componentId("Health").?;
+    const link_id = world.componentId("Link").?;
+    const a = try world.spawnDynamic(gpa, &[_]ComponentId{health_id});
+    try scene.loader.runtimeActivate(&world, gpa, a, "CombatModule", res.ext());
+    const b = try world.spawnDynamic(gpa, &[_]ComponentId{link_id});
+    @memcpy(world.componentBytes(b, link_id).?[0..8], std.mem.asBytes(&a));
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expect(world.componentBytes(b, link_id).?[8] != 0);
+}
+
 test "entity.deactivate_extension executes on_detach and removes components" {
     const gpa = std.testing.allocator;
     const combat_bytes = try cookCombatModule(gpa);
@@ -933,6 +996,137 @@ test "multi-entity rule activate_extension defers without corrupting iteration" 
         try std.testing.expectEqual(@as(i32, 150), healthMax(&world, e)); // on_attach
         try std.testing.expect(world.componentBytes(e, weapon_id) != null); // component added
         try std.testing.expect(world.hasEntityExtension(e, "CombatModule"));
+    }
+}
+
+test "a refused deferred activation leaves the rest of its tick applied" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const prog =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+        \\component Marker { v: i32 = 0 }
+        \\component Done { v: i32 = 0 }
+        \\rule again(entity: Entity) when entity has Weapon {
+        \\  entity.activate_extension("CombatModule")
+        \\}
+        \\rule first(entity: Entity) when entity has Health and not entity has Weapon {
+        \\  entity.activate_extension("CombatModule")
+        \\}
+        \\rule mark(entity: Entity) when entity has Marker {
+        \\  entity.add(Done { v: 1 })
+        \\}
+    ;
+    var pr = try parser.parse(gpa, prog);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    interp.setExtensionResolver(res.ext());
+
+    const active = try spawnHealth(&world, gpa, 100, 100);
+    try scene.loader.runtimeActivate(&world, gpa, active, "CombatModule", res.ext());
+    const fresh = try spawnHealth(&world, gpa, 100, 100);
+    const marked = try world.spawnDynamic(gpa, &[_]ComponentId{world.componentId("Marker").?});
+
+    const report = try interp.runFor(&world, 1);
+
+    try std.testing.expectEqual(@as(i32, 150), healthMax(&world, active));
+    try std.testing.expectEqual(@as(i32, 150), healthMax(&world, fresh));
+    try std.testing.expect(world.hasEntityExtension(fresh, "CombatModule"));
+    try std.testing.expect(world.componentBytes(marked, world.componentId("Done").?) != null);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    const failure = report.last_error orelse return error.TestExpectedTypedError;
+    try std.testing.expectEqualStrings("ExtensionOpFailed", @tagName(failure.kind));
+    try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOf(u8, prog, "\"CombatModule\"").?)), failure.span.byte_start);
+}
+
+test "a refused op a cooked hook queued reports no program position" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    var looped = try scene_cook.cookPrefab(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "Loop" extends "BaseCharacter" requires Health {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Weapon { damage: 25 } }
+        \\  on_attach { entity.activate_extension("Loop") }
+        \\}
+    , base_res.base(), null);
+    defer looped.deinit(gpa);
+    const loop_bytes = try scene.writer.write(gpa, looped.model, &looped.registry);
+    defer gpa.free(loop_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser.parse(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var res = OneResolver{ .name = "Loop", .bytes = loop_bytes };
+    interp.setExtensionResolver(res.ext());
+    const npc = try spawnHealth(&world, gpa, 100, 100);
+    try scene.loader.runtimeActivate(&world, gpa, npc, "Loop", res.ext());
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    const failure = report.last_error orelse return error.TestExpectedTypedError;
+    try std.testing.expectEqualStrings("ExtensionOpFailed", @tagName(failure.kind));
+    try std.testing.expectEqual(@as(u32, 0), failure.span.byte_start);
+    try std.testing.expectEqual(@as(u32, 0), failure.span.byte_end);
+}
+
+test "an allocation failure in a deferred activation ends the tick" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    const prog =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+        \\rule first(entity: Entity) when entity has Health and not entity has Weapon {
+        \\  entity.activate_extension("CombatModule")
+        \\}
+    ;
+    var pr = try parser.parse(gpa, prog);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+
+    var tick_allocations: usize = 0;
+    while (true) : (tick_allocations += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{});
+        const fa = failing.allocator();
+        var world = World.init();
+        defer world.deinit(fa);
+        var interp = try Interpreter.compile(fa, &pr.ast, &world);
+        defer interp.deinit();
+        const fresh = try spawnHealth(&world, fa, 100, 100);
+        // Unresolved, the call fails and the rule's selection still takes in the
+        // entity's archetype, so the measured tick allocates only in the call and
+        // the flush: a selection rescan panics on an allocation failure.
+        _ = try interp.runFor(&world, 1);
+        var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+        interp.setExtensionResolver(res.ext());
+        failing.fail_index = failing.alloc_index + tick_allocations;
+        if (interp.runFor(&world, 1)) |report| {
+            try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+            try std.testing.expect(world.hasEntityExtension(fresh, "CombatModule"));
+            if (!failing.has_induced_failure) break;
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
     }
 }
 
@@ -1093,4 +1287,605 @@ test "an ALL-SPARSE extension activates without touching the archetype" {
     try std.testing.expect(AttachSpy.saw_text);
     const hb = world.componentBytes(npc, health_id).?;
     try std.testing.expectEqual(@as(i32, 100), std.mem.readInt(i32, hb[4..8], .little));
+}
+
+test "an extension naming a resource does not cook" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const source =
+        \\resource Settings { x: i32 = 0 }
+        \\prefab "Bad" extends "BaseCharacter" {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Settings { x: 1 } }
+        \\}
+    ;
+    if (scene_cook.cookPrefab(gpa, source, base_res.base(), null)) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.ResourceAsComponent, err);
+}
+
+test "a scene entity naming a resource does not cook" {
+    const gpa = std.testing.allocator;
+    const source =
+        \\resource Settings { x: i32 = 0 }
+        \\scene "S" {
+        \\  entity "e" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Settings { x: 1 } }
+        \\}
+    ;
+    if (scene_cook.cook(gpa, source, null)) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.ResourceAsComponent, err);
+}
+
+test "an extension whose hook fails the checker does not cook" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const source =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 10 }
+        \\component Mana { v: i32 = 0 }
+        \\prefab "Bad" extends "BaseCharacter" requires Health {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Weapon { damage: 25 } }
+        \\  on_attach { entity.get_mut(Mana).v += 1 }
+        \\}
+    ;
+    if (scene_cook.cookPrefab(gpa, source, base_res.base(), null)) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.HookRefused, err);
+}
+
+const ext_healthy = // Healthy: declares Health
+    \\component Health { current: i32 = 100, max: i32 = 100 }
+    \\prefab "Healthy" extends "Base" {
+    \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c5" Health { current: 10, max: 10 } }
+    \\}
+;
+
+/// Cook a one-entity scene carrying `Marker` and activating `extensions`, the
+/// extension bytes resolved from `ext_healthy` and `cookCombatModule`.
+fn cookMarkerScene(gpa: std.mem.Allocator, extensions: []const u8) !scene_cook.Cooked {
+    const healthy = try prefabBytes(gpa, ext_healthy);
+    defer gpa.free(healthy);
+    const combat = try cookCombatModule(gpa);
+    defer gpa.free(combat);
+    var mr = MultiResolver{ .names = &.{ "Healthy", "CombatModule" }, .blobs = &.{ healthy, combat } };
+    const src = try std.fmt.allocPrint(gpa,
+        \\component Marker {{ v: i32 = 0 }}
+        \\scene "S" {{
+        \\  entity "npc" {{
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: {s}
+        \\    Marker {{ v: 1 }}
+        \\  }}
+        \\}}
+    , .{extensions});
+    defer gpa.free(src);
+    return scene_cook.cookScene(gpa, src, mr.base(), null);
+}
+
+test "a cooked extends prefab carries its requires in source order" {
+    const gpa = std.testing.allocator;
+    const base_src =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Mana { v: i32 = 0 }
+        \\prefab "Caster" {
+        \\  entity "root" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4f" Health { current: 1, max: 1 } Mana { v: 1 } }
+        \\}
+    ;
+    const base_bytes = try prefabBytes(gpa, base_src);
+    defer gpa.free(base_bytes);
+    var res = OneResolver{ .name = "Caster", .bytes = base_bytes };
+    const src =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Mana { v: i32 = 0 }
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "Spells" extends "Caster" requires Mana, Health {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Weapon { damage: 25 } }
+        \\}
+    ;
+    var cooked = try scene_cook.cookPrefab(gpa, src, res.base(), null);
+    defer cooked.deinit(gpa);
+    const bytes = try scene.writer.write(gpa, cooked.model, &cooked.registry);
+    defer gpa.free(bytes);
+    const acc = try Accessor.open(bytes);
+    try std.testing.expectEqual(@as(u32, 2), acc.requiresCount());
+    try std.testing.expectEqualStrings("Mana", acc.requiredName(0));
+    try std.testing.expectEqualStrings("Health", acc.requiredName(1));
+}
+
+test "activation refuses an entity missing a required component" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Health", .size = 8, .alignment = 4, .default_bytes = &[_]u8{0} ** 8, .fields = &.{} });
+    const weapon_id = try world.registry.registerComponentRaw(gpa, .{ .name = "Weapon", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+    const marker_id = try world.registry.registerComponentRaw(gpa, .{ .name = "Marker", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{marker_id});
+
+    var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    try std.testing.expectError(error.RequiresNotSatisfied, scene.loader.runtimeActivate(&world, gpa, eid, "CombatModule", res.ext()));
+    try std.testing.expect(world.componentBytes(eid, weapon_id) == null);
+    try std.testing.expect(!world.hasEntityExtension(eid, "CombatModule"));
+}
+
+test "a scene activating an extension whose requirement the entity lacks does not cook" {
+    const gpa = std.testing.allocator;
+    if (cookMarkerScene(gpa, "[\"CombatModule\"]")) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.RequiresNotSatisfied, err);
+}
+
+test "a requirement an earlier extension provides is satisfied" {
+    const gpa = std.testing.allocator;
+    var cooked = try cookMarkerScene(gpa, "[\"Healthy\", \"CombatModule\"]");
+    cooked.deinit(gpa);
+}
+
+test "a requirement only a later extension provides does not cook" {
+    const gpa = std.testing.allocator;
+    if (cookMarkerScene(gpa, "[\"CombatModule\", \"Healthy\"]")) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.RequiresNotSatisfied, err);
+}
+
+test "an extends requires over a malformed but rehashed base does not cook" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    const bad = try gpa.dupe(u8, base_bytes);
+    defer gpa.free(bad);
+    std.mem.writeInt(u32, bad[20..24], 0xFFFF, .little); // schema_count, outside the hashed bytes
+    var res = OneResolver{ .name = "BaseCharacter", .bytes = bad };
+    const src =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "CombatModule" extends "BaseCharacter" requires Health {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Weapon { damage: 25 } }
+        \\}
+    ;
+    try std.testing.expectError(error.BasePrefabCorrupt, scene_cook.cookPrefab(gpa, src, res.base(), null));
+}
+
+const Registry = weld_core.ecs.registry.Registry;
+const scene_format = scene.format;
+
+/// The `.prefab.bin` of a one-entity extension carrying `own` (a component of
+/// `own_size` bytes, 4-aligned), requiring `requires`, with the given hook
+/// texts: what a cook would write, without the cook's checks.
+fn forgedExtension(gpa: std.mem.Allocator, own: []const u8, own_size: u16, requires: []const []const u8, on_attach: ?[]const u8, on_detach: ?[]const u8) ![]u8 {
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const zeros = [_]u8{0} ** 16;
+    const comp = try reg.registerComponentRaw(gpa, .{ .name = own, .size = own_size, .alignment = 4, .default_bytes = zeros[0..own_size], .fields = &.{} });
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    var strings: std.ArrayListUnmanaged([]const u8) = .empty;
+    try strings.append(a, "mod");
+    var hook: scene_format.HookSet = .{ .on_attach = null, .on_detach = null };
+    if (on_attach) |t| {
+        hook.on_attach = @intCast(strings.items.len);
+        try strings.append(a, t);
+    }
+    if (on_detach) |t| {
+        hook.on_detach = @intCast(strings.items.len);
+        try strings.append(a, t);
+    }
+    const req = try a.alloc(u32, requires.len);
+    for (requires, req) |name, *r| {
+        r.* = @intCast(strings.items.len);
+        try strings.append(a, name);
+    }
+    const col = try a.alloc(u8, own_size);
+    @memset(col, 0);
+    const ids = try a.dupe(ComponentId, &.{comp});
+    const cols = try a.dupe([]u8, &.{col});
+    const ents = try a.dupe(scene_format.EntityEntry, &.{.{ .name = 0, .uuid = 0, .parent_uuid = scene_format.no_parent }});
+    const blocks = try a.dupe(scene_format.ArchetypeBlock, &.{.{ .component_ids = ids, .entity_count = 1, .columns = cols, .entities = ents }});
+    const hooks = try a.dupe(scene_format.HookSet, &.{hook});
+    const uuids = try a.dupe([16]u8, &.{[_]u8{9} ** 16});
+    var model: scene_format.CookModel = .{ .strings = strings.items, .uuids = uuids, .resources = &.{}, .archetypes = blocks, .hooks = hooks, .requires = req, .arena = arena };
+    defer model.deinit();
+    return scene.writer.write(gpa, model, &reg);
+}
+
+const hook_program =
+    \\component Health { current: i32 = 100, max: i32 = 100 }
+    \\component Weapon { damage: i32 = 0 }
+    \\component Mana { v: i32 = 0 }
+    \\component Marker { v: i32 = 0 }
+    \\event Attached { }
+    \\rule keep(entity: Entity) when entity has Health { }
+;
+
+/// A world running `hook_program` with its seams bound, holding one entity
+/// that carries `Health` and `Mana`.
+const HookWorld = struct {
+    world: World,
+    pr: parser.ParseResult,
+    interp: Interpreter,
+    entity: EntityId,
+
+    fn init(self: *HookWorld, gpa: std.mem.Allocator) !void {
+        self.world = World.init();
+        errdefer self.world.deinit(gpa);
+        self.pr = try parser.parse(gpa, hook_program);
+        errdefer self.pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), self.pr.diagnostics.len);
+        self.interp = try Interpreter.compile(gpa, &self.pr.ast, &self.world);
+        errdefer self.interp.deinit();
+        try self.interp.bindToWorld(&self.world);
+        self.entity = try self.spawnHealthMana(gpa);
+    }
+
+    fn deinit(self: *HookWorld, gpa: std.mem.Allocator) void {
+        self.interp.deinit();
+        self.pr.deinit(gpa);
+        self.world.deinit(gpa);
+    }
+
+    fn spawnHealthMana(self: *HookWorld, gpa: std.mem.Allocator) !EntityId {
+        return self.world.spawnDynamic(gpa, &[_]ComponentId{ self.world.componentId("Health").?, self.world.componentId("Mana").? });
+    }
+
+    fn mana(self: *HookWorld, e: EntityId) i32 {
+        return std.mem.readInt(i32, self.world.componentBytes(e, self.world.componentId("Mana").?).?[0..4], .little);
+    }
+
+    fn weapon(self: *HookWorld, e: EntityId) ?i32 {
+        const b = self.world.componentBytes(e, self.world.componentId("Weapon").?) orelse return null;
+        return std.mem.readInt(i32, b[0..4], .little);
+    }
+};
+
+test "a hook reaching outside its scope is refused at activation" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "entity.get_mut(Mana).v += 1", null);
+    defer gpa.free(bytes);
+    try std.testing.expectError(error.ExtensionHookRefused, scene.loader.activateExtension(&h.world, gpa, h.entity, "Forged", bytes));
+    try std.testing.expectEqual(@as(i32, 0), h.mana(h.entity));
+    try std.testing.expect(h.weapon(h.entity) == null);
+    try std.testing.expect(!h.world.hasEntityExtension(h.entity, "Forged"));
+}
+
+test "a return in a hook is refused at activation" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "return", null);
+    defer gpa.free(bytes);
+    try std.testing.expectError(error.ExtensionHookRefused, scene.loader.activateExtension(&h.world, gpa, h.entity, "Forged", bytes));
+    try std.testing.expect(h.weapon(h.entity) == null);
+}
+
+test "an on_detach the checker refuses is refused at activation" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "entity.get_mut(Health).max += 1", "entity.get_mut(Mana).v -= 1");
+    defer gpa.free(bytes);
+    try std.testing.expectError(error.ExtensionHookRefused, scene.loader.activateExtension(&h.world, gpa, h.entity, "Forged", bytes));
+    try std.testing.expect(h.weapon(h.entity) == null);
+}
+
+test "deactivation checks the on_detach of the bytes it is given" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const good = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, null, "entity.get_mut(Health).max -= 1");
+    defer gpa.free(good);
+    const bad = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, null, "entity.get_mut(Mana).v -= 1");
+    defer gpa.free(bad);
+    try scene.loader.activateExtension(&h.world, gpa, h.entity, "Forged", good);
+    try std.testing.expectError(error.ExtensionHookRefused, scene.loader.deactivateExtension(&h.world, gpa, h.entity, "Forged", bad));
+    try std.testing.expectEqual(@as(i32, 0), h.mana(h.entity));
+    try std.testing.expect(h.weapon(h.entity) != null);
+    try std.testing.expect(h.world.hasEntityExtension(h.entity, "Forged"));
+}
+
+test "a hook reading its own component is accepted and runs" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "entity.get_mut(Weapon).damage += 1", null);
+    defer gpa.free(bytes);
+    try scene.loader.activateExtension(&h.world, gpa, h.entity, "Forged", bytes);
+    try std.testing.expectEqual(@as(?i32, 1), h.weapon(h.entity));
+}
+
+test "a hook literal out of range is refused at activation" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "entity.get_mut(Health).max += 99999999999999999999", null);
+    defer gpa.free(bytes);
+    try std.testing.expectError(error.ExtensionHookRefused, scene.loader.activateExtension(&h.world, gpa, h.entity, "Forged", bytes));
+    try std.testing.expect(h.weapon(h.entity) == null);
+}
+
+test "a hook refused for its literal does not refuse another hook" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const bad = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "entity.get_mut(Health).max += 99999999999999999999", null);
+    defer gpa.free(bad);
+    const good = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "entity.get_mut(Health).max += 1", null);
+    defer gpa.free(good);
+    const other = try h.spawnHealthMana(gpa);
+    try std.testing.expectError(error.ExtensionHookRefused, scene.loader.activateExtension(&h.world, gpa, h.entity, "Bad", bad));
+    try scene.loader.activateExtension(&h.world, gpa, other, "Good", good);
+    try std.testing.expect(h.weapon(other) != null);
+}
+
+test "one hook text is judged in each scope it arrives with" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const in_scope = try forgedExtension(gpa, "Weapon", 4, &.{"Mana"}, "entity.get_mut(Mana).v += 1", null);
+    defer gpa.free(in_scope);
+    const out_of_scope = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "entity.get_mut(Mana).v += 1", null);
+    defer gpa.free(out_of_scope);
+    const other = try h.spawnHealthMana(gpa);
+    try scene.loader.activateExtension(&h.world, gpa, h.entity, "WithMana", in_scope);
+    try std.testing.expectError(error.ExtensionHookRefused, scene.loader.activateExtension(&h.world, gpa, other, "WithHealth", out_of_scope));
+}
+
+test "a hook literal out of range does not cook" {
+    const gpa = std.testing.allocator;
+    const src =
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "Big" extends "Base" {
+        \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c6" Weapon { damage: 1 } }
+        \\  on_attach { entity.get_mut(Weapon).damage += 99999999999999999999 }
+        \\}
+    ;
+    if (scene_cook.cookPrefab(gpa, src, null, null)) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.HookRefused, err);
+}
+
+/// Cook a two-entity scene: `a` carries Marker and activates `a_ext`, `b`
+/// carries Marker and Mana and activates `b_ext`.
+fn cookHookScene(gpa: std.mem.Allocator, a_ext: []const u8, b_ext: []const u8) ![]u8 {
+    const src = try std.fmt.allocPrint(gpa,
+        \\component Marker {{ v: i32 = 0 }}
+        \\component Mana {{ v: i32 = 0 }}
+        \\scene "S" {{
+        \\  entity "a" {{ uuid: "00000000-0000-0000-0000-0000000000a1" extensions: {s} Marker {{ v: 1 }} }}
+        \\  entity "b" {{ uuid: "00000000-0000-0000-0000-0000000000b2" extensions: {s} Marker {{ v: 1 }} Mana {{ v: 0 }} }}
+        \\}}
+    , .{ a_ext, b_ext });
+    defer gpa.free(src);
+    var cooked = try scene_cook.cook(gpa, src, null);
+    defer cooked.deinit(gpa);
+    return scene.writer.write(gpa, cooked.model, &cooked.registry);
+}
+
+test "a load runs no hook when one of its hooks is refused" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const good = try forgedExtension(gpa, "Weapon", 4, &.{}, "emit Attached { }", null);
+    defer gpa.free(good);
+    const bad = try forgedExtension(gpa, "Weapon", 4, &.{}, "entity.get_mut(Mana).v += 1", null);
+    defer gpa.free(bad);
+    const scene_bytes = try cookHookScene(gpa, "[\"Good\"]", "[\"Bad\"]");
+    defer gpa.free(scene_bytes);
+    var mr = MultiResolver{ .names = &.{ "Good", "Bad" }, .blobs = &.{ good, bad } };
+    if (scene.loader.loadFromBytes(&h.world, gpa, scene_bytes, mr.ext())) |loaded| {
+        var l = loaded;
+        l.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.ExtensionHookRefused, err);
+    try std.testing.expectEqual(@as(usize, 0), h.interp.events.list.items.len);
+}
+
+test "a load runs no hook when a requirement is missing" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const good = try forgedExtension(gpa, "Weapon", 4, &.{}, "emit Attached { }", null);
+    defer gpa.free(good);
+    const needs = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, null, null);
+    defer gpa.free(needs);
+    const scene_bytes = try cookHookScene(gpa, "[\"Good\"]", "[\"NeedsHealth\"]");
+    defer gpa.free(scene_bytes);
+    var mr = MultiResolver{ .names = &.{ "Good", "NeedsHealth" }, .blobs = &.{ good, needs } };
+    if (scene.loader.loadFromBytes(&h.world, gpa, scene_bytes, mr.ext())) |loaded| {
+        var l = loaded;
+        l.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.RequiresNotSatisfied, err);
+    try std.testing.expectEqual(@as(usize, 0), h.interp.events.list.items.len);
+}
+
+test "a load credits a requirement an earlier extension provides" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const healthy = try forgedExtension(gpa, "Health", 8, &.{}, null, null);
+    defer gpa.free(healthy);
+    const needs = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, null, null);
+    defer gpa.free(needs);
+    const scene_bytes = try cookHookScene(gpa, "[\"Healthy\", \"NeedsHealth\"]", "[\"Healthy\"]");
+    defer gpa.free(scene_bytes);
+    var mr = MultiResolver{ .names = &.{ "Healthy", "NeedsHealth" }, .blobs = &.{ healthy, needs } };
+    var loaded = try scene.loader.loadFromBytes(&h.world, gpa, scene_bytes, mr.ext());
+    defer loaded.deinit(gpa);
+    const a = loaded.uuid_to_entity.get(uuidBytes(0xa1)).?;
+    try std.testing.expect(h.weapon(a) != null);
+}
+
+const observer_program =
+    \\component Health { current: i32 = 100, max: i32 = 100 }
+    \\component Weapon { damage: i32 = 0 }
+    \\event Attached { }
+    \\resource Seen { n: i32 = 0 }
+    \\rule go(entity: Entity) when entity has Health and not entity has Weapon {
+    \\  entity.activate_extension("Forged")
+    \\}
+    \\@on_event(Attached)
+    \\rule seen() when resource Seen { get_mut(Seen).n += 1 }
+;
+
+fn seenCount(world: *World) i32 {
+    const id = world.registry.idOf("Seen").?;
+    const f = world.registry.findField(id, "n").?;
+    return std.mem.readInt(i32, world.resources.getResource(id).?[f.offset..][0..4], .little);
+}
+
+test "an event a hook emits at the tick boundary reaches the next tick's observers" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser.parse(gpa, observer_program);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{}, "emit Attached { }", null);
+    defer gpa.free(bytes);
+    var res = OneResolver{ .name = "Forged", .bytes = bytes };
+    interp.setExtensionResolver(res.ext());
+    _ = try spawnHealth(&world, gpa, 100, 100);
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i32, 1), seenCount(&world));
+}
+
+test "an event a hook emits outside a tick reaches the next tick's observers" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser.parse(gpa, observer_program);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{}, "emit Attached { }", null);
+    defer gpa.free(bytes);
+    const e = try spawnHealth(&world, gpa, 100, 100);
+    try scene.loader.activateExtension(&world, gpa, e, "Forged", bytes);
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i32, 1), seenCount(&world));
+}
+
+test "an activation whose on_attach no interpreter would run is refused" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser.parse(gpa, hook_program);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{}, "emit Attached { }", null);
+    defer gpa.free(bytes);
+    const e = try spawnHealth(&world, gpa, 100, 100);
+    try std.testing.expectError(error.ExtensionHookUnbound, scene.loader.activateExtension(&world, gpa, e, "Forged", bytes));
+    try std.testing.expect(world.componentBytes(e, world.componentId("Weapon").?) == null);
+    try std.testing.expect(!world.hasEntityExtension(e, "Forged"));
+}
+
+test "a deactivation whose on_detach no interpreter would run is refused" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser.parse(gpa, hook_program);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{}, null, "emit Attached { }");
+    defer gpa.free(bytes);
+    const e = try spawnHealth(&world, gpa, 100, 100);
+    try scene.loader.activateExtension(&world, gpa, e, "Forged", bytes);
+    try std.testing.expectError(error.ExtensionHookUnbound, scene.loader.deactivateExtension(&world, gpa, e, "Forged", bytes));
+    try std.testing.expect(world.componentBytes(e, world.componentId("Weapon").?) != null);
+    try std.testing.expect(world.hasEntityExtension(e, "Forged"));
+}
+
+test "a timer in a hook is refused at activation" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "after(1.0s) { }", null);
+    defer gpa.free(bytes);
+    try std.testing.expectError(error.ExtensionHookRefused, scene.loader.activateExtension(&h.world, gpa, h.entity, "Forged", bytes));
+    try std.testing.expect(h.weapon(h.entity) == null);
+}
+
+test "a throw in a hook is refused at activation" {
+    const gpa = std.testing.allocator;
+    var h: HookWorld = undefined;
+    try h.init(gpa);
+    defer h.deinit(gpa);
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{"Health"}, "throw Error { message: \"boom\", code: .io_fail }", null);
+    defer gpa.free(bytes);
+    try std.testing.expectError(error.ExtensionHookRefused, scene.loader.activateExtension(&h.world, gpa, h.entity, "Forged", bytes));
+    try std.testing.expect(h.weapon(h.entity) == null);
+}
+
+/// The cook's answer for an `extends` prefab whose `on_attach` is `hook`.
+fn cookWithHook(gpa: std.mem.Allocator, comptime hook: []const u8) !void {
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const source =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "Bad" extends "BaseCharacter" requires Health {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Weapon { damage: 25 } }
+        \\  on_attach {
+    ++ hook ++
+        \\ }
+        \\}
+    ;
+    var cooked = try scene_cook.cookPrefab(gpa, source, base_res.base(), null);
+    cooked.deinit(gpa);
+}
+
+test "an extension whose hook starts a timer does not cook" {
+    try std.testing.expectError(error.HookRefused, cookWithHook(std.testing.allocator, "after(1.0s) { }"));
+}
+
+test "an extension whose hook throws outside a try does not cook" {
+    try std.testing.expectError(error.HookRefused, cookWithHook(std.testing.allocator, "throw Error { message: \"boom\", code: .io_fail }"));
 }

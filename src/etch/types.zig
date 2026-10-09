@@ -8,9 +8,12 @@
 
 const std = @import("std");
 const ast_mod = @import("ast.zig");
+const const_eval = @import("const_eval.zig");
 const diag_mod = @import("diagnostics.zig");
 const tags_mod = @import("tags.zig");
 const token_mod = @import("token.zig");
+const lexer_mod = @import("lexer.zig");
+const descriptor_mod = @import("descriptor.zig");
 /// The storage-mode domain, read from the owner of the EFFECT rather than
 /// re-listed here (`etch-resolver-types.md` §13.3.1). `weld_etch` already
 /// depends on `weld_core` (`build.zig:50`) and `weld_core` imports only
@@ -169,6 +172,23 @@ pub const BuiltinType = enum {
         };
     }
 
+    /// `etch-resolver-types.md` §16.4: every builtin but the two handles is `Eq`.
+    pub fn isEq(self: BuiltinType) bool {
+        return switch (self) {
+            .task_handle, .timer_handle => false,
+            else => true,
+        };
+    }
+
+    /// `etch-resolver-types.md` §16.4: the numbers, `Duration`, `Time`, `string`
+    /// and `Entity` are `Ord`.
+    pub fn isOrd(self: BuiltinType) bool {
+        return switch (self) {
+            .int_, .float_, .i32_, .u32_, .f32_, .f64_, .duration, .time, .string_, .entity => true,
+            else => false,
+        };
+    }
+
     pub fn isInteger(self: BuiltinType) bool {
         return switch (self) {
             .int_, .i32_, .u32_ => true,
@@ -250,9 +270,20 @@ pub const builtin_resources = [_]BuiltinResource{
     } },
 };
 
+/// The name of the builtin component both backends inject when a program
+/// declares any tag. The reservation and every injection read it here.
+pub const tagset_component_name = "TagSet";
+
+/// True iff the engine itself registers `name` in the ECS registry, so a user
+/// `component` or `resource` of that name would collide.
+pub fn isReservedEngineTypeName(name: []const u8) bool {
+    if (std.mem.eql(u8, name, tagset_component_name)) return true;
+    return builtinResourceByName(name) != null;
+}
+
 /// Descriptor lookup by resource name bytes. Consulted by the
-/// receiver-less `get(T)` resolution and by the builtin-resource field
-/// lookup; `interp.zig` iterates `builtin_resources` directly.
+/// receiver-less `get(T)` resolution, the builtin-resource field lookup and
+/// `isReservedEngineTypeName`; `interp.zig` iterates `builtin_resources` directly.
 pub fn builtinResourceByName(name: []const u8) ?*const BuiltinResource {
     for (&builtin_resources) |*r| {
         if (std.mem.eql(u8, r.name, name)) return r;
@@ -260,19 +291,40 @@ pub fn builtinResourceByName(name: []const u8) ?*const BuiltinResource {
     return null;
 }
 
-/// Fixed-array carrier for `ResolvedType.array_fixed`: builtin element type +
-/// compile-time length. Collections hold **builtin primitive** elements
-/// only (collections of components / structs are unsupported); a non-builtin element
-/// resolves the whole collection type to `unknown`.
-pub const ArrayFixedInfo = struct { elem: BuiltinType, len: u64 };
-/// Map carrier for `ResolvedType.map_t`: builtin key + value types.
-pub const MapInfo = struct { key: BuiltinType, value: BuiltinType };
+/// Fixed-array carrier for `ResolvedType.array_fixed`: element type +
+/// compile-time length.
+pub const ArrayFixedInfo = struct { elem: *const ResolvedType, len: u64 };
+/// Map carrier for `ResolvedType.map_t`: key + value types.
+pub const MapInfo = struct { key: *const ResolvedType, value: *const ResolvedType };
 
-/// `ResolvedType` is the type-checker's internal type representation.
+/// A closure value's type. `env` indexes `TypeChecker.closure_envs`, or is
+/// `no_env` for a literal typed where no scope exists.
+pub const ClosureType = struct {
+    literal: NodeId,
+    env: u32,
+
+    pub const no_env = std.math.maxInt(u32);
+};
+
+/// A declaration, identified across the files of a project.
+pub const DeclRef = struct {
+    arena: *const AstArena,
+    item: NodeId,
+
+    pub fn eql(a: DeclRef, b: DeclRef) bool {
+        return a.arena == b.arena and std.meta.eql(a.item, b.item);
+    }
+};
+
+/// `ResolvedType` is the type-checker's internal type representation. A
+/// declared type carries its declaration, so two files naming it differently
+/// name one type, and two declarations of one name are two types.
 pub const ResolvedType = union(enum) {
     builtin: BuiltinType,
-    component: StringId, // user-declared component type name
-    resource: StringId, // user-declared resource type name
+    component: DeclRef,
+    resource: DeclRef,
+    /// An engine resource of `builtin_resources`, which no declaration backs.
+    builtin_resource: *const BuiltinResource,
     /// `start..end` range; payload is the (integer) element type. Only
     /// consumed by `for-in`.
     range: BuiltinType,
@@ -280,40 +332,37 @@ pub const ResolvedType = union(enum) {
     array_fixed: ArrayFixedInfo,
     /// `T[]` dynamic array / slice. Slicing a fixed or
     /// dynamic array yields this.
-    array_dyn: BuiltinType,
+    array_dyn: *const ResolvedType,
     /// `[K: V]` map.
     map_t: MapInfo,
     /// `Set<T>` set.
-    set_t: BuiltinType,
-    /// A closure value. Payload is the closure-expression
-    /// `NodeId`; the return type is inferred lazily at each call site (params
-    /// bound to the argument types in the caller's scope).
-    closure: NodeId,
-    /// A `struct` value. Payload is the struct type name. A
-    /// struct is a by-value type (not registered with the world); its fields
-    /// and inherent methods resolve by name through the symbol table.
-    struct_t: StringId,
-    /// A C-like `enum` value. Payload is the enum
-    /// type name; variants resolve by name against the declaration.
-    enum_t: StringId,
-    /// An `event` value — the implicit `event` binding of an
-    /// `@on_event(T)` observer rule. Payload is the event type name; fields
-    /// resolve by name against the event declaration (POD struct of fields,
-    /// like a component/resource). Self-style binding, no declared param.
-    event_t: StringId,
+    set_t: *const ResolvedType,
+    /// A closure value; its return type is inferred at each call.
+    closure: ClosureType,
+    /// A `struct` value, by value and not registered with the world.
+    struct_t: DeclRef,
+    /// A C-like `enum` value.
+    enum_t: DeclRef,
+    /// An `event` value, such as the implicit `event` binding of an
+    /// `@on_event(T)` observer rule.
+    event_t: DeclRef,
     /// A generic type variable in scope. Payload is the type-
     /// parameter name. Opaque within a generic body (operations are permissive,
     /// like `unknown`); resolved to a concrete type by inference at the call site.
     generic: StringId,
-    /// `T?` optional of a builtin-scalar payload. Non-builtin
-    /// payloads (`struct?` / `enum?`) are deferred — they resolve to `.unknown`
-    /// (the optional-ness is not tracked; permissive). `if let` / `while let`
-    /// unwrap this to the payload builtin.
-    optional: BuiltinType,
+    /// `T?`, of any payload. A payload — this one, or a collection's element,
+    /// key or value — lives in the checker: a builtin one in
+    /// `builtin_payloads`, a type node's in a slot `reservePayloadSlots` made,
+    /// any other in `TypeChecker.payloads`.
+    optional: *const ResolvedType,
     /// The current test's World handle — the return type of
     /// `test_world()` (test bodies only). Receiver of `spawn_with`/`emit`/`tick`
     /// in `dispatchMethodOnType`. No payload (mono-world). Not field-storable.
     test_world,
+    /// The type of an expression that yields no value: a block with no tail
+    /// value, an `if` with no `else`, a loop left by a `break` with no value, a
+    /// builtin call run for its effect. Unlike `unknown`, it fits only itself.
+    unit,
     /// Type unknown / unresolved. Used as the fallback after a diagnostic
     /// has been emitted; subsequent checks treat `unknown` as wildcard to
     /// avoid cascade errors.
@@ -323,27 +372,29 @@ pub const ResolvedType = union(enum) {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
             .builtin => |bt| bt == b.builtin,
-            .component => |id| id == b.component,
-            .resource => |id| id == b.resource,
+            .component => |r| r.eql(b.component),
+            .resource => |r| r.eql(b.resource),
+            .builtin_resource => |r| r == b.builtin_resource,
             .range => |bt| bt == b.range,
-            .array_fixed => |info| info.elem == b.array_fixed.elem and info.len == b.array_fixed.len,
-            .array_dyn => |elem| elem == b.array_dyn,
-            .map_t => |info| info.key == b.map_t.key and info.value == b.map_t.value,
-            .set_t => |elem| elem == b.set_t,
-            .closure => |node| std.meta.eql(node, b.closure),
-            .struct_t => |id| id == b.struct_t,
-            .enum_t => |id| id == b.enum_t,
-            .event_t => |id| id == b.event_t,
+            .array_fixed => |info| info.elem.eql(b.array_fixed.elem.*) and info.len == b.array_fixed.len,
+            .array_dyn => |elem| elem.eql(b.array_dyn.*),
+            .map_t => |info| info.key.eql(b.map_t.key.*) and info.value.eql(b.map_t.value.*),
+            .set_t => |elem| elem.eql(b.set_t.*),
+            .closure => |c| std.meta.eql(c.literal, b.closure.literal),
+            .struct_t => |r| r.eql(b.struct_t),
+            .enum_t => |r| r.eql(b.enum_t),
+            .event_t => |r| r.eql(b.event_t),
             .generic => |id| id == b.generic,
-            .optional => |bt| bt == b.optional,
+            .optional => |p| p.eql(b.optional.*),
             .test_world => true,
+            .unit => true,
             .unknown => true,
         };
     }
 
     /// The element type produced by indexing or iterating this collection,
     /// or `null` if the type is not an indexable/iterable collection.
-    pub fn elementType(self: ResolvedType) ?BuiltinType {
+    pub fn elementType(self: ResolvedType) ?*const ResolvedType {
         return switch (self) {
             .array_fixed => |info| info.elem,
             .array_dyn => |elem| elem,
@@ -352,6 +403,50 @@ pub const ResolvedType = union(enum) {
         };
     }
 };
+
+/// A payload of a composite type node of one arena: an optional's, a
+/// collection's element, a map's key (`child` 0) or value (`child` 1).
+const PayloadNode = struct { arena: usize, node: u32, child: u1 };
+
+/// The payload nodes of the type node `node` of `a`.
+const PayloadChildren = struct { nodes: [2]NodeId = .{ NodeId.none, NodeId.none }, len: usize = 0 };
+
+fn payloadChildren(a: *const AstArena, node: NodeId) PayloadChildren {
+    const data = a.typeNodeData(node);
+    return switch (a.typeNodeKind(node)) {
+        .optional => .{ .nodes = .{ @bitCast(data), NodeId.none }, .len = 1 },
+        .array, .slice => .{ .nodes = .{ a.array_types.items[data].elem, NodeId.none }, .len = 1 },
+        .set_type => .{ .nodes = .{ a.set_types.items[data].elem, NodeId.none }, .len = 1 },
+        .map_type => .{ .nodes = .{ a.map_types.items[data].key, a.map_types.items[data].value }, .len = 2 },
+        else => .{},
+    };
+}
+
+/// Each builtin as a `ResolvedType`, the payload of an optional of a builtin.
+const builtin_payloads = blk: {
+    const fields = @typeInfo(BuiltinType).@"enum".fields;
+    var table: [fields.len]ResolvedType = undefined;
+    for (fields, 0..) |f, i| table[i] = .{ .builtin = @enumFromInt(f.value) };
+    break :blk table;
+};
+
+/// How many optionals `t` nests.
+fn optionalDepth(t: ResolvedType) u8 {
+    var depth: u8 = 0;
+    var cur = t;
+    while (cur == .optional) : (depth += 1) cur = cur.optional.*;
+    return depth;
+}
+
+/// The builtin `b` as a payload.
+fn builtinPayload(b: BuiltinType) *const ResolvedType {
+    return &builtin_payloads[@intFromEnum(b)];
+}
+
+/// The optional of the builtin `b`.
+fn optionalOfBuiltin(b: BuiltinType) ResolvedType {
+    return .{ .optional = builtinPayload(b) };
+}
 
 /// Symbol entry in the file-local symbol table built by pass 1.
 pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_, sequence_, anim_graph_, shader_, const_ };
@@ -369,20 +464,13 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
     return (@as(u64, type_name) << 32) | @as(u64, method_name);
 }
 
-/// Resolve a foreign-arena component field's declared type to a `BuiltinType`, or
-/// `null` for a non-builtin (named / array / complex) type. Mirrors
-/// the builtin path of `namedTypeToResolved` but reads the FOREIGN arena's strings +
-/// alias chain; it consults no symbol table. `null` is unreachable for a valid
-/// component (component fields are builtin-POD only,
-/// `validateFieldsInDecl.component_like`) — so the cross-arena field-TYPE check is
-/// complete for every valid imported component.
-fn foreignBuiltinFieldType(decl_arena: *const AstArena, type_node: NodeId) ?BuiltinType {
-    if (decl_arena.typeNodeKind(type_node) != .named) return null;
-    const named = decl_arena.named_types.items[decl_arena.typeNodeData(type_node)];
-    const resolved = decl_arena.resolveTypeAliasName(named.name);
-    const tname = decl_arena.strings.slice(resolved);
-    if (std.mem.eql(u8, tname, "string")) return .string_;
-    return BuiltinType.fromName(tname);
+/// A type the engine provides, which a value position may name as a receiver.
+fn isBuiltinTypeName(name: []const u8) bool {
+    if (BuiltinType.fromName(name) != null) return true;
+    for (builtin_resources) |r| {
+        if (std.mem.eql(u8, r.name, name)) return true;
+    }
+    return std.mem.eql(u8, name, "Set");
 }
 
 /// `true` if `s` contains an ASCII uppercase letter — an `E1768
@@ -409,19 +497,22 @@ fn isKnownTrackType(name: []const u8) bool {
 /// FLOAT_LITERAL "s"`, §1.4 — single `s` suffix). Distinct from the deferred
 /// RUNTIME duration eval (fail-loud both backends). `null` if not a duration
 /// literal. Backs E1744 KeyframeOutOfRange + E1745 KeyframesUnordered.
-fn durationLitSeconds(arena: *const AstArena, expr_id: NodeId) ?f64 {
+fn durationLitSeconds(gpa: std.mem.Allocator, arena: *const AstArena, expr_id: NodeId) !?f64 {
     if (arena.exprKind(expr_id) != .duration_lit) return null;
     const lex = arena.strings.slice(arena.exprData(expr_id));
     if (lex.len < 2 or lex[lex.len - 1] != 's') return null;
-    return std.fmt.parseFloat(f64, lex[0 .. lex.len - 1]) catch null;
+    return const_eval.floatLiteralValue(gpa, lex[0 .. lex.len - 1]);
 }
 
 /// Parse an int / float literal expr's numeric value at validation time. `null`
 /// if not a numeric literal. Backs E1749 FPSInvalid + E1750 DurationInvalid.
-fn numericLitValue(arena: *const AstArena, expr_id: NodeId) ?f64 {
-    const k = arena.exprKind(expr_id);
-    if (k != .int_lit and k != .float_lit) return null;
-    return std.fmt.parseFloat(f64, arena.strings.slice(arena.exprData(expr_id))) catch null;
+fn numericLitValue(gpa: std.mem.Allocator, arena: *const AstArena, expr_id: NodeId) !?f64 {
+    const text = arena.strings.slice(arena.exprData(expr_id));
+    return switch (arena.exprKind(expr_id)) {
+        .int_lit => @floatFromInt(const_eval.intLiteralValue(text, false) orelse return null),
+        .float_lit => const_eval.floatLiteralValue(gpa, text),
+        else => null,
+    };
 }
 
 /// Target categories the annotation-applicability check distinguishes. The first set held
@@ -432,7 +523,23 @@ fn numericLitValue(arena: *const AstArena, expr_id: NodeId) ?f64 {
 /// construct targets arrive with their constructs. `data` / `routine` join with the
 /// Level-B constructs (no builtin annotation targets them — only `.custom` is accepted,
 /// like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader, scene, prefab, test_ };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader, scene, prefab, test_, const_, type_alias, import_, impl_ };
+
+/// The first import alias in `aliases` that the rendered hook `text` names
+/// while spelled like a builtin type or resource: once the cook respells each
+/// alias by the name it aliases, that name is no longer told from the builtin.
+fn builtinSpelledAlias(gpa: std.mem.Allocator, text: []const u8, aliases: anytype) !?[]const u8 {
+    var lx = lexer_mod.Lexer.init(text);
+    defer lx.deinit(gpa);
+    while (true) {
+        const tok = try lx.next(gpa);
+        if (tok.kind == .eof) return null;
+        if (tok.kind != .type_ident) continue;
+        const alias = text[tok.span.byte_start..tok.span.byte_end];
+        if (!aliases.contains(alias)) continue;
+        if (BuiltinType.fromName(alias) != null or builtinResourceByName(alias) != null) return alias;
+    }
+}
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -481,14 +588,17 @@ pub const TypeChecker = struct {
     /// message). Test names are never referenced by code and never exported.
     test_symbols: std.AutoHashMapUnmanaged(StringId, void) = .empty,
     /// Inherent `impl` methods, keyed by `methodKey(type_name,
-    /// method_name)` → index into `arena.impl_methods`. Drives the inherent
-    /// (kind 1, `etch-resolver-types.md §5.1`) dispatch of `recv.method()` and
-    /// the associated-fn dispatch of `Type.assoc()`.
+    /// method_name)` → index into `arena.impl_methods`: E0218 on a second
+    /// method of one name on one written type name (`etch-resolver-types.md`
+    /// §7.5).
     methods: std.AutoHashMapUnmanaged(u64, u32) = .empty,
     /// Trait impls (`impl Trait for Type [when …]`),
     /// in declaration order. The kind-2 trait dispatch (`etch-resolver-types.md
     /// §5.2`) scans this for the receiver type, AFTER inherent (§5.5 order).
     trait_impls: std.ArrayListUnmanaged(TraitImplEntry) = .empty,
+    /// The other files this file imports from, in import order, once each:
+    /// their impls are visible here (`etch-resolver-types.md` §7.5).
+    import_arenas: std.ArrayListUnmanaged(*const AstArena) = .empty,
     /// Generic type-parameter names currently in scope. Set
     /// while checking a generic `fn` / `impl` / `struct` / `enum` body so a
     /// type annotation naming a param resolves to `.generic` rather than an
@@ -496,8 +606,36 @@ pub const TypeChecker = struct {
     generic_scope: std.AutoHashMapUnmanaged(StringId, void) = .empty,
     /// Declared return type of the `fn` / method currently being checked, used
     /// to type a `return expr` body statement against. `null` outside
-    /// a body; `.unit` for a void fn (no `-> type`).
+    /// a body; `unknown` for a fn with no `-> type`.
     current_fn_return: ?ResolvedType = null,
+    /// Literals already reported out of range, so a literal checked in two
+    /// contexts is reported once.
+    range_reported: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// The `.variant` shorthands synthesized with no expected type that no enum,
+    /// or several, name; reported once the file is checked.
+    unresolved_shorthands: std.AutoArrayHashMapUnmanaged(u32, void) = .empty,
+    /// The enum each resolved `.variant` shorthand names.
+    shorthand_enums: std.AutoHashMapUnmanaged(u32, DeclRef) = .empty,
+    /// The shorthands already reported as naming no variant of their slot's
+    /// type, so one fitted in two places is reported once.
+    shorthand_misses: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// Set while `valueCompares` runs: the value is compared with the slot, not
+    /// stored in it, so it is never wrapped.
+    comparing: bool = false,
+    /// How many closure bodies are being typed for a call. A body is typed
+    /// again at each call, and runs as one: a value it fits must wrap the same
+    /// at every call, and a shorthand it holds must name the same enum.
+    closure_calls: u32 = 0,
+    /// Each value a closure body fits → how many times it wraps.
+    closure_wraps: std.AutoHashMapUnmanaged(u32, u8) = .empty,
+    /// Payloads of the optionals built at check time.
+    payloads: std.ArrayListUnmanaged(*ResolvedType) = .empty,
+    /// Each payload of a composite type node of the files this check reads →
+    /// its slots, made by `reservePayloadSlots` so a type node resolves without
+    /// allocating; `.unknown` until filled.
+    payload_slots: std.AutoHashMapUnmanaged(PayloadNode, []ResolvedType) = .empty,
+    payload_slot_store: []ResolvedType = &.{},
+    payload_slots_reserved: bool = false,
     /// The `await_expr` node that is the statement-head `await` of the statement
     /// currently being checked, or `NodeId.none`. Set at the top of
     /// `checkStmt` for the allowed positions (expr-stmt / `let` init / simple
@@ -530,6 +668,11 @@ pub const TypeChecker = struct {
     /// through to E0102 (`test_world`/`tick_until`) or E0910 (`measure`). Set/restored
     /// around the body in `checkTest`.
     in_test_body: bool = false,
+    /// Whether the statements being checked are an `on_attach` / `on_detach`
+    /// body: a `return`, a `throw` outside a `try` or a timer there is E1798,
+    /// and the E1210 / E1213 messages name the hook's scope. Set/restored in
+    /// `checkHookBody`.
+    in_hook_body: bool = false,
     /// The kind of the INNERMOST `race`/`sync` branch or `branch`/`spawn` body
     /// enclosing the statements being checked, `null` outside any.
     /// Drives E0906 (a `return` is legal only in a `race` branch —
@@ -556,12 +699,23 @@ pub const TypeChecker = struct {
     /// Start of the innermost branch's label window in `conc_labels`. Saved/restored at
     /// branch entry.
     conc_labels_base: usize = 0,
+    /// The loops a `break` can target, innermost last. Only the window past
+    /// `break_base` belongs to the innermost task, timer or closure body.
+    break_frames: std.ArrayListUnmanaged(BreakFrame) = .empty,
+    break_base: usize = 0,
+    /// The values each `loop` breaks with, a run of `loop_break_nodes` keyed by
+    /// the loop's node.
+    loop_breaks: std.AutoHashMapUnmanaged(u32, struct { start: u32, len: u32 }) = .empty,
+    loop_break_nodes: std.ArrayListUnmanaged(NodeId) = .empty,
     /// Names visible at the entry of the innermost scope-snapshot body, in
     /// `escape_names[escape_base..]`: a name referenced there and not declared
     /// there is a capture (`etch-resolver-types.md` §8.2, E0223).
     escape_names: std.ArrayListUnmanaged(StringId) = .empty,
     /// Start of the innermost snapshot body's window in `escape_names`.
     escape_base: usize = 0,
+    /// Where the innermost snapshot body's own bindings begin in the checked
+    /// context's `scope_log`.
+    escape_log_base: usize = 0,
     /// What the innermost snapshot body IS, for the diagnostic's wording. `null`
     /// outside any.
     escape_site: ?EscapeSite = null,
@@ -577,13 +731,16 @@ pub const TypeChecker = struct {
     /// `buildTags` runs. Pass 2 (tag-op when-conditions / `tag_path` operands,
     /// landed in the query-operator commit) resolves paths against it.
     tag_table: ?tags_mod.TagTable = null,
-    /// Names captured by the closure body currently being typed (
-    /// `etch-resolver-types.md` §8.2): the caller-scope bindings
-    /// snapshotted at `synthCall` minus the closure params. An assignment
-    /// targeting one of them is E0221 ClosureCannotMutateCapture; a body-local
-    /// `let` re-declaring a name removes it (it is body-owned from there).
-    /// `null` outside a closure body. Saved/restored around nested typing.
+    /// Names of the scope the closure body being typed was written in
+    /// (`etch-resolver-types.md` §8.2). Writing one the body did not bind
+    /// itself, by assignment or through it, is E0221
+    /// ClosureCannotMutateCapture. `null` outside a closure body.
     closure_captures: ?*std.AutoHashMapUnmanaged(StringId, void) = null,
+    /// The scope each closure value was created in, indexed by
+    /// `ClosureType.env`.
+    closure_envs: std.ArrayListUnmanaged(ClosureEnv) = .empty,
+    /// `ClosureEnv.own` of the closure body being typed.
+    closure_own: ?*const std.AutoHashMapUnmanaged(StringId, void) = null,
     /// Cross-file project context. `null` in single-file mode (the
     /// Single-file behaviour: E1782/E1786/E1791 resolve against per-file sets). When
     /// set (via `checkProject`), those three scene/prefab reference + UUID
@@ -592,12 +749,11 @@ pub const TypeChecker = struct {
     project: ?*const ProjectContext = null,
     /// Symbols brought into this file's scope by a selective `import a.b { X }`,
     /// byte-keyed under their LOCAL name's `StringId` in THIS arena (the `as Y` alias
-    /// if present, else the imported name). Built by `bindImports` after pass 1;
-    /// consulted by `TYPE_IDENT` resolution. Empty in single-file mode.
+    /// if present, else the imported name). Built by `bindImports` after pass 1.
+    /// Empty in single-file mode.
     imported_symbols: std.AutoHashMapUnmanaged(StringId, ExportEntry) = .empty,
     /// Module aliases from `import a.b as m` / bare `import a.b`:
-    /// local alias `StringId` → target file index. Qualified `m.Type` resolution
-    /// is deferred; the binding is recorded so the later walk is purely additive.
+    /// local alias `StringId` → target file index.
     imported_aliases: std.AutoHashMapUnmanaged(StringId, usize) = .empty,
     /// Every `service` reachable from this check, keyed by NAME BYTES. Byte-keyed and
     /// not `StringId`-keyed for the reason the exports index does: a
@@ -697,20 +853,21 @@ pub const TypeChecker = struct {
     /// existing single-arena path through `symbols`, and nothing about it moves.
     pub const ForeignEvent = struct {
         arena: *const AstArena,
+        item: NodeId,
         decl: ast_mod.EventDecl,
     };
 
-    /// One `impl Trait for Type [when …]`.
-    /// `methods_start`/`methods_len` index `arena.impl_methods` (the
-    /// impl-provided methods); `when_root` is `RuleDecl.none_when` for an
-    /// unconditional impl.
+    /// One `impl Trait for Type [when …]` of `arena`. Its names are
+    /// `arena`'s, `methods_start`/`methods_len` index `arena.impl_methods`
+    /// (the impl-provided methods), and `when_root` indexes `arena.when_nodes`
+    /// or is `RuleDecl.none_when` for an unconditional impl.
     pub const TraitImplEntry = struct {
+        arena: *const AstArena,
         trait_name: StringId,
         type_name: StringId,
         when_root: u32,
         methods_start: u32,
         methods_len: u32,
-        span: SourceSpan,
     };
 
     pub fn deinit(self: *TypeChecker) void {
@@ -718,13 +875,28 @@ pub const TypeChecker = struct {
         self.test_symbols.deinit(self.gpa);
         self.methods.deinit(self.gpa);
         self.trait_impls.deinit(self.gpa);
+        self.import_arenas.deinit(self.gpa);
         self.conc_labels.deinit(self.gpa);
+        self.break_frames.deinit(self.gpa);
+        self.loop_breaks.deinit(self.gpa);
+        self.loop_break_nodes.deinit(self.gpa);
         self.escape_names.deinit(self.gpa);
+        for (self.closure_envs.items) |*env| env.deinit(self.gpa);
+        self.closure_envs.deinit(self.gpa);
         self.generic_scope.deinit(self.gpa);
         self.imported_symbols.deinit(self.gpa);
         self.imported_aliases.deinit(self.gpa);
         self.services.deinit(self.gpa);
         self.foreign_events.deinit(self.gpa);
+        self.range_reported.deinit(self.gpa);
+        self.unresolved_shorthands.deinit(self.gpa);
+        self.shorthand_misses.deinit(self.gpa);
+        self.shorthand_enums.deinit(self.gpa);
+        for (self.payloads.items) |p| self.gpa.destroy(p);
+        self.payloads.deinit(self.gpa);
+        self.payload_slots.deinit(self.gpa);
+        self.closure_wraps.deinit(self.gpa);
+        self.gpa.free(self.payload_slot_store);
         if (self.tag_table) |*t| t.deinit(self.gpa);
     }
 
@@ -753,7 +925,8 @@ pub const TypeChecker = struct {
         // Builtin `Error` / `ErrorCode` declarations (
         // part1 §10.2) join the arena before pass 1 so they register like
         // ordinary declarations. Every interp / codegen driver runs through
-        // `check`, so the injection point is unique.
+        // `check`, and the cook through `checkPrefabHooks`; the injection is
+        // idempotent.
         try arena.ensureErrorBuiltins(gpa);
         var tc: TypeChecker = .{
             .gpa = gpa,
@@ -762,38 +935,403 @@ pub const TypeChecker = struct {
             .project = project,
         };
         defer tc.deinit();
-        // E1901 runs FIRST: it decides whether the file is even allowed to
-        // contain what it contains, and a `.d.etch` carrying a `rule` would
-        // otherwise produce a cascade of resolution errors on a body that had
-        // no business being parsed. Cheap either way — one walk of the item
-        // column, and an immediate return in `.standard` mode.
-        try tc.checkDeclarationFileConstructs();
-        try tc.collectServices();
-        try tc.collectDeclaredEvents();
-        try tc.pass1Collect();
-        try tc.bindImports();
-        try tc.validateTypeAliases();
-        try tc.validateImpls();
-        try tc.validateDataDecls();
-        try tc.validateRoutineDecls();
-        try tc.buildTags();
-        try tc.validateBehaviorDecls();
-        try tc.validateQuestDecls();
-        try tc.validateDialogueDecls();
-        try tc.validateAbilityDecls();
-        try tc.validateThemeDecls();
-        try tc.validateMotionDecls();
-        try tc.validateInputMappingDecls();
-        try tc.validateWidgetDecls();
-        try tc.validateLocaleDecls();
-        try tc.validateEffectDecls();
-        try tc.validateAudioScoreDecls();
-        try tc.validateSequenceDecls();
-        try tc.validateAnimGraphDecls();
-        try tc.validateShaderDecls();
-        try tc.validateSceneDecls();
+        try tc.runDeclarationPasses();
         try tc.validatePrefabDecls();
         try tc.pass2Resolve();
+        try tc.reportUnresolvedShorthands();
+    }
+
+    /// Every pass `check` runs before the prefab validation: the symbols,
+    /// imports, impls, tags, services and events a statement check reads, and
+    /// the construct validators. Shared with `checkPrefabHooks`.
+    fn runDeclarationPasses(self: *TypeChecker) !void {
+        try self.collectDeclarations();
+        try self.bindImports();
+        try self.checkComponentIdentities();
+        try self.validateDeclarations();
+    }
+
+    /// E0101 on two components or resources reaching this file under one name,
+    /// the runtime keying both by name in one registry.
+    fn checkComponentIdentities(self: *TypeChecker) !void {
+        const project = self.project orelse return;
+        var owners: std.StringHashMapUnmanaged(RuntimeOwner) = .empty;
+        defer owners.deinit(self.gpa);
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        const spans = self.arena.items.items(.span);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            const name_id = switch (kinds[i]) {
+                .component_decl => self.arena.component_decls.items[datas[i]].name,
+                .resource_decl => self.arena.resource_decls.items[datas[i]].name,
+                else => continue,
+            };
+            try owners.put(self.gpa, self.arena.strings.slice(name_id), .{ .arena = self.arena, .item = i });
+        }
+        i = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .import_decl) continue;
+            const decl = self.arena.import_decls.items[datas[i]];
+            if (decl.items_len == 0) {
+                const alias = if (decl.module_alias != 0) decl.module_alias else self.arena.import_path_segs.items[decl.path_start + decl.path_len - 1];
+                const target = self.imported_aliases.get(alias) orelse continue;
+                var it = project.exports[target].iterator();
+                while (it.next()) |e| {
+                    if (e.value_ptr.visibility == .private) continue;
+                    try self.claimRuntimeName(&owners, e.value_ptr.*, spans[i]);
+                }
+                continue;
+            }
+            var j: u32 = 0;
+            while (j < decl.items_len) : (j += 1) {
+                const item = self.arena.import_items.items[decl.items_start + j];
+                const entry = self.importedBinding(importLocalName(item)) orelse continue;
+                try self.claimRuntimeName(&owners, entry, spans[i]);
+            }
+        }
+    }
+
+    const RuntimeOwner = struct { arena: *const AstArena, item: u32 };
+
+    /// Record the component or resource `entry` names under its runtime name,
+    /// E0101 when another declaration holds that name.
+    fn claimRuntimeName(self: *TypeChecker, owners: *std.StringHashMapUnmanaged(RuntimeOwner), entry: ExportEntry, span: SourceSpan) !void {
+        const decl_arena = &self.project.?.arenas[entry.arena_index];
+        const name_id = switch (entry.kind) {
+            .component => decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)].name,
+            .resource => decl_arena.resource_decls.items[decl_arena.itemData(entry.item_id)].name,
+            else => return,
+        };
+        const name = decl_arena.strings.slice(name_id);
+        const owner: RuntimeOwner = .{ .arena = decl_arena, .item = entry.item_id.index };
+        const gop = try owners.getOrPut(self.gpa, name);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = owner;
+        } else if (!std.meta.eql(gop.value_ptr.*, owner)) {
+            try self.emit(.duplicate_symbol, .error_, span, "two components or resources named '{s}' reach this file, and the runtime identifies both by name", .{name});
+        }
+    }
+
+    /// The import aliases of this file the cook respells: those whose item is
+    /// the one binding the alias.
+    fn boundAliases(self: *TypeChecker) !std.StringHashMapUnmanaged(void) {
+        var out: std.StringHashMapUnmanaged(void) = .empty;
+        errdefer out.deinit(self.gpa);
+        const project = self.project orelse return out;
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: usize = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .import_decl) continue;
+            const decl = self.arena.import_decls.items[datas[i]];
+            const path = try importPath(self.gpa, self.arena, decl);
+            defer self.gpa.free(path);
+            const target = project.module_index.get(path) orelse continue;
+            var j: u32 = 0;
+            while (j < decl.items_len) : (j += 1) {
+                const item = self.arena.import_items.items[decl.items_start + j];
+                if (item.alias == 0) continue;
+                const bound = self.importedBinding(item.alias) orelse continue;
+                const own = importedExport(project, self.arena, target, item) orelse continue;
+                if (std.meta.eql(own, bound)) try out.put(self.gpa, self.arena.strings.slice(item.alias), {});
+            }
+        }
+        return out;
+    }
+
+    /// The fields of the file's components, resources, events and structs, and
+    /// its const values, judged once the imports bind the types they name.
+    fn validateDeclaredValues(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            const data = datas[i];
+            switch (kinds[i]) {
+                .component_decl => {
+                    const decl = self.arena.component_decls.items[data];
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .component_like);
+                },
+                .resource_decl => {
+                    const decl = self.arena.resource_decls.items[data];
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .resource);
+                },
+                .event_decl => {
+                    const decl = self.arena.event_decls.items[data];
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .event_);
+                },
+                .struct_decl => {
+                    const decl = self.arena.struct_decls.items[data];
+                    // Generic params in scope so a field typed
+                    // by a param (`min: T`) is accepted as a generic field.
+                    try self.addGenerics(decl.generics_start, decl.generics_len);
+                    defer self.removeGenerics(decl.generics_start, decl.generics_len);
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .struct_);
+                },
+                .const_decl => {
+                    const decl = self.arena.const_decls.items[data];
+                    try self.checkConstValue(decl.value, decl.type_node);
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// The passes before the imports bind: the file's own symbols.
+    fn collectDeclarations(self: *TypeChecker) !void {
+        try self.reservePayloadSlots();
+        // E1901 is the FIRST check: it decides whether the file is even
+        // allowed to contain what it contains, and a `.d.etch` carrying a
+        // `rule` would otherwise produce a cascade of resolution errors on a
+        // body that had no business being parsed. Cheap either way — one walk
+        // of the item column, and an immediate return in `.standard` mode.
+        try self.checkDeclarationFileConstructs();
+        try self.checkTypedExtension();
+        try self.checkLiteralRanges();
+        try self.checkClosureEscapes();
+        try self.collectServices();
+        try self.collectDeclaredEvents();
+        try self.pass1Collect();
+    }
+
+    fn validateDeclarations(self: *TypeChecker) !void {
+        try self.validateDeclaredValues();
+        try self.validateTypeAliases();
+        try self.validateImpls();
+        try self.validateDataDecls();
+        try self.validateRoutineDecls();
+        try self.buildTags();
+        try self.validateBehaviorDecls();
+        try self.validateQuestDecls();
+        try self.validateDialogueDecls();
+        try self.validateAbilityDecls();
+        try self.validateThemeDecls();
+        try self.validateMotionDecls();
+        try self.validateInputMappingDecls();
+        try self.validateWidgetDecls();
+        try self.validateLocaleDecls();
+        try self.validateEffectDecls();
+        try self.validateAudioGraphDecls();
+        try self.validateAudioScoreDecls();
+        try self.validateSequenceDecls();
+        try self.validateAnimGraphDecls();
+        try self.validateShaderDecls();
+        try self.validateSceneDecls();
+        try self.checkCollectionKeysIn(0, @intCast(self.arena.type_nodes.len));
+        try self.validatePathTypesIn(0, @intCast(self.arena.type_nodes.len));
+    }
+
+    /// E0102, E0104 or E0107 on each qualified type `m.T` of the type nodes
+    /// `from..to` that names no type: the one report for the node, whatever
+    /// position holds it.
+    fn validatePathTypesIn(self: *TypeChecker, from: u32, to: u32) TypeError!void {
+        var i = from;
+        while (i < to) : (i += 1) {
+            const node: NodeId = .{ .category = .type_node, .index = @intCast(i) };
+            if (self.arena.typeNodeKind(node) != .path) continue;
+            const path = self.arena.path_types.items[self.arena.typeNodeData(node)];
+            const span = self.arena.typeNodeSpan(node);
+            switch (self.resolvePathTypeNode(node)) {
+                .resolved => {},
+                .member_absent => try self.emit(.unknown_export, .error_, span, "'{s}' is not exported by the aliased module", .{self.arena.strings.slice(path.member)}),
+                .member_private => try self.emit(.import_private_item, .error_, span, "'{s}' is private to the aliased module", .{self.arena.strings.slice(path.member)}),
+                .alias_unresolved => try self.emit(.undefined_symbol, .error_, span, "'{s}' is not a module alias in scope", .{self.arena.strings.slice(path.alias)}),
+                .not_a_type => try self.emit(.undefined_symbol, .error_, span, "'{s}' is not a type", .{self.arena.strings.slice(path.member)}),
+            }
+        }
+    }
+
+    /// Whether type node `node` holds a qualified type `validatePathTypesIn`
+    /// reports.
+    fn holdsUnresolvedPath(self: *TypeChecker, node: NodeId) bool {
+        if (node.isNone()) return false;
+        const data = self.arena.typeNodeData(node);
+        return switch (self.arena.typeNodeKind(node)) {
+            .path => self.resolvePathTypeNode(node) != .resolved,
+            .optional => self.holdsUnresolvedPath(@bitCast(data)),
+            .array, .slice => self.holdsUnresolvedPath(self.arena.array_types.items[data].elem),
+            .set_type => self.holdsUnresolvedPath(self.arena.set_types.items[data].elem),
+            .map_type => self.holdsUnresolvedPath(self.arena.map_types.items[data].key) or self.holdsUnresolvedPath(self.arena.map_types.items[data].value),
+            else => false,
+        };
+    }
+
+    /// E0601 on each map type of the type nodes `from..to` whose key, and each
+    /// set type whose element, is no `Hash + Eq` type. A field's own type is
+    /// left to its declaration's gate, and a key a type parameter can name is
+    /// not checked.
+    fn checkCollectionKeysIn(self: *TypeChecker, from: u32, to: u32) TypeError!void {
+        var fields = try std.DynamicBitSetUnmanaged.initEmpty(self.gpa, self.arena.type_nodes.len);
+        defer fields.deinit(self.gpa);
+        for (self.arena.fields.items) |f| {
+            if (!f.type_node.isNone() and f.type_node.category == .type_node) fields.set(f.type_node.index);
+        }
+        var i = from;
+        while (i < to) : (i += 1) {
+            if (fields.isSet(i)) continue;
+            const node: NodeId = .{ .category = .type_node, .index = @intCast(i) };
+            const data = self.arena.typeNodeData(node);
+            switch (self.arena.typeNodeKind(node)) {
+                .map_type => {
+                    const key = self.arena.map_types.items[data].key;
+                    if (self.readsGenericScope(key)) continue;
+                    try self.checkHashBound(self.namedTypeToResolved(key), "map key type", "K: Hash", self.arena.typeNodeSpan(key));
+                },
+                .set_type => {
+                    const elem = self.arena.set_types.items[data].elem;
+                    if (self.readsGenericScope(elem)) continue;
+                    try self.checkHashBound(self.namedTypeToResolved(elem), "set element type", "T: Hash", self.arena.typeNodeSpan(elem));
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// Whether the type node `node` names a type parameter of this file.
+    fn readsGenericScope(self: *TypeChecker, node: NodeId) bool {
+        var names: [8]StringId = undefined;
+        var held: usize = 0;
+        return !self.scopeNamesIn(node, &names, &held) or held != 0;
+    }
+
+    /// How a file names its components and what its imports bind, as `check`
+    /// resolves them, for the cook.
+    pub const CookScope = struct {
+        /// Each name the file uses for a component → that component.
+        components: std.AutoHashMapUnmanaged(StringId, ComponentRef) = .empty,
+        /// Each name an import binds → the export it binds, a declaration of the
+        /// file shadowing the import of its name.
+        imports: std.AutoHashMapUnmanaged(StringId, ExportEntry) = .empty,
+
+        pub fn deinit(self: *CookScope, gpa: std.mem.Allocator) void {
+            self.components.deinit(gpa);
+            self.imports.deinit(gpa);
+        }
+    };
+
+    /// What E0858 refuses in `arena`, reported into `diagnostics`.
+    pub fn checkTypedExtensionOf(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+        var tc: TypeChecker = .{
+            .gpa = gpa,
+            .arena = arena,
+            .diagnostics = diagnostics,
+            .project = null,
+        };
+        defer tc.deinit();
+        try tc.checkTypedExtension();
+    }
+
+    /// `arena`'s scope resolved against `project`; what `check` refuses on an
+    /// `import` is reported into `diagnostics`.
+    pub fn cookScope(gpa: std.mem.Allocator, arena: *AstArena, project: *const ProjectContext, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !CookScope {
+        try arena.ensureErrorBuiltins(gpa);
+        var scratch: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (scratch.items) |*d| d.deinit(gpa);
+            scratch.deinit(gpa);
+        }
+        var tc: TypeChecker = .{
+            .gpa = gpa,
+            .arena = arena,
+            .diagnostics = &scratch,
+            .project = project,
+        };
+        defer tc.deinit();
+        try tc.collectDeclarations();
+        tc.diagnostics = diagnostics;
+        try tc.bindImports();
+        var scope: CookScope = .{};
+        errdefer scope.deinit(gpa);
+        var locals = tc.symbols.keyIterator();
+        while (locals.next()) |name| {
+            if (tc.componentNamed(name.*)) |c| try scope.components.put(gpa, name.*, c);
+        }
+        var bound = tc.imported_symbols.keyIterator();
+        while (bound.next()) |name| {
+            const entry = tc.importedBinding(name.*) orelse continue;
+            try scope.imports.put(gpa, name.*, entry);
+            if (tc.componentNamed(name.*)) |c| try scope.components.put(gpa, name.*, c);
+        }
+        return scope;
+    }
+
+    /// The prefab half of `check`, for the cook: the declarations are collected
+    /// by `check`'s own passes, and only `requires` names and hook bodies are
+    /// reported into `diagnostics`. A cook source reaches its base prefab through
+    /// a resolver, so the rest of `check` (E1791 first) does not apply to it.
+    pub fn checkPrefabHooks(gpa: std.mem.Allocator, arena: *AstArena, project: ?*const ProjectContext, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+        try arena.ensureErrorBuiltins(gpa);
+        var scratch: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (scratch.items) |*d| d.deinit(gpa);
+            scratch.deinit(gpa);
+        }
+        var tc: TypeChecker = .{
+            .gpa = gpa,
+            .arena = arena,
+            .diagnostics = &scratch,
+            .project = project,
+        };
+        defer tc.deinit();
+        try tc.runDeclarationPasses();
+        tc.diagnostics = diagnostics;
+        tc.range_reported.clearRetainingCapacity();
+        tc.unresolved_shorthands.clearRetainingCapacity();
+        const kinds = arena.items.items(.kind);
+        const datas = arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < arena.items.len) : (i += 1) {
+            if (kinds[i] != .prefab_decl) continue;
+            const decl = arena.prefab_decls.items[datas[i]];
+            if (decl.has_on_attach) try tc.checkLiteralRangesIn(tc.bodyBytes(decl.on_attach_start, decl.on_attach_len));
+            if (decl.has_on_detach) try tc.checkLiteralRangesIn(tc.bodyBytes(decl.on_detach_start, decl.on_detach_len));
+            try tc.checkPrefabRequiresAndHooks(decl);
+        }
+        try tc.reportUnresolvedShorthands();
+    }
+
+    /// A statement run already in `arena`: `extra[start .. start + len]`, and the
+    /// expression and type-node indices its parse appended.
+    pub const HookRun = struct { start: u32, len: u32, expr_from: u32, expr_to: u32, type_from: u32, type_to: u32 };
+
+    /// A hook run checked as a prefab hook is, against `arena`'s declarations,
+    /// its scope the components `scope` names. Only the run's diagnostics reach
+    /// `diagnostics`.
+    pub fn checkHookRun(gpa: std.mem.Allocator, arena: *AstArena, run: HookRun, scope: []const []const u8, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+        try arena.ensureErrorBuiltins(gpa);
+        var scratch: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (scratch.items) |*d| d.deinit(gpa);
+            scratch.deinit(gpa);
+        }
+        var tc: TypeChecker = .{
+            .gpa = gpa,
+            .arena = arena,
+            .diagnostics = &scratch,
+            .project = null,
+        };
+        defer tc.deinit();
+        try tc.runDeclarationPasses();
+        tc.diagnostics = diagnostics;
+        tc.range_reported.clearRetainingCapacity();
+        tc.unresolved_shorthands.clearRetainingCapacity();
+        try tc.checkLiteralRangesIn(.{ .indices = .{ .expr_from = run.expr_from, .expr_to = run.expr_to, .type_from = run.type_from, .type_to = run.type_to } });
+        try tc.checkCollectionKeysIn(run.type_from, run.type_to);
+        try tc.validatePathTypesIn(run.type_from, run.type_to);
+        var names: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer names.deinit(gpa);
+        for (scope) |name| if (arena.strings.find(name)) |id| try names.put(gpa, id, {});
+        try tc.checkHookBody(&names, run.start, run.len);
+        try tc.reportUnresolvedShorthands();
+    }
+
+    /// The source bytes a statement run spans.
+    fn bodyBytes(self: *TypeChecker, start: u32, len: u32) LiteralWindow {
+        if (len == 0) return .{ .bytes = .{ .from = 0, .to = 0 } };
+        const first = self.arena.stmtSpan(@bitCast(self.arena.extra.items[start]));
+        const last = self.arena.stmtSpan(@bitCast(self.arena.extra.items[start + len - 1]));
+        return .{ .bytes = .{ .from = first.byte_start, .to = last.byte_end } };
     }
 
     /// `E1901 ConstructNotAllowedInDeclarationFile` (`etch-grammar.md`
@@ -902,6 +1440,62 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// E0858 (`etch-grammar.md` §21.2, `etch-style-guide.md` §8): a typed file
+    /// holds exactly one construct of its type and imports, a `scene` or
+    /// `prefab` lives only in its own typed file, and a world manifest's scene
+    /// holds no entity.
+    fn checkTypedExtension(self: *TypeChecker) !void {
+        const ext = self.arena.typed_extension;
+        if (ext == .unknown) return;
+        // A data layer and a world manifest each hold a scene (§21.1).
+        const main: ?ast_mod.ItemKind = switch (ext) {
+            .scene, .layer, .manifest => .scene_decl,
+            .prefab => .prefab_decl,
+            .plain, .unknown => null,
+        };
+        const main_name: []const u8 = if (ext == .prefab) "prefab" else "scene";
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var mains: u32 = 0;
+        for (kinds, 0..) |k, i| {
+            if (i >= self.arena.builtin_items_from) break;
+            const item_id = NodeId{ .category = .item, .index = @intCast(i) };
+            const span = self.arena.itemSpan(item_id);
+            if (ext == .plain) {
+                const own: ?[]const u8 = switch (k) {
+                    .scene_decl => "scene",
+                    .prefab_decl => "prefab",
+                    else => null,
+                };
+                if (own) |o| try self.emit(.typed_extension_mismatch, .error_, span, "a {s} belongs in its own .{s}.etch file", .{ o, o });
+                continue;
+            }
+            if (k == .import_decl) continue;
+            if (main != null and k == main.?) {
+                mains += 1;
+                if (mains > 1) try self.emit(.typed_extension_mismatch, .error_, span, "a .{s}.etch file holds exactly one {s}", .{ @tagName(ext), main_name });
+                if (ext == .manifest) try self.refuseManifestPopulation(self.arena.scene_decls.items[datas[i]]);
+                continue;
+            }
+            try self.emit(.typed_extension_mismatch, .error_, span, "'{s}' is not allowed in a .{s}.etch file, which holds one {s} and its imports", .{ @tagName(k), @tagName(ext), main_name });
+        }
+        if (ext != .plain and mains == 0)
+            try self.emit(.typed_extension_mismatch, .error_, .{ .byte_start = 0, .byte_end = 0 }, "a .{s}.etch file holds exactly one {s}", .{ @tagName(ext), main_name });
+    }
+
+    /// E0858 for each entity or instance of a world manifest's scene.
+    fn refuseManifestPopulation(self: *TypeChecker, decl: ast_mod.SceneDecl) !void {
+        var c: u32 = 0;
+        while (c < decl.children_len) : (c += 1) {
+            const child = self.arena.scene_children.items[decl.children_start + c];
+            const name: StringId, const span: SourceSpan = switch (child.kind) {
+                .entity => .{ self.arena.scene_entities.items[child.index].name, self.arena.scene_entities.items[child.index].span },
+                .instance => .{ self.arena.scene_instances.items[child.index].instance_name, self.arena.scene_instances.items[child.index].span },
+            };
+            try self.emit(.typed_extension_mismatch, .error_, span, "{s} '{s}' is not allowed in a .manifest.etch file, whose scene holds resources and no entity", .{ @tagName(child.kind), self.arena.strings.slice(name) });
+        }
+    }
+
     /// Index every `service` this check can see. With a
     /// `ProjectContext` the index spans the whole project — which is the real
     /// case, since a service is declared in a `.d.etch` and called from a
@@ -939,7 +1533,7 @@ pub const TypeChecker = struct {
                     try self.emit(.duplicate_symbol, .error_, span, "duplicate declared event '{s}'", .{name});
                     continue;
                 }
-                gop.value_ptr.* = .{ .arena = a, .decl = decl };
+                gop.value_ptr.* = .{ .arena = a, .item = .{ .category = .item, .index = @intCast(i) }, .decl = decl };
             }
         }
     }
@@ -968,10 +1562,9 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Resolve `svc.method(args)` against a declared `service`.
-    /// Names and arity only — this gate owns the RESOLUTION; the runtime
-    /// dispatch lives in the interpreter, and the argument-type confrontation needs the foreign
-    /// arena's type nodes, bounded below.
+    /// Resolve `svc.method(args)` against a declared `service`: the method by
+    /// name, then the arguments' arity, labels and types against its parameters,
+    /// which live in the declaring arena.
     fn checkServiceCall(
         self: *TypeChecker,
         id: NodeId,
@@ -993,12 +1586,35 @@ pub const TypeChecker = struct {
             }
         }
 
-        // Arguments are synthesised whatever the outcome, so an error inside an
-        // argument is reported even when the method name is wrong — the same
-        // discipline `checkMethodArgs` follows.
+        // A parameter name the caller never wrote is interned nowhere in its
+        // pool, and `0` is a name no label carries.
+        var pnames: std.ArrayListUnmanaged(StringId) = .empty;
+        defer pnames.deinit(self.gpa);
+        // Arguments are typed whatever the outcome, so an error inside an
+        // argument is reported even when the method name is wrong; each against
+        // the parameter it binds when the arity matches.
+        var expected: std.ArrayListUnmanaged(ResolvedType) = .empty;
+        defer expected.deinit(self.gpa);
+        try expected.appendNTimes(self.gpa, ResolvedType.unknown, mc.args_len);
+        if (found) |m| {
+            var pi: u32 = 0;
+            while (pi < m.params_len) : (pi += 1) {
+                const p = svc.arena.fn_params.items[m.params_start + pi];
+                try pnames.append(self.gpa, self.arena.strings.find(svc.arena.strings.slice(p.name)) orelse 0);
+            }
+            if (m.params_len == mc.args_len) {
+                pi = 0;
+                while (pi < m.params_len) : (pi += 1) {
+                    const idx = self.arena.callArgIndexForParam(mc.args_start, mc.args_len, mc.names_start, pi, pnames.items[pi]) orelse continue;
+                    expected.items[idx] = declaredSlot(self.foreignType(svc.arena, svc.arena.fn_params.items[m.params_start + pi].type_node));
+                }
+            }
+        }
+        var arg_types: std.ArrayListUnmanaged(ResolvedType) = .empty;
+        defer arg_types.deinit(self.gpa);
         var ai: u32 = 0;
         while (ai < mc.args_len) : (ai += 1) {
-            _ = try self.synthExprE(@bitCast(self.arena.extra.items[mc.args_start + ai]), ctx_opt);
+            try arg_types.append(self.gpa, try self.checkExpr(@bitCast(self.arena.extra.items[mc.args_start + ai]), expected.items[ai], ctx_opt));
         }
 
         const method = found orelse {
@@ -1027,6 +1643,18 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
+        if (try self.checkCallBinding(id, mc.args_start, mc.args_len, mc.names_start, pnames.items, "service method", mc.method_name)) {
+            var pi: u32 = 0;
+            while (pi < method.params_len) : (pi += 1) {
+                const idx = self.arena.callArgIndexForParam(mc.args_start, mc.args_len, mc.names_start, pi, pnames.items[pi]) orelse continue;
+                const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start + idx]);
+                const ptype = self.foreignType(svc.arena, svc.arena.fn_params.items[method.params_start + pi].type_node);
+                if (!try self.valueFits(ptype, arg, arg_types.items[idx])) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of service method '{s}.{s}'", .{ svc_slice, method_slice });
+                }
+            }
+        }
+
         return self.foreignReturnType(svc.arena, method);
     }
 
@@ -1046,40 +1674,108 @@ pub const TypeChecker = struct {
         );
     }
 
-    /// The return type of a foreign-arena signature, resolved BY BYTES.
-    ///
-    /// Bounded to builtins on purpose, and the bound is inherited rather than
-    /// invented: the same question is settled for cross-arena field types
-    /// and recorded "builtin-typed-only; named foreign field types are a
-    /// documented residual". Resolving a named foreign type here would mean
-    /// re-keying `symbols` and `generic_scope`, which are `StringId` maps over
-    /// THIS arena's pool. A named return type therefore types as `unknown`,
-    /// which is permissive and never wrong — it is the same value every
-    /// unresolved expression carries.
-    /// A foreign arena's declared field type, resolved BY BYTES. Same bound and
-    /// same reason as `foreignReturnType`.
-    fn foreignFieldType(self: *TypeChecker, a: *const AstArena, type_node: NodeId) ResolvedType {
-        _ = self;
-        if (a.typeNodeKind(type_node) != .named) return ResolvedType.unknown;
-        const named = a.named_types.items[a.typeNodeData(type_node)];
-        const tname = a.strings.slice(a.resolveTypeAliasName(named.name));
-        if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
-        if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
-        return ResolvedType.unknown;
+    /// A type written in arena `a`: the declaration it names there, its own or
+    /// one it imports, or the builtin of its name. An `Error` or an `ErrorCode`
+    /// is this file's builtin, each file carrying its own.
+    fn foreignType(self: *TypeChecker, a: *const AstArena, type_node: NodeId) ResolvedType {
+        return self.foreignTypeAt(a, type_node, 0);
+    }
+
+    /// Aliases a foreign type goes through before the chain is taken for a
+    /// cycle, which the alias's own file reports.
+    const max_alias_depth = 64;
+
+    fn foreignTypeAt(self: *TypeChecker, a: *const AstArena, type_node: NodeId, depth: u32) ResolvedType {
+        if (a == self.arena) return self.namedTypeToResolved(type_node);
+        switch (a.typeNodeKind(type_node)) {
+            .named, .generic => {
+                const raw = if (a.typeNodeKind(type_node) == .named) a.namedTypeName(type_node).? else a.generic_type_nodes.items[a.typeNodeData(type_node)].name;
+                const resolved = a.resolveTypeAliasName(raw);
+                const bytes = a.strings.slice(resolved);
+                if (std.mem.eql(u8, bytes, "string")) return .{ .builtin = .string_ };
+                if (BuiltinType.fromName(bytes)) |bt| return .{ .builtin = bt };
+                if (resolved == a.error_type_name and resolved != 0) return self.nominalNamed(self.arena.error_type_name) orelse .unknown;
+                if (resolved == a.errorcode_type_name and resolved != 0) return self.nominalNamed(self.arena.errorcode_type_name) orelse .unknown;
+                const ref = self.declNamedIn(a, resolved) orelse return .unknown;
+                return self.declaredType(ref, depth);
+            },
+            .path => {
+                const entry = self.qualifiedExportIn(a, a.path_types.items[a.typeNodeData(type_node)]) orelse return .unknown;
+                return self.declaredType(exportRef(self.project.?, entry), depth);
+            },
+            .array => {
+                const at = a.array_types.items[a.typeNodeData(type_node)];
+                const elem = self.foreignTypeAt(a, at.elem, depth);
+                if (elem == .unknown) return .unknown;
+                const len = constArrayLenIn(a, at.size) orelse return .unknown;
+                return .{ .array_fixed = .{ .elem = self.internedPayload(a, type_node, 0, elem), .len = len } };
+            },
+            .slice => {
+                const elem = self.foreignTypeAt(a, a.array_types.items[a.typeNodeData(type_node)].elem, depth);
+                if (elem == .unknown) return .unknown;
+                return .{ .array_dyn = self.internedPayload(a, type_node, 0, elem) };
+            },
+            .set_type => {
+                const elem = self.foreignTypeAt(a, a.set_types.items[a.typeNodeData(type_node)].elem, depth);
+                if (elem == .unknown) return .unknown;
+                return .{ .set_t = self.internedPayload(a, type_node, 0, elem) };
+            },
+            .map_type => {
+                const mt = a.map_types.items[a.typeNodeData(type_node)];
+                const k = self.foreignTypeAt(a, mt.key, depth);
+                const v = self.foreignTypeAt(a, mt.value, depth);
+                if (k == .unknown or v == .unknown) return .unknown;
+                return .{ .map_t = .{ .key = self.internedPayload(a, type_node, 0, k), .value = self.internedPayload(a, type_node, 1, v) } };
+            },
+            .optional => return self.internedOptional(a, type_node, self.foreignTypeAt(a, @bitCast(a.typeNodeData(type_node)), depth)),
+            else => return .unknown,
+        }
+    }
+
+    /// The type declaration `ref` denotes, through a `type` alias read in the
+    /// arena declaring it.
+    fn declaredType(self: *TypeChecker, ref: DeclRef, depth: u32) ResolvedType {
+        if (nominalOf(ref)) |t| return t;
+        if (ref.arena.itemKind(ref.item) != .type_alias or depth == max_alias_depth) return .unknown;
+        return self.foreignTypeAt(ref.arena, ref.arena.type_alias_decls.items[ref.arena.itemData(ref.item)].target, depth + 1);
+    }
+
+    fn exportRef(project: *const ProjectContext, entry: ExportEntry) DeclRef {
+        return .{ .arena = &project.arenas[entry.arena_index], .item = entry.item_id };
+    }
+
+    /// The public export `path`, written in arena `a`, names through a
+    /// whole-module import of `a`.
+    fn qualifiedExportIn(self: *TypeChecker, a: *const AstArena, path: ast_mod.PathTypeNode) ?ExportEntry {
+        const project = self.project orelse return null;
+        const alias = a.strings.slice(path.alias);
+        for (a.items.items(.kind), a.items.items(.data)) |kind, data| {
+            if (kind != .import_decl) continue;
+            const decl = a.import_decls.items[data];
+            if (decl.items_len != 0) continue;
+            const alias_id = if (decl.module_alias != 0) decl.module_alias else a.import_path_segs.items[decl.path_start + decl.path_len - 1];
+            if (!std.mem.eql(u8, a.strings.slice(alias_id), alias)) continue;
+            const target = moduleOf(project, a, decl) orelse return null;
+            const entry = project.exports[target].get(a.strings.slice(path.member)) orelse return null;
+            return if (entry.visibility == .private) null else entry;
+        }
+        return null;
+    }
+
+    /// The export of arena `a` named `bytes`.
+    fn exportIn(self: *TypeChecker, a: *const AstArena, bytes: []const u8) ?ExportEntry {
+        const project = self.project orelse return null;
+        for (project.arenas, 0..) |*arena, i| {
+            if (arena == a) return project.exports[i].get(bytes);
+        }
+        return null;
     }
 
     fn foreignReturnType(self: *TypeChecker, a: *const AstArena, method: ast_mod.FnDecl) ResolvedType {
-        _ = self;
-        // A void signature (`fn stop(h: AudioHandle)`) types as `unknown` —
-        // "`unknown` ≈ unit, the house convention" (this file, `synthCall`).
-        // `ResolvedType` has no unit variant to return instead.
+        // A void signature (`fn stop(h: AudioHandle)`) types as `unknown`, as
+        // a call of any fn with no `-> type` does.
         if (method.return_type.isNone()) return ResolvedType.unknown;
-        if (a.typeNodeKind(method.return_type) != .named) return ResolvedType.unknown;
-        const named = a.named_types.items[a.typeNodeData(method.return_type)];
-        const tname = a.strings.slice(a.resolveTypeAliasName(named.name));
-        if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
-        if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
-        return ResolvedType.unknown;
+        return self.foreignType(a, method.return_type);
     }
 
     /// Validate every `type Name = Type` alias once all symbols are known: the alias
@@ -1092,24 +1788,17 @@ pub const TypeChecker = struct {
         while (i < self.arena.items.len) : (i += 1) {
             if (kinds[i] != .type_alias) continue;
             const decl = self.arena.type_alias_decls.items[datas[i]];
-            // a qualified `.path` target (`type HA = m.Member`) is
-            // the use site for the whole-module import: unlike selective import
-            // (diagnosed at the `import { … }` binding), a whole-module import
-            // names no members, so E0104 (absent) / E0107 (private) fire HERE.
-            // A resolved component/resource is a valid alias target (selective
-            // parity); struct/enum/non-type resolve to E0102 exactly as a
-            // selective `type HB = ImportedStruct` does today.
+            // A qualified target that resolves must be a component or a
+            // resource, as a named one must; one naming no type is reported by
+            // `validatePathTypesIn`.
             if (self.arena.typeNodeKind(decl.target) == .path) {
-                const path = self.arena.path_types.items[self.arena.typeNodeData(decl.target)];
                 const tspan = self.arena.typeNodeSpan(decl.target);
                 switch (self.resolvePathTypeNode(decl.target)) {
                     .resolved => |t| switch (t) {
                         .component, .resource => {},
                         else => try self.emit(.undefined_symbol, .error_, tspan, "type alias '{s}' does not resolve to a known type", .{self.arena.strings.slice(decl.name)}),
                     },
-                    .member_absent => try self.emit(.unknown_export, .error_, tspan, "'{s}' is not exported by the aliased module", .{self.arena.strings.slice(path.member)}),
-                    .member_private => try self.emit(.import_private_item, .error_, tspan, "'{s}' is private to the aliased module", .{self.arena.strings.slice(path.member)}),
-                    .alias_unresolved => try self.emit(.undefined_symbol, .error_, tspan, "'{s}' is not a module alias in scope", .{self.arena.strings.slice(path.alias)}),
+                    else => {},
                 }
                 continue;
             }
@@ -1122,6 +1811,10 @@ pub const TypeChecker = struct {
             // the alias target may be a selectively-imported type.
             if (self.imported_symbols.get(ultimate)) |entry| {
                 if (entry.kind == .component or entry.kind == .resource) continue;
+                if (entry.kind == .type_alias) switch (self.importedAliasTarget(entry)) {
+                    .builtin, .component, .resource => continue,
+                    else => {},
+                };
             }
             try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.target), "type alias '{s}' does not resolve to a known type", .{self.arena.strings.slice(decl.name)});
         }
@@ -1540,6 +2233,7 @@ pub const TypeChecker = struct {
     /// structural checks; the Ember-semantic ones (E1602/E1603/E1605/E1606/
     /// W1600/W1601) are DEFERRED-no-variant (catalogue not attached).
     fn validateEffect(self: *TypeChecker, decl: ast_mod.EffectDecl) !void {
+        try self.checkParamDefaults(decl.params_start, decl.params_len);
         // E1601 — emitter names unique within the effect; the set also backs E1604.
         var emitters: std.AutoHashMapUnmanaged(StringId, void) = .empty;
         defer emitters.deinit(self.gpa);
@@ -1562,6 +2256,17 @@ pub const TypeChecker = struct {
             if (!emitters.contains(handler.emitter)) {
                 try self.emit(.emitter_ref_not_found, .error_, handler.span, "event handler references '{s}', which is not an emitter of this effect", .{self.arena.strings.slice(handler.emitter)});
             }
+        }
+    }
+
+    fn validateAudioGraphDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .audio_graph_decl) continue;
+            const decl = self.arena.audio_graph_decls.items[datas[i]];
+            try self.checkParamDefaults(decl.params_start, decl.params_len);
         }
     }
 
@@ -1672,12 +2377,12 @@ pub const TypeChecker = struct {
             const prop = self.arena.struct_lit_fields.items[decl.props_start + p];
             const pname = self.arena.strings.slice(prop.name);
             if (std.mem.eql(u8, pname, "duration")) {
-                const v = numericLitValue(self.arena, prop.value);
+                const v = try numericLitValue(self.gpa, self.arena, prop.value);
                 if (v == null or v.? <= 0) {
                     try self.emit(.sequence_duration_invalid, .error_, decl.name_span, "sequence duration must be a positive number", .{});
                 } else duration_secs = v;
             } else if (std.mem.eql(u8, pname, "fps")) {
-                const v = numericLitValue(self.arena, prop.value);
+                const v = try numericLitValue(self.gpa, self.arena, prop.value);
                 if (v == null or v.? <= 0) {
                     try self.emit(.fps_invalid, .error_, decl.name_span, "sequence fps must be a positive number", .{});
                 }
@@ -1712,7 +2417,7 @@ pub const TypeChecker = struct {
             var k: u32 = 0;
             while (k < track.keyframes_len) : (k += 1) {
                 const kf = self.arena.sequence_keyframes.items[track.keyframes_start + k];
-                if (durationLitSeconds(self.arena, kf.time)) |secs| {
+                if (try durationLitSeconds(self.gpa, self.arena, kf.time)) |secs| {
                     if (duration_secs) |d| {
                         if (secs > d) try self.emit(.keyframe_out_of_range, .error_, kf.span, "keyframe time exceeds the sequence duration", .{});
                     }
@@ -1723,8 +2428,7 @@ pub const TypeChecker = struct {
                 }
                 if (kf.kind == .emit) {
                     const em = self.arena.emit_stmts.items[self.arena.stmtData(kf.value)];
-                    const sym = self.symbols.get(em.event_type);
-                    if (sym == null or sym.?.kind != .event_) {
+                    if (self.eventNamed(em.event_type) == null) {
                         try self.emit(.event_track_event_unknown, .error_, kf.span, "keyframe emits '{s}', which is not a declared event", .{self.arena.strings.slice(em.event_type)});
                     }
                 }
@@ -1736,8 +2440,7 @@ pub const TypeChecker = struct {
     /// the common set inlined, the open `…` treated as this fixed list). All
     /// resolve to a `.named` type node.
     fn isKnownAnimParamType(self: *TypeChecker, type_node: NodeId) bool {
-        if (self.arena.typeNodeKind(type_node) != .named) return false;
-        const name = self.arena.strings.slice(self.arena.named_types.items[self.arena.typeNodeData(type_node)].name);
+        const name = self.arena.strings.slice(self.arena.namedTypeName(type_node) orelse return false);
         const cat = [_][]const u8{ "bool", "float", "int", "i32", "u32", "f32", "f64", "Vec2", "Vec3", "Vec4", "Trajectory" };
         for (cat) |c| {
             if (std.mem.eql(u8, name, c)) return true;
@@ -1769,6 +2472,7 @@ pub const TypeChecker = struct {
     /// DEFERRED-no-variant: E1684/E1685/E1686/E1687 (clip/db/clip/bone assets),
     /// E1693 LayerMaskInvalid (Kinesis bone mask).
     fn validateAnimGraph(self: *TypeChecker, decl: ast_mod.AnimGraphDecl) !void {
+        try self.checkParamDefaults(decl.params_start, decl.params_len);
         // E1695 + a params scope for the transition when-clause typing (E1690).
         var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
         defer ctx.deinit(self.gpa);
@@ -1780,7 +2484,7 @@ pub const TypeChecker = struct {
             }
             // Populate the scope (unknown-resolved params stay `.unknown`, which
             // the §6 machinery tolerates — no spurious undefined-symbol error).
-            try ctx.locals.put(self.gpa, f.name, .{ .type_ = self.namedTypeToResolved(f.type_node), .is_mut = false });
+            _ = try ctx.bind(self.gpa, f.name, .{ .type_ = self.namedTypeToResolved(f.type_node), .is_mut = false });
         }
 
         // E1680 — at least one state.
@@ -1862,12 +2566,13 @@ pub const TypeChecker = struct {
     /// unimplemented). The stage bodies are walked in SHADER MODE: a STRUCTURAL pass
     /// (§15.3) that flags the §15.2 GPU-incompatible CONSTRUCTS with the single
     /// representative E0400 ShaderModeViolation — it does NOT resolve symbols
-    /// (shader bodies reference undeclared GPU builtins; a synthExpr-based check
+    /// (shader bodies reference undeclared GPU builtins; a synthExprE-based check
     /// would false-positive E0102). E0420 ShaderRecursion (call-graph DFS) +
     /// E0421 NonShaderFnCalledFromShader (GPU-builtin table) are RESERVED — their
     /// emission is deferred. SPIR-V/MSL/DXIL emission is out of scope; eval of a
     /// shader body is fail-loud both backends (the descriptor is the Level-B output).
     fn validateShader(self: *TypeChecker, decl: ast_mod.ShaderDecl) !void {
+        try self.checkShaderParamRanges(decl.params_start, decl.params_len);
         if (decl.has_vertex) try self.checkShaderBody(decl.vertex.body_start, decl.vertex.body_len);
         try self.checkShaderBody(decl.fragment.body_start, decl.fragment.body_len);
     }
@@ -1948,10 +2653,10 @@ pub const TypeChecker = struct {
     /// Check one component/resource-instance field (`name: value`) against the
     /// declared field run (over `arena.fields`): `code_unknown` if the field is
     /// absent; `code_type` (when non-null) if a builtin/struct/enum value type
-    /// mismatches. Mirrors `validateDataEntryField` — synthExprE with null ctx;
-    /// check-mode for `.variant` shorthand + anonymous `.{ }` values. Permissive
+    /// mismatches. Checked against the declared field type with no rule
+    /// context. Permissive
     /// on non-builtin declared types (no false positives on Vec3-from-array).
-    fn checkInstanceField(self: *TypeChecker, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: ?DiagnosticCode) !void {
+    fn checkInstanceField(self: *TypeChecker, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: DiagnosticCode) !void {
         if (field.name == 0) return; // spread — not produced in component/resource bodies
         var declared: ?ResolvedType = null;
         var f: u32 = 0;
@@ -1966,84 +2671,328 @@ pub const TypeChecker = struct {
             try self.emit(code_unknown, .error_, self.arena.exprSpan(field.value), "'{s}' has no field '{s}'", .{ owner, self.arena.strings.slice(field.name) });
             return;
         };
-        const tcode = code_type orelse return; // field-name-only check (resources)
-        const actual = blk: {
-            if (d == .enum_t and self.arena.exprKind(field.value) == .tag_path) {
-                break :blk try self.checkEnumShorthand(field.value, d.enum_t);
-            }
-            if (d == .struct_t and self.arena.exprKind(field.value) == .struct_lit) {
-                const inner_data = self.arena.exprData(field.value);
-                if (self.arena.struct_lits.items[inner_data].type_name == 0) {
-                    break :blk try self.checkStructLitAgainst(field.value, inner_data, d.struct_t, null);
-                }
-            }
-            break :blk try self.synthExprE(field.value, null);
-        };
-        const mismatch = switch (d) {
-            .builtin => |db| actual == .builtin and !self.literalTypeFits(db, field.value, actual.builtin),
-            .struct_t => |dn| actual == .struct_t and actual.struct_t != dn,
-            .enum_t => |dn| switch (actual) {
-                .enum_t => |an| an != dn,
-                .builtin => true,
-                else => false,
-            },
-            else => false,
-        };
+        const actual = try self.checkExpr(field.value, declaredSlot(d), null);
+        const mismatch = !try self.valueFits(d, field.value, actual);
         if (mismatch) {
-            try self.emit(tcode, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{self.arena.strings.slice(field.name)});
+            try self.emit(code_type, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{self.arena.strings.slice(field.name)});
         }
     }
 
     /// Resolve a `component_instance` against the component RTTI: `code_type`
-    /// if the type is not a declared component, then per-field checks.
-    ///
-    /// The component type may be a SELECTIVELY-IMPORTED symbol
-    /// whose declaration lives in another file's arena. When it is, the decl is
-    /// fetched from `project.arenas[entry.arena_index]` and the fields are checked
-    /// CROSS-ARENA (field names compared by bytes — StringIds are per-arena). This
-    /// is the E1793 unblock: a `.prefab.etch` importing its components validates
-    /// clean instead of tripping `PrefabComponentTypeUnknown`.
+    /// if the type is not a declared component, then per-field checks. An
+    /// imported component's fields are read from the arena that declares it.
     fn checkComponentInstance(self: *TypeChecker, ci: ast_mod.ComponentInstance, code_type: DiagnosticCode, code_field: DiagnosticCode, code_field_type: DiagnosticCode) !void {
         const owner = self.arena.strings.slice(ci.type_name);
-        // 1. Local component (the single-file path).
-        if (self.symbols.get(ci.type_name)) |sym| {
-            if (sym.kind == .component) {
-                const decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
-                var f: u32 = 0;
-                while (f < ci.fields_len) : (f += 1) {
-                    try self.checkInstanceField(owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
-                }
-                return;
-            }
-            // A local symbol that is NOT a component → fall through to code_type.
-        } else if (self.imported_symbols.get(ci.type_name)) |entry| {
-            // 2. Imported component (cross-arena).
-            if (entry.kind == .component) {
-                const decl_arena = &self.project.?.arenas[entry.arena_index];
-                const decl = decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)];
-                var f: u32 = 0;
-                while (f < ci.fields_len) : (f += 1) {
-                    try self.checkInstanceFieldForeign(decl_arena, owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
-                }
-                return;
-            }
+        const component = self.componentNamed(ci.type_name) orelse {
+            try self.emit(code_type, .error_, ci.span, "'{s}' is not a declared component", .{owner});
+            return;
+        };
+        var f: u32 = 0;
+        while (f < ci.fields_len) : (f += 1) {
+            try self.checkComponentField(component, owner, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
         }
-        try self.emit(code_type, .error_, ci.span, "'{s}' is not a declared component", .{owner});
     }
 
-    /// Cross-arena field check for an imported component instance. The
-    /// instance field (`field`) lives in `self.arena`; the declared
-    /// fields live in `decl_arena`. Field names are matched by BYTES (StringIds
-    /// are per-arena). `code_unknown` (E1794) is full; the field-TYPE check
-    /// (`code_type`, E1795) resolves the foreign declared type via
-    /// `foreignBuiltinFieldType`. That covers EVERY valid component field type:
-    /// `validateFieldsInDecl(.component_like)` admits only builtin-POD field types
-    /// (named struct/enum/string are rejected on components), so a valid imported
-    /// component's fields are all builtins. The `orelse return` (named foreign
-    /// type) is therefore unreachable for a valid component — forward-compat
-    /// headroom if components ever gain named-typed fields, not a skipped check.
+    /// A component declaration and the arena it lives in.
+    pub const ComponentRef = struct { arena: *const AstArena, decl: ast_mod.ComponentDecl };
+
+    /// The export an import binds `name` to, unless a declaration of the file
+    /// shadows it.
+    fn importedBinding(self: *TypeChecker, name: StringId) ?ExportEntry {
+        if (self.symbols.contains(name)) return null;
+        return self.imported_symbols.get(name);
+    }
+
+    /// The declaration `name` names in this file.
+    fn declNamed(self: *TypeChecker, name: StringId) ?DeclRef {
+        if (self.importedBinding(name)) |entry| return .{ .arena = &self.project.?.arenas[entry.arena_index], .item = entry.item_id };
+        const sym = self.symbols.get(name) orelse return null;
+        return .{ .arena = self.arena, .item = sym.item_id };
+    }
+
+    /// The declaration `name`, written in arena `a`, names there: one of its
+    /// own, else one it imports by name.
+    fn declNamedIn(self: *TypeChecker, a: *const AstArena, name: StringId) ?DeclRef {
+        if (a == self.arena) return self.declNamed(name);
+        const project = self.project orelse return null;
+        const bytes = a.strings.slice(name);
+        const entry = self.exportIn(a, bytes) orelse importedIn(project, a, bytes) orelse return null;
+        return .{ .arena = &project.arenas[entry.arena_index], .item = entry.item_id };
+    }
+
+    /// The type declaration `ref` names, null when it declares none.
+    fn nominalOf(ref: DeclRef) ?ResolvedType {
+        return switch (ref.arena.itemKind(ref.item)) {
+            .component_decl => .{ .component = ref },
+            .resource_decl => .{ .resource = ref },
+            .struct_decl => .{ .struct_t = ref },
+            .enum_decl => .{ .enum_t = ref },
+            .event_decl => .{ .event_t = ref },
+            else => null,
+        };
+    }
+
+    /// The name a type declaration declares, in its own arena's pool.
+    fn declName(ref: DeclRef) StringId {
+        const a = ref.arena;
+        const d = a.itemData(ref.item);
+        return switch (a.itemKind(ref.item)) {
+            .component_decl => a.component_decls.items[d].name,
+            .resource_decl => a.resource_decls.items[d].name,
+            .struct_decl => a.struct_decls.items[d].name,
+            .enum_decl => a.enum_decls.items[d].name,
+            .event_decl => a.event_decls.items[d].name,
+            .trait_decl => a.trait_decls.items[d].name,
+            .type_alias => a.type_alias_decls.items[d].name,
+            else => unreachable,
+        };
+    }
+
+    fn declBytes(ref: DeclRef) []const u8 {
+        return ref.arena.strings.slice(declName(ref));
+    }
+
+    fn structOf(ref: DeclRef) StructRef {
+        return .{ .arena = ref.arena, .decl = ref.arena.struct_decls.items[ref.arena.itemData(ref.item)] };
+    }
+
+    fn enumOf(ref: DeclRef) EnumRef {
+        return .{ .arena = ref.arena, .decl = ref.arena.enum_decls.items[ref.arena.itemData(ref.item)] };
+    }
+
+    fn componentOf(ref: DeclRef) ComponentRef {
+        return .{ .arena = ref.arena, .decl = ref.arena.component_decls.items[ref.arena.itemData(ref.item)] };
+    }
+
+    fn resourceOf(ref: DeclRef) ResourceRef {
+        return .{ .arena = ref.arena, .decl = ref.arena.resource_decls.items[ref.arena.itemData(ref.item)] };
+    }
+
+    fn eventOf(ref: DeclRef) ForeignEvent {
+        return .{ .arena = ref.arena, .item = ref.item, .decl = ref.arena.event_decls.items[ref.arena.itemData(ref.item)] };
+    }
+
+    /// The type `name` names in this file, through its declaration.
+    fn nominalNamed(self: *TypeChecker, name: StringId) ?ResolvedType {
+        return nominalOf(self.declNamed(name) orelse return null);
+    }
+
+    /// Whether `name` names the declaration `ref` in this file.
+    fn namesDecl(self: *TypeChecker, name: StringId, ref: DeclRef) bool {
+        const d = self.declNamed(name) orelse return false;
+        return d.eql(ref);
+    }
+
+    /// The public export a selective import of arena `a` binds `bytes` to.
+    fn importedIn(project: *const ProjectContext, a: *const AstArena, bytes: []const u8) ?ExportEntry {
+        for (a.items.items(.kind), a.items.items(.data)) |kind, data| {
+            if (kind != .import_decl) continue;
+            const decl = a.import_decls.items[data];
+            var j: u32 = 0;
+            while (j < decl.items_len) : (j += 1) {
+                const item = a.import_items.items[decl.items_start + j];
+                if (!std.mem.eql(u8, a.strings.slice(importLocalName(item)), bytes)) continue;
+                const entry = importedExport(project, a, moduleOf(project, a, decl) orelse return null, item) orelse return null;
+                return if (entry.visibility == .private) null else entry;
+            }
+        }
+        return null;
+    }
+
+    /// The file index of the module `decl`, an import of arena `a`, names.
+    fn moduleOf(project: *const ProjectContext, a: *const AstArena, decl: ast_mod.ImportDecl) ?usize {
+        var it = project.module_index.iterator();
+        next: while (it.next()) |e| {
+            var rest: []const u8 = e.key_ptr.*;
+            var s: u32 = 0;
+            while (s < decl.path_len) : (s += 1) {
+                if (s != 0) {
+                    if (rest.len == 0 or rest[0] != '.') continue :next;
+                    rest = rest[1..];
+                }
+                const seg = a.strings.slice(a.import_path_segs.items[decl.path_start + s]);
+                if (!std.mem.startsWith(u8, rest, seg)) continue :next;
+                rest = rest[seg.len..];
+            }
+            if (rest.len == 0) return e.value_ptr.*;
+        }
+        return null;
+    }
+
+    /// What an impl is for: a declaration, or the builtin `Entity`.
+    const ImplTarget = union(enum) {
+        decl: DeclRef,
+        entity,
+
+        fn eql(a: ImplTarget, b: ImplTarget) bool {
+            return switch (a) {
+                .decl => |d| b == .decl and d.eql(b.decl),
+                .entity => b == .entity,
+            };
+        }
+    };
+
+    /// The impl target `name`, written in arena `a`, denotes.
+    fn implTargetIn(self: *TypeChecker, a: *const AstArena, name: StringId) ?ImplTarget {
+        if (self.declNamedIn(a, name)) |d| return .{ .decl = d };
+        if (std.mem.eql(u8, a.strings.slice(name), "Entity")) return .entity;
+        return null;
+    }
+
+    /// A function declaration and the arena it lives in.
+    const FnRef = struct { arena: *const AstArena, decl: ast_mod.FnDecl };
+
+    /// The top-level `fn` `name` names, the file's own or an imported one.
+    fn fnNamed(self: *TypeChecker, name: StringId) ?FnRef {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .fn_) return null;
+            const a = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = a, .decl = a.fn_decls.items[a.itemData(entry.item_id)] };
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .fn_) return null;
+        return .{ .arena = self.arena, .decl = self.arena.fn_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    /// The method named `bytes` among `a.impl_methods[start .. start + len]`.
+    fn methodIn(a: *const AstArena, start: u32, len: u32, bytes: []const u8) ?ast_mod.FnDecl {
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const m = a.impl_methods.items[start + i];
+            if (std.mem.eql(u8, a.strings.slice(m.name), bytes)) return m;
+        }
+        return null;
+    }
+
+    /// The component `name` names; a symbol that is no component names none.
+    fn componentNamed(self: *TypeChecker, name: StringId) ?ComponentRef {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .component) return null;
+            const decl_arena = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = decl_arena, .decl = decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)] };
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .component) return null;
+        return .{ .arena = self.arena, .decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    /// A resource declaration and the arena it lives in.
+    const ResourceRef = struct { arena: *const AstArena, decl: ast_mod.ResourceDecl };
+
+    const StructRef = struct { arena: *const AstArena, decl: ast_mod.StructDecl };
+
+    /// The struct `name` names, the file's own or an imported one.
+    fn structNamed(self: *TypeChecker, name: StringId) ?StructRef {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .struct_) return null;
+            const a = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = a, .decl = a.struct_decls.items[a.itemData(entry.item_id)] };
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .struct_) return null;
+        return .{ .arena = self.arena, .decl = self.arena.struct_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    const EnumRef = struct { arena: *const AstArena, decl: ast_mod.EnumDecl };
+
+    /// The enum `name` names, the file's own or an imported one.
+    fn enumNamed(self: *TypeChecker, name: StringId) ?EnumRef {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .enum_) return null;
+            const a = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = a, .decl = a.enum_decls.items[a.itemData(entry.item_id)] };
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .enum_) return null;
+        return .{ .arena = self.arena, .decl = self.arena.enum_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    /// A declared type of arena `a`, as this file names it.
+    fn typeIn(self: *TypeChecker, a: *const AstArena, type_node: NodeId) ResolvedType {
+        return if (a == self.arena) self.namedTypeToResolved(type_node) else self.foreignType(a, type_node);
+    }
+
+    /// Whether `declared`, a name of arena `a`, is the name this file writes
+    /// `written`.
+    fn sameName(self: *TypeChecker, a: *const AstArena, declared: StringId, written: StringId) bool {
+        return if (a == self.arena) declared == written else std.mem.eql(u8, a.strings.slice(declared), self.arena.strings.slice(written));
+    }
+
+    /// The declared type of the `const` `name` names, the file's own or an
+    /// imported one.
+    fn constType(self: *TypeChecker, name: StringId) ?ResolvedType {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .const_) return null;
+            const a = &self.project.?.arenas[entry.arena_index];
+            return self.foreignType(a, a.const_decls.items[a.itemData(entry.item_id)].type_node);
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .const_) return null;
+        return self.namedTypeToResolved(self.arena.const_decls.items[self.arena.itemData(sym.item_id)].type_node);
+    }
+
+    /// The resource `name` names; a symbol that is no resource names none.
+    fn resourceNamed(self: *TypeChecker, name: StringId) ?ResourceRef {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .resource) return null;
+            const decl_arena = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = decl_arena, .decl = decl_arena.resource_decls.items[decl_arena.itemData(entry.item_id)] };
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .resource) return null;
+        return .{ .arena = self.arena, .decl = self.arena.resource_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    /// The event `name` names, the file's own or an imported one.
+    fn eventNamed(self: *TypeChecker, name: StringId) ?ForeignEvent {
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .event_) return null;
+            const decl_arena = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = decl_arena, .item = entry.item_id, .decl = decl_arena.event_decls.items[decl_arena.itemData(entry.item_id)] };
+        }
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .event_) return null;
+        return .{ .arena = self.arena, .item = sym.item_id, .decl = self.arena.event_decls.items[self.arena.itemData(sym.item_id)] };
+    }
+
+    /// The kind of what `name` names, an import included.
+    fn kindNamed(self: *TypeChecker, name: StringId) ?SymbolKind {
+        if (self.importedBinding(name)) |entry| return entry.kind;
+        const sym = self.symbols.get(name) orelse return null;
+        return sym.kind;
+    }
+
+    /// The type of the field named `name` among `a.fields[start .. start + len]`,
+    /// matched by bytes in a foreign arena; null when there is none.
+    fn fieldTypeIn(self: *TypeChecker, a: *const AstArena, start: u32, len: u32, name: StringId) ?ResolvedType {
+        const want = self.arena.strings.slice(name);
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const f = a.fields.items[start + i];
+            if (a == self.arena) {
+                if (f.name == name) return self.namedTypeToResolved(f.type_node);
+            } else if (std.mem.eql(u8, a.strings.slice(f.name), want)) {
+                return self.foreignType(a, f.type_node);
+            }
+        }
+        return null;
+    }
+
+    /// One instance field against `component`'s declared fields, the imported
+    /// ones matched by name across arenas.
+    fn checkComponentField(self: *TypeChecker, component: ComponentRef, owner: []const u8, field: ast_mod.StructLitField, code_field: DiagnosticCode, code_field_type: DiagnosticCode) !void {
+        if (component.arena == self.arena) {
+            try self.checkInstanceField(owner, component.decl.fields_start, component.decl.fields_len, field, code_field, code_field_type);
+        } else {
+            try self.checkInstanceFieldForeign(component.arena, owner, component.decl.fields_start, component.decl.fields_len, field, code_field, code_field_type);
+        }
+    }
+
+    /// Cross-arena field check for an imported component or resource instance:
+    /// the instance field lives in `self.arena` and the declared fields in
+    /// `decl_arena`, so names are matched by bytes.
     fn checkInstanceFieldForeign(self: *TypeChecker, decl_arena: *const AstArena, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: DiagnosticCode) !void {
-        if (field.name == 0) return; // spread — not produced in component bodies
+        if (field.name == 0) return; // spread — not produced in instance bodies
         const field_name_bytes = self.arena.strings.slice(field.name);
         var declared_type_node: ?NodeId = null;
         var f: u32 = 0;
@@ -2058,30 +3007,31 @@ pub const TypeChecker = struct {
             try self.emit(code_unknown, .error_, self.arena.exprSpan(field.value), "'{s}' has no field '{s}'", .{ owner, field_name_bytes });
             return;
         };
-        // Field-TYPE check. Component fields are builtin-POD only
-        // (validateFieldsInDecl .component_like), so this resolves for every
-        // valid imported component; the `orelse return` is unreachable for a
-        // valid component (forward-compat headroom).
-        const declared_builtin = foreignBuiltinFieldType(decl_arena, tn) orelse return;
-        const actual = try self.synthExprE(field.value, null);
-        if (actual == .builtin and !self.literalTypeFits(declared_builtin, field.value, actual.builtin)) {
+        const declared = self.foreignType(decl_arena, tn);
+        const actual = try self.checkExpr(field.value, declaredSlot(declared), null);
+        if (!try self.valueFits(declared, field.value, actual)) {
             try self.emit(code_type, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{field_name_bytes});
         }
     }
 
     /// Resolve a `resources { … }` entry against the resource RTTI: E1789 if not
-    /// a declared resource; E0303 per unknown field (no resource-field-type code).
+    /// a declared resource, then E0303 per unknown field and E0308 per mistyped
+    /// one. An imported resource's fields are read from the arena that declares
+    /// it.
     fn checkResourceInstance(self: *TypeChecker, ci: ast_mod.ComponentInstance) !void {
-        const sym = self.symbols.get(ci.type_name);
-        if (sym == null or sym.?.kind != .resource) {
-            try self.emit(.scene_resource_type_unknown, .error_, ci.span, "'{s}' is not a declared resource", .{self.arena.strings.slice(ci.type_name)});
-            return;
-        }
-        const decl = self.arena.resource_decls.items[self.arena.itemData(sym.?.item_id)];
         const owner = self.arena.strings.slice(ci.type_name);
+        const resource = self.resourceNamed(ci.type_name) orelse {
+            try self.emit(.scene_resource_type_unknown, .error_, ci.span, "'{s}' is not a declared resource", .{owner});
+            return;
+        };
         var f: u32 = 0;
         while (f < ci.fields_len) : (f += 1) {
-            try self.checkInstanceField(owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], .resource_field_unknown, null);
+            const field = self.arena.struct_lit_fields.items[ci.fields_start + f];
+            if (resource.arena == self.arena) {
+                try self.checkInstanceField(owner, resource.decl.fields_start, resource.decl.fields_len, field, .resource_field_unknown, .resource_field_type_invalid);
+            } else {
+                try self.checkInstanceFieldForeign(resource.arena, owner, resource.decl.fields_start, resource.decl.fields_len, field, .resource_field_unknown, .resource_field_type_invalid);
+            }
         }
     }
 
@@ -2089,13 +3039,12 @@ pub const TypeChecker = struct {
     /// component type is unknown, E1784 if the field is absent, E1785 on a type
     /// mismatch.
     fn checkFieldOverride(self: *TypeChecker, fo: ast_mod.FieldOverride) !void {
-        const sym = self.symbols.get(fo.type_name);
-        if (sym == null or sym.?.kind != .component) {
-            try self.emit(.scene_component_type_unknown, .error_, fo.span, "'{s}' is not a declared component", .{self.arena.strings.slice(fo.type_name)});
+        const owner = self.arena.strings.slice(fo.type_name);
+        const component = self.componentNamed(fo.type_name) orelse {
+            try self.emit(.scene_component_type_unknown, .error_, fo.span, "'{s}' is not a declared component", .{owner});
             return;
-        }
-        const decl = self.arena.component_decls.items[self.arena.itemData(sym.?.item_id)];
-        try self.checkInstanceField(self.arena.strings.slice(fo.type_name), decl.fields_start, decl.fields_len, .{ .name = fo.field, .value = fo.value }, .scene_component_field_unknown, .scene_component_field_type_invalid);
+        };
+        try self.checkComponentField(component, owner, .{ .name = fo.field, .value = fo.value }, .scene_component_field_unknown, .scene_component_field_type_invalid);
     }
 
     /// E1782 helper — record `uuid_id` as seen, returning whether it was
@@ -2136,8 +3085,9 @@ pub const TypeChecker = struct {
     fn validateScene(self: *TypeChecker, decl: ast_mod.SceneDecl, prefab_names: *const std.AutoHashMapUnmanaged(StringId, void)) !void {
         try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .scene);
 
-        // E1780 — a scene needs at least one entity or instance.
-        if (decl.children_len == 0) {
+        // E1780 — a scene needs at least one entity or instance, except a
+        // world manifest's, which holds its resources alone (§21.1).
+        if (decl.children_len == 0 and self.arena.typed_extension != .manifest) {
             try self.emit(.scene_empty_entities, .error_, decl.name_span, "scene '{s}' has no entity or instance (at least one required)", .{self.arena.strings.slice(decl.name)});
         }
 
@@ -2327,6 +3277,9 @@ pub const TypeChecker = struct {
     fn validatePrefab(self: *TypeChecker, decl: ast_mod.PrefabDecl, prefab_names: *const std.AutoHashMapUnmanaged(StringId, usize)) !void {
         try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .prefab);
 
+        if (decl.relation != .extends and (decl.requires_len != 0 or decl.has_on_attach or decl.has_on_detach))
+            try self.emit(.prefab_hook_not_allowed, .error_, decl.name_span, "prefab '{s}': `requires`, `on_attach` and `on_detach` are valid only on an `extends` prefab", .{self.arena.strings.slice(decl.name)});
+
         // E1790 — a prefab needs at least one component (across its entities).
         var total_components: u32 = 0;
         var e: u32 = 0;
@@ -2357,6 +3310,100 @@ pub const TypeChecker = struct {
                 try self.checkComponentInstance(self.arena.component_instances.items[ent.components_start + f], .prefab_component_type_unknown, .prefab_component_field_unknown, .prefab_component_field_type_invalid);
             }
         }
+        try self.checkPrefabRequiresAndHooks(decl);
+    }
+
+    fn isComponentName(self: *TypeChecker, name: StringId) bool {
+        return self.componentNamed(name) != null;
+    }
+
+    /// E1793 on a `requires` name that is no component, then each hook body.
+    /// `requires` keeps no span per name, so the diagnostic sits on the prefab
+    /// name, as E1790/E1791 do.
+    fn checkPrefabRequiresAndHooks(self: *TypeChecker, decl: ast_mod.PrefabDecl) !void {
+        var r: u32 = 0;
+        while (r < decl.requires_len) : (r += 1) {
+            const req = self.arena.prefab_requires.items[decl.requires_start + r];
+            if (!self.isComponentName(req)) {
+                try self.emit(.prefab_component_type_unknown, .error_, decl.name_span, "prefab '{s}' requires '{s}', which is not a declared component", .{ self.arena.strings.slice(decl.name), self.arena.strings.slice(req) });
+            }
+        }
+        if (decl.has_on_attach) try self.checkPrefabHook(decl, decl.on_attach_start, decl.on_attach_len);
+        if (decl.has_on_detach) try self.checkPrefabHook(decl, decl.on_detach_start, decl.on_detach_len);
+    }
+
+    /// One hook body (part2 §30.3): gated like a `when` clause on `requires` ∪
+    /// the extension's own components, synchronous and unable to throw, with an
+    /// implicit `entity: Entity`. User resources stay unreachable, engine ones
+    /// readable, as in a rule with no `when resource`. Each hook gets a fresh
+    /// context.
+    fn checkPrefabHook(self: *TypeChecker, decl: ast_mod.PrefabDecl, start: u32, len: u32) !void {
+        var scope: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer scope.deinit(self.gpa);
+        var r: u32 = 0;
+        while (r < decl.requires_len) : (r += 1) {
+            try scope.put(self.gpa, self.arena.prefab_requires.items[decl.requires_start + r], {});
+        }
+        var e: u32 = 0;
+        while (e < decl.entities_len) : (e += 1) {
+            const ent = self.arena.scene_entities.items[decl.entities_start + e];
+            var c: u32 = 0;
+            while (c < ent.components_len) : (c += 1) {
+                try scope.put(self.gpa, self.arena.component_instances.items[ent.components_start + c].type_name, {});
+            }
+        }
+        try self.checkHookAliases(decl, start, len);
+        try self.checkHookBody(&scope, start, len);
+    }
+
+    /// E0101 on a hook naming an import alias `builtinSpelledAlias` refuses.
+    fn checkHookAliases(self: *TypeChecker, decl: ast_mod.PrefabDecl, start: u32, len: u32) !void {
+        if (self.project == null) return;
+        const text = descriptor_mod.renderStmtRunAlloc(self.gpa, self.arena, start, len) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return,
+        };
+        defer self.gpa.free(text);
+        var aliases = try self.boundAliases();
+        defer aliases.deinit(self.gpa);
+        if (try builtinSpelledAlias(self.gpa, text, &aliases)) |alias| {
+            try self.emit(.duplicate_symbol, .error_, decl.name_span, "import alias '{s}' is spelled like a builtin type or resource, and an extension hook cannot tell the two apart", .{alias});
+        }
+    }
+
+    /// A hook body gated on the components `scope` holds, in a hook's context.
+    fn checkHookBody(self: *TypeChecker, scope: *const std.AutoHashMapUnmanaged(StringId, void), start: u32, len: u32) !void {
+        var ctx: RuleCtx = .{};
+        defer ctx.deinit(self.gpa);
+        var names = scope.keyIterator();
+        while (names.next()) |id| try ctx.components_in_when.put(self.gpa, id.*, {});
+        if (self.arena.strings.find("entity")) |eid| {
+            _ = try ctx.bind(self.gpa, eid, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
+        }
+        const saved_async = self.current_is_async;
+        const saved_susp = self.await_suspendable;
+        const saved_throw = self.current_can_throw;
+        const saved_ret = self.current_fn_return;
+        const saved_branch = self.conc_branch;
+        const saved_hook = self.in_hook_body;
+        self.current_is_async = false;
+        self.await_suspendable = true;
+        self.current_can_throw = false;
+        self.current_fn_return = null;
+        self.conc_branch = null;
+        self.in_hook_body = true;
+        defer {
+            self.current_is_async = saved_async;
+            self.await_suspendable = saved_susp;
+            self.current_can_throw = saved_throw;
+            self.current_fn_return = saved_ret;
+            self.conc_branch = saved_branch;
+            self.in_hook_body = saved_hook;
+        }
+        var s: u32 = 0;
+        while (s < len) : (s += 1) {
+            try self.checkStmt(&ctx, @bitCast(self.arena.extra.items[start + s]));
+        }
     }
 
     fn validateDataTable(self: *TypeChecker, table_idx: u32) !void {
@@ -2367,10 +3414,10 @@ pub const TypeChecker = struct {
         }
         // Entry type: must resolve to a declared struct. Unknown → E0102;
         // known-but-not-a-struct → E1762 (the table itself cannot conform).
-        var entry_struct: ?ast_mod.StructDecl = null;
-        if (self.symbols.get(decl.entry_type)) |sym| {
-            if (sym.kind == .struct_) {
-                entry_struct = self.arena.struct_decls.items[self.arena.itemData(sym.item_id)];
+        var entry_struct: ?StructRef = null;
+        if (self.kindNamed(decl.entry_type)) |kind| {
+            if (kind == .struct_) {
+                entry_struct = self.structNamed(decl.entry_type);
             } else {
                 try self.emit(.entry_type_mismatch, .error_, decl.entry_type_span, "data entry type '{s}' is not a struct", .{self.arena.strings.slice(decl.entry_type)});
             }
@@ -2410,19 +3457,19 @@ pub const TypeChecker = struct {
             if (!has_spread) {
                 if (entry_struct) |sd| {
                     var sf: u32 = 0;
-                    while (sf < sd.fields_len) : (sf += 1) {
-                        const sfield = self.arena.fields.items[sd.fields_start + sf];
+                    while (sf < sd.decl.fields_len) : (sf += 1) {
+                        const sfield = sd.arena.fields.items[sd.decl.fields_start + sf];
                         if (!sfield.default_value.isNone()) continue;
                         var provided = false;
                         f = 0;
                         while (f < entry.fields_len) : (f += 1) {
-                            if (self.arena.struct_lit_fields.items[entry.fields_start + f].name == sfield.name) {
+                            if (self.sameName(sd.arena, sfield.name, self.arena.struct_lit_fields.items[entry.fields_start + f].name)) {
                                 provided = true;
                                 break;
                             }
                         }
                         if (!provided) {
-                            try self.emit(.entry_field_required_missing, .error_, entry.span, "data entry '{s}' is missing required field '{s}' (no declared default)", .{ id_slice, self.arena.strings.slice(sfield.name) });
+                            try self.emit(.entry_field_required_missing, .error_, entry.span, "data entry '{s}' is missing required field '{s}' (no declared default)", .{ id_slice, sd.arena.strings.slice(sfield.name) });
                         }
                     }
                 }
@@ -2431,17 +3478,16 @@ pub const TypeChecker = struct {
     }
 
     /// Validate one named field of a data entry against the declared entry
-    /// struct: E1763 unknown field, E1764 value type. Value typing mirrors
-    /// `checkStructLitAgainst` (check mode for `.variant` shorthands and
-    /// anonymous `.{ … }` values, synth otherwise).
-    fn validateDataEntryField(self: *TypeChecker, decl: ast_mod.DataDecl, entry_struct: ?ast_mod.StructDecl, field: ast_mod.StructLitField) !void {
+    /// struct: E1763 unknown field, E1764 value type. The value is checked
+    /// against the field's declared type.
+    fn validateDataEntryField(self: *TypeChecker, decl: ast_mod.DataDecl, entry_struct: ?StructRef, field: ast_mod.StructLitField) !void {
         const sd = entry_struct orelse return; // type already reported
         var declared: ?ResolvedType = null;
         var sf: u32 = 0;
-        while (sf < sd.fields_len) : (sf += 1) {
-            const sfield = self.arena.fields.items[sd.fields_start + sf];
-            if (sfield.name == field.name) {
-                declared = self.namedTypeToResolved(sfield.type_node);
+        while (sf < sd.decl.fields_len) : (sf += 1) {
+            const sfield = sd.arena.fields.items[sd.decl.fields_start + sf];
+            if (self.sameName(sd.arena, sfield.name, field.name)) {
+                declared = self.typeIn(sd.arena, sfield.type_node);
                 break;
             }
         }
@@ -2449,28 +3495,8 @@ pub const TypeChecker = struct {
             try self.emit(.entry_field_unknown, .error_, self.arena.exprSpan(field.value), "entry type '{s}' has no field '{s}'", .{ self.arena.strings.slice(decl.entry_type), self.arena.strings.slice(field.name) });
             return;
         };
-        const actual = blk: {
-            if (d == .enum_t and self.arena.exprKind(field.value) == .tag_path) {
-                break :blk try self.checkEnumShorthand(field.value, d.enum_t);
-            }
-            if (d == .struct_t and self.arena.exprKind(field.value) == .struct_lit) {
-                const inner_data = self.arena.exprData(field.value);
-                if (self.arena.struct_lits.items[inner_data].type_name == 0) {
-                    break :blk try self.checkStructLitAgainst(field.value, inner_data, d.struct_t, null);
-                }
-            }
-            break :blk try self.synthExprE(field.value, null);
-        };
-        const mismatch = switch (d) {
-            .builtin => |db| actual == .builtin and !self.literalTypeFits(db, field.value, actual.builtin),
-            .struct_t => |dn| actual == .struct_t and actual.struct_t != dn,
-            .enum_t => |dn| switch (actual) {
-                .enum_t => |an| an != dn,
-                .builtin => true,
-                else => false, // `.unknown` already reported upstream
-            },
-            else => false,
-        };
+        const actual = try self.checkExpr(field.value, declaredSlot(d), null);
+        const mismatch = !try self.valueFits(d, field.value, actual);
         if (mismatch) {
             try self.emit(.entry_field_type_invalid, .error_, self.arena.exprSpan(field.value), "data entry field '{s}' value type does not match its declared type", .{self.arena.strings.slice(field.name)});
         }
@@ -2689,7 +3715,7 @@ pub const TypeChecker = struct {
         var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
         defer ctx.deinit(self.gpa);
         if (self.arena.strings.find("player")) |player_id| {
-            try ctx.locals.put(self.gpa, player_id, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
+            _ = try ctx.bind(self.gpa, player_id, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
         }
         // Properties: `requires` must be bool (E1542); the part2 §15 known
         // properties type-check (E1548); unknown property names are open
@@ -2756,6 +3782,8 @@ pub const TypeChecker = struct {
 
     fn validateQuestStage(self: *TypeChecker, stage_idx: u32, ctx: *RuleCtx, branch_names: *const std.AutoHashMapUnmanaged(StringId, void)) (TypeError || error{OutOfMemory})!void {
         const stage = self.arena.quest_stages.items[stage_idx];
+        try ctx.enter(self.gpa);
+        defer ctx.leave();
         var n_objectives: u32 = 0;
         var has_main = false;
         var e: u32 = 0;
@@ -2792,8 +3820,8 @@ pub const TypeChecker = struct {
                                 // Emit payload: E1550 on an unknown event
                                 // reference, else the regular emit checks.
                                 const em = self.arena.emit_stmts.items[self.arena.stmtData(h.payload)];
-                                if (self.symbols.get(em.event_type)) |sym| {
-                                    if (sym.kind != .event_) {
+                                if (self.kindNamed(em.event_type)) |k| {
+                                    if (k != .event_) {
                                         try self.emit(.event_reference_not_found, .error_, h.span, "'{s}' is not an event", .{self.arena.strings.slice(em.event_type)});
                                     } else {
                                         try self.checkStmt(ctx, h.payload);
@@ -2868,7 +3896,7 @@ pub const TypeChecker = struct {
         var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
         defer ctx.deinit(self.gpa);
         if (self.arena.strings.find("player")) |player_id| {
-            try ctx.locals.put(self.gpa, player_id, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
+            _ = try ctx.bind(self.gpa, player_id, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
         }
         if (decl.elems_len == 0) {
             const sym = self.symbols.get(decl.name).?;
@@ -2932,8 +3960,8 @@ pub const TypeChecker = struct {
                 .emit => {
                     const em_elem = self.arena.dialogue_emits.items[elem.index];
                     const em = self.arena.emit_stmts.items[self.arena.stmtData(em_elem.stmt)];
-                    if (self.symbols.get(em.event_type)) |sym| {
-                        if (sym.kind != .event_) {
+                    if (self.kindNamed(em.event_type)) |k| {
+                        if (k != .event_) {
                             try self.emit(.dialogue_event_type_unknown, .error_, em_elem.span, "'{s}' is not an event", .{self.arena.strings.slice(em.event_type)});
                         } else {
                             try self.checkStmt(ctx, em_elem.stmt);
@@ -3128,8 +4156,8 @@ pub const TypeChecker = struct {
             var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
             defer ctx.deinit(self.gpa);
             const entity_t: ResolvedType = .{ .builtin = .entity };
-            if (self.arena.strings.find("self")) |self_id| try ctx.locals.put(self.gpa, self_id, .{ .type_ = entity_t, .is_mut = false });
-            if (self.arena.strings.find("target")) |target_id| try ctx.locals.put(self.gpa, target_id, .{ .type_ = entity_t, .is_mut = false });
+            if (self.arena.strings.find("self")) |self_id| _ = try ctx.bind(self.gpa, self_id, .{ .type_ = entity_t, .is_mut = false });
+            if (self.arena.strings.find("target")) |target_id| _ = try ctx.bind(self.gpa, target_id, .{ .type_ = entity_t, .is_mut = false });
             const root = self.arena.bt_nodes.items[decl.root];
             if (root.kind != .selector and root.kind != .sequence) {
                 try self.emit(.behavior_root_missing, .error_, root.span, "behavior '{s}' must have a composite root (selector or sequence)", .{self.arena.strings.slice(decl.name)});
@@ -3185,22 +4213,13 @@ pub const TypeChecker = struct {
                     // arm typing below via the dedicated path.
                     try self.collectWhenBehavior(ctx, node.when_root);
                 }
-                // Action `let` bindings scope to the rest of THIS composite:
-                // snapshot the locals and restore at exit.
-                var added: std.ArrayListUnmanaged(StringId) = .empty;
-                defer added.deinit(self.gpa);
+                // An action's `let` binds for the rest of this composite.
+                try ctx.enter(self.gpa);
+                defer ctx.leave();
                 var c: u32 = 0;
                 while (c < node.children_len) : (c += 1) {
-                    const child_idx = self.arena.extra.items[node.children_start + c];
-                    const child = self.arena.bt_nodes.items[child_idx];
-                    try self.validateBTNode(child_idx, behavior_idx, ctx, index_of, edges);
-                    // An action `let` child binds for the following siblings.
-                    if (child.kind == .action and child.payload_is_stmt and self.arena.stmtKind(child.payload) == .let_stmt) {
-                        const let = self.arena.let_stmts.items[self.arena.stmtData(child.payload)];
-                        try added.append(self.gpa, let.name);
-                    }
+                    try self.validateBTNode(self.arena.extra.items[node.children_start + c], behavior_idx, ctx, index_of, edges);
                 }
-                for (added.items) |name| _ = ctx.locals.remove(name);
             },
             .condition => {
                 const t = try self.synthExprE(node.payload, ctx);
@@ -3241,7 +4260,7 @@ pub const TypeChecker = struct {
                             }
                         }
                     }
-                } else if (t != .unknown) {
+                } else if (t != .unknown and t != .unit) {
                     try self.emit(.behavior_action_invalid_return, .error_, node.span, "a behavior action must be a void call, a 'let' binding, or an 'emit' (got a value expression)", .{});
                 }
             },
@@ -3319,6 +4338,12 @@ pub const TypeChecker = struct {
 
     // ─── Pass 1 ──────────────────────────────────────────────────────────
 
+    fn refuseReservedEngineName(self: *TypeChecker, name: StringId, span: SourceSpan, kind_word: []const u8) !void {
+        const slice = self.arena.strings.slice(name);
+        if (!isReservedEngineTypeName(slice)) return;
+        try self.emit(.duplicate_symbol, .error_, span, "'{s}' is registered by the engine; a {s} may not take that name", .{ slice, kind_word });
+    }
+
     fn pass1Collect(self: *TypeChecker) !void {
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -3332,19 +4357,19 @@ pub const TypeChecker = struct {
             switch (kind) {
                 .component_decl => {
                     const decl = self.arena.component_decls.items[data];
+                    try self.refuseReservedEngineName(decl.name, span, "component");
                     try self.registerSymbol(.component, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .component);
                     try self.checkStorageAnnotation(decl);
                     // `@requires` is NOT resolved here — see `pass2Resolve`.
                     // Pass 1 is the loop that BUILDS the symbol table, so a name
                     // declared further down the file is not in it yet.
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .component_like);
                 },
                 .resource_decl => {
                     const decl = self.arena.resource_decls.items[data];
+                    try self.refuseReservedEngineName(decl.name, span, "resource");
                     try self.registerSymbol(.resource, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .resource);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .resource);
                 },
                 .event_decl => {
                     // An `event` is a frame-arena struct-message, not a POD component:
@@ -3353,12 +4378,11 @@ pub const TypeChecker = struct {
                     // `etch-abi-zig.md` §3.1/§3.2 passes non-POD by handle), and
                     // `etch-grammar.md` §5.10 imposes no POD constraint. POD-strict is
                     // component-only (part1 §5.5, SoA storage). Event fields therefore
-                    // follow the `struct` field surface (`string`/enum accepted,
-                    // nested-struct deferred) via the `.event_` origin.
+                    // follow the `struct` field surface (`string`/enum accepted)
+                    // via the `.event_` origin; a struct-typed event field is refused.
                     const decl = self.arena.event_decls.items[data];
                     try self.registerSymbol(.event_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .event);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .event_);
                 },
                 .rule_decl => {
                     const decl = self.arena.rule_decls.items[data];
@@ -3377,11 +4401,6 @@ pub const TypeChecker = struct {
                     // and enum-typed fields; nested-struct fields stay deferred.
                     const decl = self.arena.struct_decls.items[data];
                     try self.registerSymbol(.struct_, decl.name, item_id, span);
-                    // Generic params in scope so a field typed
-                    // by a param (`min: T`) is accepted as a generic field.
-                    try self.addGenerics(decl.generics_start, decl.generics_len);
-                    defer self.removeGenerics(decl.generics_start, decl.generics_len);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .struct_);
                 },
                 .enum_decl => {
                     // A C-like `enum` is a value type. Register the name; validate
@@ -3403,16 +4422,17 @@ pub const TypeChecker = struct {
                     // trait impl (`impl Trait for Type`, §5.2) → `trait_impls`.
                     // Bodies are checked in pass 2 (`checkImplMethod`).
                     const impl = self.arena.impl_decls.items[data];
+                    try self.validateAnnotations(impl.annotations_extra, impl.annotations_len, .impl_);
                     if (impl.trait_name == 0) {
                         try self.collectImplMethods(impl, span);
                     } else {
                         try self.trait_impls.append(self.gpa, .{
+                            .arena = self.arena,
                             .trait_name = impl.trait_name,
                             .type_name = impl.type_name,
                             .when_root = impl.when_root,
                             .methods_start = impl.methods_start,
                             .methods_len = impl.methods_len,
-                            .span = span,
                         });
                     }
                 },
@@ -3421,6 +4441,7 @@ pub const TypeChecker = struct {
                     // component/resource/rule (E0101); the target is validated
                     // in `validateTypeAliases` once all symbols are known.
                     const decl = self.arena.type_alias_decls.items[data];
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .type_alias);
                     try self.registerSymbol(.type_alias, decl.name, item_id, span);
                 },
                 .const_decl => {
@@ -3430,8 +4451,8 @@ pub const TypeChecker = struct {
                     // const-evaluable (E1101) and matches its declared type
                     // (E0200) — reusing the field-default const surface.
                     const decl = self.arena.const_decls.items[data];
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .const_);
                     try self.registerSymbol(.const_, decl.name, item_id, span);
-                    try self.checkConstValue(decl.value, decl.type_node);
                 },
                 .test_decl => {
                     // Top-level `test` block. The test name lives in a
@@ -3564,28 +4585,30 @@ pub const TypeChecker = struct {
                     // (rendered, never executed). All §19 checks are
                     // RESERVED-with-variant (E1700/E1701 — output is
                     // parser-mandatory and single) or DEFERRED-no-variant (the
-                    // Pulse DSP catalogue is not attached), so there is no
-                    // validate pass.
+                    // Pulse DSP catalogue is not attached).
                     const decl = self.arena.audio_graph_decls.items[data];
                     try self.registerSymbol(.audio_graph_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .audio_graph);
+                },
+                .import_decl => {
+                    const decl = self.arena.import_decls.items[data];
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .import_);
                 },
                 else => {}, // forward-compatible: unknown items ignored
             }
         }
     }
 
-    /// Bind this file's `import` directives against the project exports index. For each
-    /// `ImportDecl`: - resolve the module path against `project.module_index`; a path
-    /// that names no project file is `E0103 NotAModule`. - selective `{ X }`: look X up
-    /// in the target module's exports — absent → `E0104 UnknownExport`; private →
-    /// `E0107`; else register it in `imported_symbols` under its
-    /// local name (alias if present). - module alias `as m` / bare `import a.b`: record
-    /// the alias → target binding in `imported_aliases` (D-F; qualified `m.Type`
-    /// resolution is additive, not done here). No-op in single-file mode
-    /// (`project == null`). This pass only records the bindings + emits the import
-    /// diagnostics; APPLYING the imports to `TYPE_IDENT` resolution + the cross-arena
-    /// component check runs in pass 2.
+    /// Bind this file's `import` directives against the project exports index.
+    /// For each `ImportDecl`:
+    ///   - a module path that names no project file is `E0103 NotAModule`;
+    ///   - selective `{ X }`: X absent from the target's exports is
+    ///     `E0104 UnknownExport`, private is `E0107`, else it is registered in
+    ///     `imported_symbols` under its local name;
+    ///   - module alias `as m` / bare `import a.b`: the alias → target binding
+    ///     goes to `imported_aliases`.
+    /// No-op in single-file mode (`project == null`). This pass only records the
+    /// bindings and emits the import diagnostics; pass 2 applies them.
     fn bindImports(self: *TypeChecker) !void {
         const project = self.project orelse return;
         const kinds = self.arena.items.items(.kind);
@@ -3597,18 +4620,13 @@ pub const TypeChecker = struct {
             const decl = self.arena.import_decls.items[datas[i]];
             const span = spans[i];
 
-            // Join the module-path segments ("a.b.c") and resolve to a file.
-            var path_buf: std.ArrayListUnmanaged(u8) = .empty;
-            defer path_buf.deinit(self.gpa);
-            var s: u32 = 0;
-            while (s < decl.path_len) : (s += 1) {
-                if (s != 0) try path_buf.append(self.gpa, '.');
-                try path_buf.appendSlice(self.gpa, self.arena.strings.slice(self.arena.import_path_segs.items[decl.path_start + s]));
-            }
-            const target_idx = project.module_index.get(path_buf.items) orelse {
-                try self.emit(.not_a_module, .error_, span, "import path '{s}' does not name a module in the project", .{path_buf.items});
+            const path = try importPath(self.gpa, self.arena, decl);
+            defer self.gpa.free(path);
+            const target_idx = project.module_index.get(path) orelse {
+                try self.emit(.not_a_module, .error_, span, "import path '{s}' does not name a module in the project", .{path});
                 continue;
             };
+            try self.importArena(&project.arenas[target_idx]);
 
             if (decl.items_len == 0) {
                 // Whole-module form (1 or 3): record the alias → target binding.
@@ -3622,24 +4640,65 @@ pub const TypeChecker = struct {
             }
 
             // Selective form (2 or 4): bind each item against the target exports.
-            const exports = &project.exports[target_idx];
             var j: u32 = 0;
             while (j < decl.items_len) : (j += 1) {
                 const item = self.arena.import_items.items[decl.items_start + j];
                 const item_name = self.arena.strings.slice(item.name);
-                const entry = exports.get(item_name) orelse {
-                    try self.emit(.unknown_export, .error_, span, "'{s}' is not exported by module '{s}'", .{ item_name, path_buf.items });
+                const entry = importedExport(project, self.arena, target_idx, item) orelse {
+                    try self.emit(.unknown_export, .error_, span, "'{s}' is not exported by module '{s}'", .{ item_name, path });
                     continue;
                 };
                 if (entry.visibility == .private) {
-                    // Dormant until `private` graduates.
-                    try self.emit(.import_private_item, .error_, span, "'{s}' is private to module '{s}'", .{ item_name, path_buf.items });
+                    try self.emit(.import_private_item, .error_, span, "'{s}' is private to module '{s}'", .{ item_name, path });
                     continue;
                 }
-                const local = if (item.alias != 0) item.alias else item.name;
-                try self.imported_symbols.put(self.gpa, local, entry);
+                try self.imported_symbols.put(self.gpa, importLocalName(item), entry);
             }
         }
+    }
+
+    /// Record `a` as a file this one imports from, and its trait impls.
+    fn importArena(self: *TypeChecker, a: *const AstArena) !void {
+        if (a == self.arena) return;
+        for (self.import_arenas.items) |seen| {
+            if (seen == a) return;
+        }
+        try self.import_arenas.append(self.gpa, a);
+        for (a.impl_decls.items) |impl| {
+            if (impl.trait_name == 0) continue;
+            try self.trait_impls.append(self.gpa, .{
+                .arena = a,
+                .trait_name = impl.trait_name,
+                .type_name = impl.type_name,
+                .when_root = impl.when_root,
+                .methods_start = impl.methods_start,
+                .methods_len = impl.methods_len,
+            });
+        }
+    }
+
+    /// The dotted module path `decl` names (`import a.b.c` → `"a.b.c"`),
+    /// `gpa`-owned.
+    pub fn importPath(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.ImportDecl) ![]u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(gpa);
+        var s: u32 = 0;
+        while (s < decl.path_len) : (s += 1) {
+            if (s != 0) try buf.append(gpa, '.');
+            try buf.appendSlice(gpa, arena.strings.slice(arena.import_path_segs.items[decl.path_start + s]));
+        }
+        return try buf.toOwnedSlice(gpa);
+    }
+
+    /// The name `item` binds in the importing module: its alias, else its own.
+    pub fn importLocalName(item: ast_mod.ImportItem) StringId {
+        return if (item.alias != 0) item.alias else item.name;
+    }
+
+    /// What `item`, imported by `arena` from the module at `target`, names in
+    /// that module's exports, whatever its visibility.
+    pub fn importedExport(project: *const ProjectContext, arena: *const AstArena, target: usize, item: ast_mod.ImportItem) ?ExportEntry {
+        return project.exports[target].get(arena.strings.slice(item.name));
     }
 
     fn registerSymbol(self: *TypeChecker, kind: SymbolKind, name: StringId, item_id: NodeId, span: SourceSpan) !void {
@@ -3656,8 +4715,7 @@ pub const TypeChecker = struct {
     /// 3, §5.1). Order-independent — the target type need not be declared yet
     /// (top-level decls come in any order); the target is validated separately
     /// in `validateImpls` once all symbols are known. A method name colliding
-    /// with another inherent method on the same type is E0101 (the inherent
-    /// `AmbiguousInherentMethod` of §7.5, reusing the duplicate-symbol code).
+    /// with another inherent method on the same type is E0218 (§7.5).
     fn collectImplMethods(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
         var i: u32 = 0;
         while (i < impl.methods_len) : (i += 1) {
@@ -3665,7 +4723,7 @@ pub const TypeChecker = struct {
             const method = self.arena.impl_methods.items[m_idx];
             const gop = try self.methods.getOrPut(self.gpa, methodKey(impl.type_name, method.name));
             if (gop.found_existing) {
-                try self.emit(.duplicate_symbol, .error_, span, "duplicate method '{s}' on type '{s}'", .{ self.arena.strings.slice(method.name), self.arena.strings.slice(impl.type_name) });
+                try self.emit(.ambiguous_inherent_method, .error_, span, "duplicate method '{s}' on type '{s}'", .{ self.arena.strings.slice(method.name), self.arena.strings.slice(impl.type_name) });
             } else {
                 gop.value_ptr.* = m_idx;
             }
@@ -3673,8 +4731,7 @@ pub const TypeChecker = struct {
     }
 
     /// Validate every `impl`'s target type once all symbols are known: the target
-    /// must be a declared `struct` / `component` / `resource`. Coherence and orphan
-    /// rules (§7.4) apply to a trait impl, conditional impls included.
+    /// must be a declared `struct` / `component` / `resource`.
     fn validateImpls(self: *TypeChecker) !void {
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -3687,9 +4744,12 @@ pub const TypeChecker = struct {
             if (impl.trait_name == 0) {
                 // Inherent impl (§5.1): target is a declared struct / component /
                 // resource. No coherence (§7.5).
-                if (self.symbols.get(impl.type_name)) |sym| {
-                    if (sym.kind != .struct_ and sym.kind != .component and sym.kind != .resource) {
+                if (self.kindNamed(impl.type_name)) |kind| {
+                    if (kind != .struct_ and kind != .component and kind != .resource) {
                         try self.emit(.undefined_symbol, .error_, spans[i], "impl target '{s}' is not a struct, component, or resource", .{tname});
+                    } else {
+                        try self.checkImportedMethodDuplicates(impl, spans[i]);
+                        try self.checkAliasedMethodDuplicates(impl, i, spans[i]);
                     }
                 } else {
                     try self.emit(.undefined_symbol, .error_, spans[i], "impl target type '{s}' is not declared", .{tname});
@@ -3700,76 +4760,94 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// E0218 for each method of the inherent `impl` that an inherent impl of
+    /// an imported file already gives the same type, as a second impl of this
+    /// file would be.
+    fn checkImportedMethodDuplicates(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
+        const target = self.implTargetIn(self.arena, impl.type_name) orelse return;
+        var i: u32 = 0;
+        while (i < impl.methods_len) : (i += 1) {
+            const name = self.arena.strings.slice(self.arena.impl_methods.items[impl.methods_start + i].name);
+            for (self.import_arenas.items) |a| {
+                if (self.inherentMethodIn(a, target, name) == null) continue;
+                try self.emit(.ambiguous_inherent_method, .error_, span, "duplicate method '{s}' on type '{s}'", .{ name, self.arena.strings.slice(impl.type_name) });
+                break;
+            }
+        }
+    }
+
+    /// E0218 for each method of the inherent `impl` at item `at` that an earlier
+    /// inherent impl of this file gives the same type under another name.
+    fn checkAliasedMethodDuplicates(self: *TypeChecker, impl: ast_mod.ImplDecl, at: u28, span: SourceSpan) !void {
+        const target = self.implTargetIn(self.arena, impl.type_name) orelse return;
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var j: u28 = 0;
+        while (j < at) : (j += 1) {
+            if (kinds[j] != .impl_decl) continue;
+            const earlier = self.arena.impl_decls.items[datas[j]];
+            if (earlier.trait_name != 0 or earlier.type_name == impl.type_name) continue;
+            const t = self.implTargetIn(self.arena, earlier.type_name) orelse continue;
+            if (!t.eql(target)) continue;
+            var i: u32 = 0;
+            while (i < impl.methods_len) : (i += 1) {
+                const name = self.arena.strings.slice(self.arena.impl_methods.items[impl.methods_start + i].name);
+                if (methodIn(self.arena, earlier.methods_start, earlier.methods_len, name) == null) continue;
+                try self.emit(.ambiguous_inherent_method, .error_, span, "duplicate method '{s}' on type '{s}'", .{ name, self.arena.strings.slice(impl.type_name) });
+            }
+        }
+    }
+
     /// Validate one `impl Trait for Type [when …]` (
-    /// `etch-resolver-types.md §7.2/§7.4`). Checks: the trait is declared; the orphan
-    /// rule (§7.4 — trait OR type local to this module); every abstract trait method is
-    /// provided (E0214, else the trait must supply a default); the target type is a
-    /// struct / component / resource / `Entity`.
+    /// `etch-resolver-types.md §7.2/§7.4`). Checks: the trait is declared or
+    /// imported; the target type is a struct / component / resource / enum,
+    /// declared or imported, or `Entity`; one of the two is this file's
+    /// (E0217); every abstract trait method is provided (E0214, else the trait
+    /// must supply a default).
     fn validateTraitImpl(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
         const trait_slice = self.arena.strings.slice(impl.trait_name);
         const type_slice = self.arena.strings.slice(impl.type_name);
 
-        // The trait must be a declared `trait`.
-        const trait_sym = self.symbols.get(impl.trait_name);
-        const trait_local = trait_sym != null and trait_sym.?.kind == .trait_;
-        if (!trait_local) {
+        const trait_kind = self.kindNamed(impl.trait_name);
+        if (trait_kind == null or trait_kind.? != .trait_) {
             try self.emit(.undefined_symbol, .error_, span, "trait '{s}' is not declared", .{trait_slice});
             return; // nothing further provable without the trait
         }
+        const trait = self.declNamed(impl.trait_name).?;
 
-        // The target type must be a local struct / component / resource, or the
-        // builtin `Entity` (the conditional-impl receiver, §7.3).
-        const type_sym = self.symbols.get(impl.type_name);
+        const type_kind = self.kindNamed(impl.type_name);
         const type_is_entity = std.mem.eql(u8, type_slice, "Entity");
-        const type_local = type_sym != null and (type_sym.?.kind == .struct_ or type_sym.?.kind == .component or type_sym.?.kind == .resource or type_sym.?.kind == .enum_);
-        if (!type_local and !type_is_entity) {
+        const type_declared = if (type_kind) |k| k == .struct_ or k == .component or k == .resource or k == .enum_ else false;
+        if (!type_declared and !type_is_entity) {
             try self.emit(.undefined_symbol, .error_, span, "trait-impl target '{s}' is not a struct, component, resource, or Entity", .{type_slice});
-        }
-
-        // Orphan rule (§7.4): trait OR type local to the impl's module. In single-file mode
-        // (single module) the trait is always local, so this holds — the check
-        // is structural for the cross-module future.
-        if (!trait_local and !type_local) {
-            try self.emit(.orphan_impl, .error_, span, "orphan impl: neither trait '{s}' nor type '{s}' is defined in this module", .{ trait_slice, type_slice });
+        } else if (trait.arena != self.arena and !(type_declared and self.declNamed(impl.type_name).?.arena == self.arena)) {
+            try self.emit(.orphan_impl, .error_, span, "impl of trait '{s}' for '{s}' declares neither in this module", .{ trait_slice, type_slice });
         }
 
         // E0214: every abstract trait method (no default body) must be provided.
-        const tdecl = self.arena.trait_decls.items[self.arena.itemData(trait_sym.?.item_id)];
+        const tdecl = trait.arena.trait_decls.items[trait.arena.itemData(trait.item)];
         var m: u32 = 0;
         while (m < tdecl.methods_len) : (m += 1) {
-            const tmethod = self.arena.impl_methods.items[tdecl.methods_start + m];
+            const tmethod = trait.arena.impl_methods.items[tdecl.methods_start + m];
             if (tmethod.has_body) continue; // default-bodied → optional
-            if (!self.implProvidesMethod(impl, tmethod.name)) {
-                try self.emit(.incomplete_trait_impl, .error_, span, "impl of trait '{s}' for '{s}' is missing method '{s}'", .{ trait_slice, type_slice, self.arena.strings.slice(tmethod.name) });
+            const name = trait.arena.strings.slice(tmethod.name);
+            if (methodIn(self.arena, impl.methods_start, impl.methods_len, name) == null) {
+                try self.emit(.incomplete_trait_impl, .error_, span, "impl of trait '{s}' for '{s}' is missing method '{s}'", .{ trait_slice, type_slice, name });
             }
         }
 
         // §10.2 — W0902 PrivateTypeInPublicImpl: a PUBLIC trait implemented for a
         // PRIVATE target type surfaces the private type through a public
-        // interface. Warning, not error — legitimate for internal use. Fires
-        // only when the target is a local private type AND the trait is a local
-        // PUBLIC trait (both symbols resolved above). An imported target is
-        // public by construction (only public items import), so it never trips
-        // this; an imported PUBLIC trait implemented for a private local type is
-        // the spec's "trait imported" case, but an imported-trait impl does not
-        // resolve here today (returns early at the `!trait_local` gate) — a
-        // pre-existing, orthogonal gap, not this milestone's surface.
-        if (type_sym) |ts| {
+        // interface. Warning, not error — legitimate for internal use. An
+        // imported target is public by construction (only public items import),
+        // and so is an imported trait.
+        if (self.symbols.get(impl.type_name)) |ts| {
             const target_private = self.arena.itemVisibility(ts.item_id) == .private;
-            const trait_public = self.arena.itemVisibility(trait_sym.?.item_id) == .public;
+            const trait_public = trait.arena != self.arena or self.arena.itemVisibility(trait.item) == .public;
             if (target_private and trait_public) {
                 try self.emit(.private_type_in_public_impl, .warning, span, "public trait '{s}' implemented for private type '{s}'", .{ trait_slice, type_slice });
             }
         }
-    }
-
-    /// `true` if `impl` provides a method named `name`.
-    fn implProvidesMethod(self: *TypeChecker, impl: ast_mod.ImplDecl, name: StringId) bool {
-        var m: u32 = 0;
-        while (m < impl.methods_len) : (m += 1) {
-            if (self.arena.impl_methods.items[impl.methods_start + m].name == name) return true;
-        }
-        return false;
     }
 
     /// Validate an `enum`'s variant set: non-empty,
@@ -3789,30 +4867,44 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Look up the declaration-order index of `variant` within the enum named
-    /// `enum_name`, or `null` if `enum_name` is not
-    /// a declared enum or has no such variant.
-    fn enumVariantIndex(self: *TypeChecker, enum_name: StringId, variant: StringId) ?u32 {
-        const decl = self.enumDecl(enum_name) orelse return null;
+    /// The declaration-order index of `variant` in the enum `enum_ref`, null
+    /// when it has no such variant.
+    fn enumVariantIndex(self: *TypeChecker, enum_ref: DeclRef, variant: StringId) ?u32 {
+        const e = enumOf(enum_ref);
         var i: u32 = 0;
-        while (i < decl.variants_len) : (i += 1) {
-            if (self.arena.enum_variants.items[decl.variants_start + i].name == variant) return i;
+        while (i < e.decl.variants_len) : (i += 1) {
+            if (self.sameName(e.arena, e.arena.enum_variants.items[e.decl.variants_start + i].name, variant)) return i;
         }
         return null;
     }
 
-    /// The `EnumDecl` for `enum_name`, or `null` if it is not a declared enum.
-    fn enumDecl(self: *TypeChecker, enum_name: StringId) ?ast_mod.EnumDecl {
-        const sym = self.symbols.get(enum_name) orelse return null;
-        if (sym.kind != .enum_) return null;
-        return self.arena.enum_decls.items[self.arena.itemData(sym.item_id)];
+    /// The inherent method `method_name` of the type `type_name` names
+    /// (§5.1): this file's own, else the one a file it imports defines. Two
+    /// imported files defining it is E0218 (§7.5).
+    fn lookupMethod(self: *TypeChecker, target: ImplTarget, method_name: StringId, span: SourceSpan) TypeError!?FnRef {
+        const bytes = self.arena.strings.slice(method_name);
+        if (self.inherentMethodIn(self.arena, target, bytes)) |m| return .{ .arena = self.arena, .decl = m };
+        var found: ?FnRef = null;
+        for (self.import_arenas.items) |a| {
+            const m = self.inherentMethodIn(a, target, bytes) orelse continue;
+            if (found != null) {
+                try self.emit(.ambiguous_inherent_method, .error_, span, "ambiguous method '{s}' on type '{s}' — two imported modules define it", .{ bytes, implTargetBytes(target) });
+                break;
+            }
+            found = .{ .arena = a, .decl = m };
+        }
+        return found;
     }
 
-    /// Resolve an inherent method `(type_name, method_name)` to its `FnDecl`
-    /// (§5.1), or `null` if no such method exists.
-    fn lookupMethod(self: *TypeChecker, type_name: StringId, method_name: StringId) ?ast_mod.FnDecl {
-        const idx = self.methods.get(methodKey(type_name, method_name)) orelse return null;
-        return self.arena.impl_methods.items[idx];
+    /// The method named `bytes` an inherent impl of arena `a` gives `target`.
+    fn inherentMethodIn(self: *TypeChecker, a: *const AstArena, target: ImplTarget, bytes: []const u8) ?ast_mod.FnDecl {
+        for (a.impl_decls.items) |impl| {
+            if (impl.trait_name != 0) continue;
+            const t = self.implTargetIn(a, impl.type_name) orelse continue;
+            if (!t.eql(target)) continue;
+            if (methodIn(a, impl.methods_start, impl.methods_len, bytes)) |m| return m;
+        }
+        return null;
     }
 
     /// Which declaration kind a validated field range belongs to. `component_like`
@@ -3821,10 +4913,10 @@ pub const TypeChecker = struct {
     /// non-POD surface with `struct_` / `event_` for `string` (the
     /// alignment; part1 §5.5 "no POD
     /// constraint for resources"); enum-typed resource fields are accepted too,
-    /// nested-struct fields stay deferred. `struct_` and `event_` accept `string`
+    /// nested-struct fields stay refused. `struct_` and `event_` accept `string`
     /// + enum-typed fields (the builtin `Error` forces them on structs; events
-    /// carry frame-arena non-POD payloads per `etch-memory-model.md` §6.7 / §2.5).
-    /// POD-strict is component-only.
+    /// carry frame-arena non-POD payloads per `etch-memory-model.md` §6.7 / §2.5);
+    /// only `struct_` accepts a struct-typed field. POD-strict is component-only.
     const FieldDeclOrigin = enum { component_like, resource, struct_, event_ };
 
     fn validateFieldsInDecl(self: *TypeChecker, fields_start: u32, fields_len: u32, origin: FieldDeclOrigin) !void {
@@ -3869,20 +4961,20 @@ pub const TypeChecker = struct {
 
             // Collection / composite field types (`T[]`, `[K: V]`, `Set<T>`,
             // and fixed `T[N]`) are not part of the component/resource
-            // surface — fields stay scalar POD. Reject anything non-named here
-            // rather than mis-indexing the `named_types` slab (collections
-            // land as locals, not fields).
+            // surface — fields stay scalar POD.
             const tspan = self.arena.typeNodeSpan(field.type_node);
-            if (self.arena.typeNodeKind(field.type_node) != .named) {
-                // One bounded exception: a `struct` field
-                // may be `Error?` — the builtin Error's `source` chaining field
-                // (part1 §10.2). General optional fields are unsupported.
+            if (self.arena.typeNodeKind(field.type_node) == .path) {
+                try self.checkQualifiedFieldType(field.type_node, origin, tspan);
+                if (!field.default_value.isNone()) try self.checkFieldDefault(field.default_value, field.type_node);
+                continue;
+            }
+            const field_type_name = self.arena.namedTypeName(field.type_node) orelse {
+                // A struct field may be optional, of any payload (`Error.source:
+                // Error?`, part1 §10.2); a stored field's optional needs a slot
+                // kind the registry does not have.
                 if (origin == .struct_ and self.arena.typeNodeKind(field.type_node) == .optional) {
-                    const payload: NodeId = @bitCast(self.arena.typeNodeData(field.type_node));
-                    if (self.arena.typeNodeKind(payload) == .named) {
-                        const pn = self.arena.named_types.items[self.arena.typeNodeData(payload)];
-                        if (pn.name == self.arena.error_type_name) continue;
-                    }
+                    if (!field.default_value.isNone()) try self.checkFieldDefault(field.default_value, field.type_node);
+                    continue;
                 }
                 // Resource collection fields: `T[]` (`.slice`),
                 // `[K: V]` (`.map_type`), `Set<T>` (`.set_type`) unlock on
@@ -3890,25 +4982,35 @@ pub const TypeChecker = struct {
                 // part1.md` §5.5 (`recent_servers: string[]`), the persistent-heap
                 // `CollectionSlot`. Fixed `T[N]` (`.array`) stays out of scope
                 // (falls through to rejection). Element ∈ {POD scalar, string,
-                // enum}; nested collection / unsupported element → E0222. The
-                // collection default (`= []`) is unwired, so the accepted
-                // field skips the scalar-default check below.
+                // enum}; nested collection / unsupported element → E0222. A
+                // default is checked against the element type once the element
+                // is valid.
                 if (origin == .resource) {
+                    const default = field.default_value;
                     switch (self.arena.typeNodeKind(field.type_node)) {
                         .slice => {
                             const at = self.arena.array_types.items[self.arena.typeNodeData(field.type_node)];
-                            try self.checkResourceCollectionElement(at.elem);
+                            const elem = try self.checkResourceCollectionElement(at.elem);
+                            if (elem != null and !default.isNone()) try self.checkArrayDefault(default, elem.?);
                             continue;
                         },
                         .set_type => {
                             const st = self.arena.set_types.items[self.arena.typeNodeData(field.type_node)];
-                            try self.checkResourceCollectionElement(st.elem);
+                            const elem = try self.checkResourceCollectionElement(st.elem);
+                            if (elem) |e| {
+                                if (e == .builtin) try self.checkHashBound(.{ .builtin = e.builtin }, "set element type", "T: Hash", self.arena.typeNodeSpan(st.elem));
+                                if (!default.isNone()) try self.checkSetDefault(default);
+                            }
                             continue;
                         },
                         .map_type => {
                             const mt = self.arena.map_types.items[self.arena.typeNodeData(field.type_node)];
-                            try self.checkResourceCollectionElement(mt.key);
-                            try self.checkResourceCollectionElement(mt.value);
+                            const key = try self.checkResourceCollectionElement(mt.key);
+                            const value = try self.checkResourceCollectionElement(mt.value);
+                            if (key) |k| {
+                                if (k == .builtin) try self.checkHashBound(.{ .builtin = k.builtin }, "map key type", "K: Hash", self.arena.typeNodeSpan(mt.key));
+                            }
+                            if (key != null and value != null and !default.isNone()) try self.checkMapDefault(default, key.?, value.?);
                             continue;
                         },
                         else => {},
@@ -3916,14 +5018,12 @@ pub const TypeChecker = struct {
                 }
                 try self.emit(.undefined_symbol, .error_, tspan, "collection / composite field types are not supported in E1 — component and resource fields must be scalar POD", .{});
                 continue;
-            }
-            const named_idx = self.arena.typeNodeData(field.type_node);
-            const named = self.arena.named_types.items[named_idx];
+            };
             // A field typed by an in-scope generic param (`min: T`) is a
             // generic field — accepted (type-erased). Only structs
             // are generic; component / resource fields never reach this branch.
-            if (self.generic_scope.contains(named.name)) continue;
-            const resolved_name = self.arena.resolveTypeAliasName(named.name);
+            if (self.generic_scope.contains(field_type_name)) continue;
+            const resolved_name = self.arena.resolveTypeAliasName(field_type_name);
             const tname = self.arena.strings.slice(resolved_name);
 
             if (BuiltinType.fromName(tname) == null) {
@@ -3944,14 +5044,14 @@ pub const TypeChecker = struct {
                     // against the AST enum slab (not the symbol table) so a
                     // later-declared enum is seen — pass 1 registers symbols
                     // incrementally. Components stay enum-rejected (POD-strict).
-                } else if ((origin == .struct_ or origin == .event_) and self.declaredStructName(resolved_name)) {
-                    // Struct-typed STRUCT / event fields are deferred: the
-                    // anonymous `.{ … }` field-value context
-                    // carries them — part1 §5.5 allows nested POD structs; the
-                    // literal must PROVIDE such a field (E0208, checked at the
-                    // struct literal) because it has no declared default the two
-                    // backends could agree on. Component / resource fields stay
-                    // builtin-POD-bounded.
+                } else if (origin == .event_ and self.declaredStructName(resolved_name)) {
+                    try self.emit(.undefined_symbol, .error_, tspan, "an event field cannot be of struct type '{s}'", .{tname});
+                } else if (origin == .struct_ and self.declaredStructName(resolved_name)) {
+                    // Struct-typed struct fields: the anonymous `.{ … }`
+                    // field-value context carries them — part1 §5.5 allows
+                    // nested POD structs; the literal must PROVIDE such a field
+                    // (E0208, checked at the struct literal) because it has no
+                    // declared default the two backends could agree on.
                 } else if (self.symbols.get(resolved_name)) |sym| {
                     if (sym.kind == .rule) {
                         try self.emit(.undefined_symbol, .error_, tspan, "type '{s}' is not a component, resource, or builtin", .{tname});
@@ -3994,27 +5094,45 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// A field typed `m.T`, judged by what it resolves to as a field named in
+    /// this file is. A path that resolves to nothing is reported by
+    /// `validatePathTypesIn`.
+    fn checkQualifiedFieldType(self: *TypeChecker, node: NodeId, origin: FieldDeclOrigin, span: SourceSpan) !void {
+        const t = switch (self.resolvePathTypeNode(node)) {
+            .resolved => |t| t,
+            else => return,
+        };
+        const accepted = switch (t) {
+            .builtin => |b| b != .string_ or origin != .component_like,
+            .enum_t => origin != .component_like,
+            .struct_t => origin == .struct_,
+            else => false,
+        };
+        if (accepted) return;
+        const name = self.arena.strings.slice(self.arena.path_types.items[self.arena.typeNodeData(node)].member);
+        if (t == .struct_t and origin == .event_) {
+            try self.emit(.undefined_symbol, .error_, span, "an event field cannot be of struct type '{s}'", .{name});
+        } else {
+            try self.emit(.undefined_symbol, .error_, span, "type '{s}' is not in the S3 POD builtin set", .{name});
+        }
+    }
+
     /// Validate a resource collection field's element type is in
     /// the supported set {POD scalar builtin, `string`, enum} — the exact
     /// resource scalar-field surface. A nested collection, or any other
     /// element (component/resource/struct/unknown/optional/function/…), emits
     /// `E0222 CollectionFieldElementInvalid`. This is the type-check gate only;
     /// element STORAGE and promotion wiring live in the interpreter.
-    fn checkResourceCollectionElement(self: *TypeChecker, elem: NodeId) !void {
+    fn checkResourceCollectionElement(self: *TypeChecker, elem: NodeId) !?CollectionElem {
         const espan = self.arena.typeNodeSpan(elem);
-        switch (self.arena.typeNodeKind(elem)) {
-            .named => {},
-            .slice, .array, .map_type, .set_type => {
-                try self.emit(.collection_field_element_invalid, .error_, espan, "nested collections are not supported as a resource collection element (Phase 1)", .{});
-                return;
-            },
-            else => {
-                try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element must be a scalar POD, string, or enum", .{});
-                return;
-            },
-        }
-        const named = self.arena.named_types.items[self.arena.typeNodeData(elem)];
-        const resolved = self.arena.resolveTypeAliasName(named.name);
+        const elem_name = self.arena.namedTypeName(elem) orelse {
+            switch (self.arena.typeNodeKind(elem)) {
+                .slice, .array, .map_type, .set_type => try self.emit(.collection_field_element_invalid, .error_, espan, "nested collections are not supported as a resource collection element (Phase 1)", .{}),
+                else => try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element must be a scalar POD, string, or enum", .{}),
+            }
+            return null;
+        };
+        const resolved = self.arena.resolveTypeAliasName(elem_name);
         const tname = self.arena.strings.slice(resolved);
         // Value-POD builtins + `string` + a declared enum are the supported
         // element set: they are stored inline (POD) or promoted into an owned
@@ -4026,36 +5144,112 @@ pub const TypeChecker = struct {
         // collection element is out of scope (rejected here rather than
         // becoming a silent load-time gap).
         if (BuiltinType.fromName(tname)) |bt| {
-            if (bt == .entity) {
-                try self.emit(.collection_field_element_invalid, .error_, espan, "'Entity' is not supported as a resource collection element (Phase 1) — an entity reference carries cross-reference-table remap semantics a persistent collection does not wire", .{});
-                return;
+            switch (bt) {
+                .int_, .float_, .bool_, .i32_, .u32_, .f32_, .f64_ => return .{ .builtin = bt },
+                .entity => {
+                    try self.emit(.collection_field_element_invalid, .error_, espan, "'Entity' is not supported as a resource collection element (Phase 1) — an entity reference carries cross-reference-table remap semantics a persistent collection does not wire", .{});
+                    return null;
+                },
+                else => {},
             }
-            return; // value-POD builtin, stored inline
+        } else {
+            if (std.mem.eql(u8, tname, "string")) return .string;
+            if (self.declaredEnumName(resolved)) return .{ .enum_ = self.declNamed(resolved).? };
         }
-        if (std.mem.eql(u8, tname, "string")) return;
-        if (self.declaredEnumName(resolved)) return;
         try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element type '{s}' is not supported — must be a scalar POD, string, or enum", .{tname});
+        return null;
     }
 
-    /// `true` if `name` is a declared `enum`, checked against the AST slab
-    /// (declaration-order independent, unlike the incrementally-built pass-1
-    /// symbol table). Includes the synthetic builtin `ErrorCode`.
+    /// The element type a resource collection field holds.
+    const CollectionElem = union(enum) {
+        builtin: BuiltinType,
+        string,
+        enum_: DeclRef,
+    };
+
+    /// A `T[]` field default: an array literal whose every element is a
+    /// constant of `T`.
+    fn checkArrayDefault(self: *TypeChecker, value: NodeId, elem: CollectionElem) !void {
+        if (self.arena.exprKind(value) != .array_lit) return self.refuseCollectionShape(value, "an array field default must be an array literal");
+        const al = self.arena.array_lits.items[self.arena.exprData(value)];
+        var i: u32 = 0;
+        while (i < al.elements_len) : (i += 1) {
+            try self.checkCollectionDefaultElement(@bitCast(self.arena.extra.items[al.elements_start + i]), elem);
+        }
+        if (al.is_fill and self.constArrayLen(al.fill_count) == null) {
+            try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(al.fill_count), "array fill count must be a non-negative integer literal", .{});
+        }
+    }
+
+    /// A `[K: V]` field default: a map literal whose every key and value is a
+    /// constant of `K` and `V`.
+    fn checkMapDefault(self: *TypeChecker, value: NodeId, key: CollectionElem, val: CollectionElem) !void {
+        if (self.arena.exprKind(value) != .map_lit) return self.refuseCollectionShape(value, "a map field default must be a map literal");
+        const ml = self.arena.map_lits.items[self.arena.exprData(value)];
+        var i: u32 = 0;
+        while (i < ml.entries_len) : (i += 1) {
+            const entry = self.arena.map_entries.items[ml.entries_start + i];
+            try self.checkCollectionDefaultElement(entry.key, key);
+            try self.checkCollectionDefaultElement(entry.value, val);
+        }
+    }
+
+    /// A `Set<T>` field default: a set has no literal, and the one default is
+    /// the empty `Set.new()` (`etch-stdlib.md` §4.5).
+    fn checkSetDefault(self: *TypeChecker, value: NodeId) !void {
+        if (isEmptySetConstructor(self.arena, value)) return;
+        return self.refuseCollectionShape(value, "a set field default must be `Set.new()`");
+    }
+
+    /// Refuses a collection default of the wrong shape: E0200 for a constant,
+    /// E1101 for anything that is not one, as for a scalar field.
+    fn refuseCollectionShape(self: *TypeChecker, value: NodeId, comptime message: []const u8) !void {
+        const span = self.arena.exprSpan(value);
+        const constant = switch (self.arena.exprKind(value)) {
+            .string_lit, .tag_path, .array_lit, .map_lit => true,
+            else => if (const_eval.fold(self.gpa, self.arena, value)) |_| true else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NotConstant => false,
+                else => true,
+            },
+        };
+        if (constant) {
+            try self.emit(.type_mismatch, .error_, span, message, .{});
+        } else {
+            try self.emit(.not_const_evaluable, .error_, span, "field default value must be a constant expression (literal, arithmetic on literals, or parenthesized)", .{});
+        }
+    }
+
+    /// One element of a collection default against its declared type: a
+    /// constant (E1101 otherwise) of that type, or a known variant of that enum.
+    fn checkCollectionDefaultElement(self: *TypeChecker, e: NodeId, elem: CollectionElem) !void {
+        if (!try self.foldsAsConstant(e, "a collection default element must be a constant expression")) return;
+        const span = self.arena.exprSpan(e);
+        switch (elem) {
+            .enum_ => |ename| {
+                if (self.arena.exprKind(e) == .tag_path) {
+                    _ = try self.checkEnumShorthand(e, ename);
+                } else try self.emit(.type_mismatch, .error_, span, "a '{s}' element must be a variant of that enum", .{declBytes(ename)});
+            },
+            .string => if (self.arena.exprKind(e) != .string_lit) {
+                try self.emit(.type_mismatch, .error_, span, "a string element must be a string literal", .{});
+            },
+            .builtin => |bt| {
+                const et = try self.synthExprE(e, null);
+                const fits = et == .builtin and try self.literalTypeFits(bt, e, et.builtin);
+                if (!fits) try self.emit(.type_mismatch, .error_, span, "collection element type does not match the declared element type", .{});
+            },
+        }
+    }
+
+    /// Whether `name` is a declared `enum`, the file's own or an imported one.
     fn declaredEnumName(self: *TypeChecker, name: StringId) bool {
-        for (self.arena.enum_decls.items) |decl| {
-            if (decl.name == name) return true;
-        }
-        return false;
+        return self.enumNamed(name) != null;
     }
 
-    /// `true` if `name` is a declared `struct`. Checked
-    /// against the AST struct slab (not the symbol table) so a later-declared
-    /// struct is seen — pass 1 registers symbols incrementally, mirroring
-    /// `declaredEnumName`.
+    /// Whether `name` is a declared `struct`, the file's own or an imported one.
     fn declaredStructName(self: *TypeChecker, name: StringId) bool {
-        for (self.arena.struct_decls.items) |decl| {
-            if (decl.name == name) return true;
-        }
-        return false;
+        return self.structNamed(name) != null;
     }
 
     /// Validate annotation applicability for a `(start, len)` range in
@@ -4079,77 +5273,646 @@ pub const TypeChecker = struct {
     /// Validate a top-level `const` value: it must be const-evaluable
     /// (`E1101`) and its synthesized type must match the declared `: type`
     /// (`E0200`). Reuses the field-default const surface (`isConstEvaluable` +
-    /// `namedTypeToResolved` + `synthExpr` + `literalTypeFits`); the only
+    /// `namedTypeToResolved` + `synthExprE` + `literalTypeFits`); the only
     /// difference is the const-specific diagnostic wording.
     fn checkConstValue(self: *TypeChecker, value: NodeId, type_node: NodeId) !void {
-        if (!isConstEvaluable(self.arena, value)) {
-            try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(value), "const value must be a constant expression (literal, arithmetic on literals, or parenthesized)", .{});
-            return;
-        }
+        if (!try self.foldsAsConstant(value, "const value must be a constant expression (literal, arithmetic on literals, or parenthesized)")) return;
         const declared = self.namedTypeToResolved(type_node);
-        const actual = self.synthExpr(value, null);
-        if (declared == .builtin and actual == .builtin) {
-            if (!self.literalTypeFits(declared.builtin, value, actual.builtin)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "const value type does not match the declared type", .{});
-            }
+        const actual = try self.synthExprE(value, null);
+        if (!try self.valueFits(declared, value, actual)) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "const value type does not match the declared type", .{});
         }
     }
 
     fn checkFieldDefault(self: *TypeChecker, value: NodeId, type_node: NodeId) !void {
-        // Const-evaluability check.
-        if (!isConstEvaluable(self.arena, value)) {
-            try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(value), "field default value must be a constant expression (literal, arithmetic on literals, or parenthesized)", .{});
+        if (!try self.foldsAsConstant(value, "field default value must be a constant expression (literal, arithmetic on literals, or parenthesized)")) return;
+        const declared = self.namedTypeToResolved(type_node);
+        if (declared == .enum_t) {
+            if (self.arena.exprKind(value) == .tag_path) {
+                _ = try self.checkEnumShorthand(value, declared.enum_t);
+            } else try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "an enum field default must be a variant of that enum", .{});
             return;
         }
-        const declared = self.namedTypeToResolved(type_node);
-        const actual = self.synthExpr(value, null);
-        if (declared == .builtin and actual == .builtin) {
-            if (!self.literalTypeFits(declared.builtin, value, actual.builtin)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "default value type does not match declared field type", .{});
-            }
+        const actual = try self.synthExprE(value, null);
+        if (!try self.valueFits(declared, value, actual)) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "default value type does not match declared field type", .{});
         }
-        // If declared isn't builtin (e.g. unknown), we already emitted a
-        // diagnostic during field-type resolution — skip cascade.
     }
 
-    /// Polymorphic int / float literal rule (cf. `etch-reference-part1.md`
-    /// §4.3). When the declared context type is given and the value is a
-    /// literal of the same numeric family (int family → any integer
-    /// builtin, float family → any float builtin), the literal fits. All
-    /// other forms require exact equality (no implicit numeric coercion).
-    fn literalTypeFits(self: *TypeChecker, declared: BuiltinType, actual_expr: NodeId, actual: BuiltinType) bool {
-        if (declared == actual) return true;
-        const kind = self.arena.exprKind(actual_expr);
-        if (kind == .int_lit and actual == .int_ and declared.isInteger()) return true;
-        if (kind == .float_lit and actual == .float_ and declared.isFloat()) return true;
-        // Negative literals via unary minus on a literal also fit when the
-        // operand is a matching numeric literal.
-        if (kind == .unary) {
-            const un = self.arena.unary_exprs.items[self.arena.exprData(actual_expr)];
-            if (un.op == .neg) {
-                const inner_kind = self.arena.exprKind(un.operand);
-                if (inner_kind == .int_lit and actual == .int_ and declared.isInteger()) return true;
-                if (inner_kind == .float_lit and actual == .float_ and declared.isFloat()) return true;
+    /// A collection literal against the builtin element types a `let`
+    /// annotation declares; any other element type is left to `valueFits`. The
+    /// literal's own type follows its elements, so a numeric literal element is
+    /// judged against the declared type directly, and any other element
+    /// carries the literal's type.
+    fn checkCollectionLitAgainst(self: *TypeChecker, value: NodeId, declared: ResolvedType, inferred: ResolvedType) !void {
+        switch (self.arena.exprKind(value)) {
+            .array_lit => {
+                const elem: BuiltinType = switch (declared) {
+                    .array_dyn => |e| if (e.* == .builtin) e.builtin else return,
+                    .array_fixed => |info| if (info.elem.* == .builtin) info.elem.builtin else return,
+                    else => return,
+                };
+                const lit_elem: ?BuiltinType = switch (inferred) {
+                    .array_dyn => |e| builtinOrNull(e),
+                    .array_fixed => |info| builtinOrNull(info.elem),
+                    else => null,
+                };
+                const al = self.arena.array_lits.items[self.arena.exprData(value)];
+                var i: u32 = 0;
+                while (i < al.elements_len) : (i += 1) {
+                    try self.checkElementAgainst(elem, @bitCast(self.arena.extra.items[al.elements_start + i]), lit_elem);
+                }
+            },
+            .map_lit => {
+                if (declared != .map_t or declared.map_t.key.* != .builtin or declared.map_t.value.* != .builtin) return;
+                const lit: ?MapInfo = if (inferred == .map_t) inferred.map_t else null;
+                const ml = self.arena.map_lits.items[self.arena.exprData(value)];
+                var i: u32 = 0;
+                while (i < ml.entries_len) : (i += 1) {
+                    const entry = self.arena.map_entries.items[ml.entries_start + i];
+                    try self.checkElementAgainst(declared.map_t.key.builtin, entry.key, if (lit) |m| builtinOrNull(m.key) else null);
+                    try self.checkElementAgainst(declared.map_t.value.builtin, entry.value, if (lit) |m| builtinOrNull(m.value) else null);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn builtinOrNull(t: *const ResolvedType) ?BuiltinType {
+        return if (t.* == .builtin) t.builtin else null;
+    }
+
+    fn checkElementAgainst(self: *TypeChecker, declared: BuiltinType, e: NodeId, lit_type: ?BuiltinType) !void {
+        var lit = e;
+        if (self.arena.exprKind(lit) == .unary and self.arena.unary_exprs.items[self.arena.exprData(lit)].op == .neg) {
+            lit = self.arena.unary_exprs.items[self.arena.exprData(lit)].operand;
+        }
+        const fits = switch (self.arena.exprKind(lit)) {
+            .int_lit => try self.literalTypeFits(declared, e, .int_),
+            .float_lit => try self.literalTypeFits(declared, e, .float_),
+            else => (lit_type orelse return) == declared,
+        };
+        if (!fits) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(e), "collection element type does not match the declared element type", .{});
+    }
+
+    /// Each params-block default against its field's declared type; a type the
+    /// checker does not resolve, such as an engine one, is not judged.
+    fn checkParamDefaults(self: *TypeChecker, start: u32, len: u32) !void {
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const f = self.arena.fields.items[start + i];
+            if (f.default_value.isNone()) continue;
+            const declared = self.namedTypeToResolved(f.type_node);
+            if (declared == .unknown) continue;
+            const actual = try self.checkExpr(f.default_value, declared, null);
+            if (!try self.valueFits(declared, f.default_value, actual)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.default_value), "params default value type does not match the declared type", .{});
             }
         }
-        return false;
+    }
+
+    /// A shader's params defaults, range-checked only: a shader default of
+    /// another type is E1613 (`etch-validation-ecs.md` §14.2), which has no
+    /// variant.
+    fn checkShaderParamRanges(self: *TypeChecker, start: u32, len: u32) !void {
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const f = self.arena.fields.items[start + i];
+            if (f.default_value.isNone()) continue;
+            const declared = self.namedTypeToResolved(f.type_node);
+            if (declared != .builtin) continue;
+            const actual = try self.synthExprE(f.default_value, null);
+            if (actual == .builtin) _ = try self.literalTypeFits(declared.builtin, f.default_value, actual.builtin);
+        }
+    }
+
+    /// Whether `value` folds as a constant, emitting E1101 when it does not or
+    /// when its folding overflows, divides by zero or leaves the finite floats
+    /// (`etch-resolver-types.md` §11). A string literal or `.variant` is a
+    /// constant with nothing to fold. A kind mismatch or an out-of-range literal
+    /// folds `true`: the type check and the literal pass report those.
+    fn foldsAsConstant(self: *TypeChecker, value: NodeId, not_constant: []const u8) !bool {
+        switch (self.arena.exprKind(value)) {
+            .string_lit, .tag_path, .none_lit => return true,
+            else => {},
+        }
+        _ = const_eval.fold(self.gpa, self.arena, value) catch |err| {
+            const span = self.arena.exprSpan(value);
+            switch (err) {
+                error.NotConstant => try self.emit(.not_const_evaluable, .error_, span, "{s}", .{not_constant}),
+                error.IntegerOverflow => try self.emit(.not_const_evaluable, .error_, span, "the constant overflows int", .{}),
+                error.DivisionByZero => try self.emit(.not_const_evaluable, .error_, span, "the constant divides by zero", .{}),
+                error.FloatOverflow => try self.emit(.not_const_evaluable, .error_, span, "the constant is not a finite float", .{}),
+                error.KindMismatch, error.LiteralOutOfRange => return true,
+                error.OutOfMemory => return error.OutOfMemory,
+            }
+            return false;
+        };
+        return true;
+    }
+
+    /// A closure body is checked where it is called, and some never are, so its
+    /// jumps are judged where the parser found them.
+    fn checkClosureEscapes(self: *TypeChecker) !void {
+        for (self.arena.closure_escapes.items) |stmt| {
+            const what: []const u8 = if (self.arena.stmtKind(stmt) == .break_stmt) "break" else "continue";
+            try self.emit(.control_flow_escapes_closure, .error_, self.arena.stmtSpan(stmt), "'{s}' targets a loop outside its closure — control flow cannot cross a closure boundary", .{what});
+        }
+    }
+
+    /// Every integer literal fits `int` and every float or duration literal is
+    /// finite, whatever context it sits in (`etch-resolver-types.md` §4.3). The
+    /// lexer never includes the sign, so a literal under a unary minus is judged
+    /// negated: `-9223372036854775808` fits.
+    fn checkLiteralRanges(self: *TypeChecker) !void {
+        return self.checkLiteralRangesIn(.all);
+    }
+
+    /// Which literals a range check covers.
+    const LiteralWindow = union(enum) {
+        all,
+        /// Expression and type-node indices: a run parsed on its own.
+        indices: struct { expr_from: u32, expr_to: u32, type_from: u32, type_to: u32 },
+        /// Source bytes: a body inside a parsed source.
+        bytes: struct { from: u32, to: u32 },
+
+        fn holdsExpr(w: LiteralWindow, index: usize, span: SourceSpan) bool {
+            return switch (w) {
+                .all => true,
+                .indices => |r| index >= r.expr_from and index < r.expr_to,
+                .bytes => |r| span.byte_start >= r.from and span.byte_end <= r.to,
+            };
+        }
+
+        fn holdsType(w: LiteralWindow, index: usize, size_span: SourceSpan) bool {
+            return switch (w) {
+                .all => true,
+                .indices => |r| index >= r.type_from and index < r.type_to,
+                .bytes => |r| size_span.byte_start >= r.from and size_span.byte_end <= r.to,
+            };
+        }
+    };
+
+    fn checkLiteralRangesIn(self: *TypeChecker, window: LiteralWindow) !void {
+        const kinds = self.arena.exprs.items(.kind);
+        const datas = self.arena.exprs.items(.data);
+        const spans = self.arena.exprs.items(.span);
+        var negated: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer negated.deinit(self.gpa);
+        for (kinds, datas) |k, d| {
+            if (k != .unary) continue;
+            const u = self.arena.unary_exprs.items[d];
+            if (u.op == .neg and self.arena.exprKind(u.operand) == .int_lit) try negated.put(self.gpa, u.operand.index, {});
+        }
+        for (kinds, datas, spans, 0..) |k, d, span, i| {
+            if (!window.holdsExpr(i, span)) continue;
+            const id: NodeId = .{ .category = .expr, .index = @intCast(i) };
+            const text = self.arena.strings.slice(d);
+            const fits = switch (k) {
+                .int_lit => const_eval.intLiteralValue(text, negated.contains(id.index)) != null,
+                .float_lit => try const_eval.floatLiteralValue(self.gpa, text) != null,
+                .duration_lit => text.len < 2 or try const_eval.floatLiteralValue(self.gpa, text[0 .. text.len - 1]) != null,
+                else => continue,
+            };
+            if (fits) continue;
+            try self.range_reported.put(self.gpa, id.raw(), {});
+            const family = if (k == .int_lit) "int" else "float";
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "literal {s} does not fit in {s}", .{ text, family });
+        }
+        const tkinds = self.arena.type_nodes.items(.kind);
+        const tdatas = self.arena.type_nodes.items(.data);
+        for (tkinds, tdatas, 0..) |k, d, i| {
+            if (k != .array) continue;
+            const size = self.arena.array_types.items[d].size;
+            if (!window.holdsType(i, self.arena.exprSpan(size))) continue;
+            if (self.constArrayLen(size) != null) continue;
+            try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(size), "array size must be a non-negative integer literal", .{});
+        }
+    }
+
+    /// Whether a value of type `actual` fits a slot of type `declared`. A
+    /// generic fits anything: a struct's own type parameters resolve against the
+    /// caller's.
+    fn valueFits(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) TypeError!bool {
+        if (self.closure_calls == 0 or value.isNone() or self.comparing) return self.fitsValue(declared, value, actual);
+        _ = self.arena.implicit_wraps.remove(value.raw());
+        const fits = try self.fitsValue(declared, value, actual);
+        const layers = self.arena.implicit_wraps.get(value.raw()) orelse 0;
+        const earlier = try self.closure_wraps.getOrPut(self.gpa, value.raw());
+        if (!earlier.found_existing) {
+            earlier.value_ptr.* = layers;
+        } else if (earlier.value_ptr.* != layers) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "this closure wraps the value into an optional at one call and not at another; annotate its parameters", .{});
+        }
+        return fits;
+    }
+
+    fn fitsValue(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) TypeError!bool {
+        var target = declared;
+        while (target == .optional) target = target.optional.*;
+        if (target == .enum_t) try self.fitShorthands(target.enum_t, value);
+        if (!value.isNone() and self.arena.isEnumShorthand(value) and target != .unknown and target != .generic) {
+            if (target == .enum_t) return declared != .optional or try self.wrapsInto(value, optionalDepth(declared));
+            try self.refuseShorthand(value, null);
+            return true;
+        }
+        if (self.lengthMisfits(declared, value)) return false;
+        if (declared == .unknown or actual == .unknown or declared == .generic) return true;
+        // A `T` fits a `T?` by the implicit wrap (`etch-reference-part1.md` §3.6),
+        // which the interpreter applies to `value` once per layer. A generic
+        // counts no layer of its own, whatever it is bound to.
+        if (actual == .generic) {
+            if (declared != .optional or target != .generic or self.comparing) return true;
+            return self.wrapsInto(value, optionalDepth(declared));
+        }
+        if (optionalDepth(declared) > optionalDepth(actual)) {
+            var payload = declared;
+            var layers: u8 = 0;
+            while (optionalDepth(payload) > optionalDepth(actual)) : (layers += 1) payload = payload.optional.*;
+            if (!try self.valueFits(payload, value, actual)) return false;
+            return self.wrapsInto(value, layers);
+        }
+        if (declared == .builtin and actual == .builtin) {
+            if (value.isNone()) return declared.builtin == actual.builtin;
+            return self.literalTypeFits(declared.builtin, value, actual.builtin);
+        }
+        if (declared == .builtin and declared.builtin == .vec3 and actual == .array_fixed)
+            return actual.array_fixed.len == 3 and actual.array_fixed.elem.* == .builtin and actual.array_fixed.elem.builtin.isNumeric();
+        if ((declared == .builtin) != (actual == .builtin)) return false;
+        if (std.meta.activeTag(declared) != std.meta.activeTag(actual) and !(isArray(declared) and isArray(actual))) return false;
+        if (isNominal(declared)) return ResolvedType.eql(declared, actual);
+        return self.elementsFit(declared, value, actual);
+    }
+
+    /// `valueFits` for a value a pattern or an operator compares with the slot.
+    fn valueCompares(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) TypeError!bool {
+        const saved = self.comparing;
+        self.comparing = true;
+        defer self.comparing = saved;
+        return self.valueFits(declared, value, actual);
+    }
+
+    /// Records that `value` is wrapped `layers` times into its slot's optional;
+    /// false when the slot compares it instead.
+    fn wrapsInto(self: *TypeChecker, value: NodeId, layers: u8) TypeError!bool {
+        if (self.comparing) return false;
+        if (!value.isNone()) try self.arena.implicit_wraps.put(self.gpa, value.raw(), layers);
+        return true;
+    }
+
+    /// Two collections, optionals or ranges of one kind: the elements of a
+    /// literal each by the literal rule, any other value by equal element types.
+    fn elementsFit(self: *TypeChecker, declared: ResolvedType, value: NodeId, actual: ResolvedType) TypeError!bool {
+        const kind: ?ast_mod.ExprKind = if (value.isNone()) null else self.arena.exprKind(value);
+        switch (declared) {
+            .array_fixed, .array_dyn => {
+                const want = arrayElem(declared);
+                const have = arrayElem(actual);
+                if (declared == .array_fixed and (actual != .array_fixed or declared.array_fixed.len != actual.array_fixed.len)) return false;
+                if (kind == .array_lit) return self.runFits(want.*, self.arena.array_lits.items[self.arena.exprData(value)], have.*);
+                return self.sameElement(want.*, have.*);
+            },
+            .set_t => |want| {
+                if (kind == .method_call) {
+                    const mc = self.arena.method_calls.items[self.arena.exprData(value)];
+                    if (mc.args_len == 1) {
+                        const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+                        if (self.arena.exprKind(arg) == .array_lit) return self.runFits(want.*, self.arena.array_lits.items[self.arena.exprData(arg)], actual.set_t.*);
+                    }
+                }
+                return self.sameElement(want.*, actual.set_t.*);
+            },
+            .map_t => |want| {
+                if (kind == .map_lit) {
+                    const ml = self.arena.map_lits.items[self.arena.exprData(value)];
+                    var i: u32 = 0;
+                    while (i < ml.entries_len) : (i += 1) {
+                        const entry = self.arena.map_entries.items[ml.entries_start + i];
+                        if (!try self.elementFits(want.key.*, entry.key, actual.map_t.key.*)) return false;
+                        if (!try self.elementFits(want.value.*, entry.value, actual.map_t.value.*)) return false;
+                    }
+                    return true;
+                }
+                return try self.sameElement(want.key.*, actual.map_t.key.*) and try self.sameElement(want.value.*, actual.map_t.value.*);
+            },
+            .optional => |want| {
+                if (kind == .some_lit) return self.valueFits(want.*, @bitCast(self.arena.exprData(value)), actual.optional.*);
+                return self.valueFits(want.*, NodeId.none, actual.optional.*);
+            },
+            .range => |want| return want == actual.range,
+            else => return true,
+        }
+    }
+
+    /// Whether an array literal `value` yields, at any depth, has another length
+    /// than the fixed array `want` gives it there.
+    fn lengthMisfits(self: *TypeChecker, want: ResolvedType, value: NodeId) bool {
+        if (value.isNone()) return false;
+        var slot = want;
+        while (slot == .optional) slot = slot.optional.*;
+        const data = self.arena.exprData(value);
+        switch (self.arena.exprKind(value)) {
+            .block_expr => return self.lengthMisfits(slot, self.arena.block_exprs.items[data].value),
+            .if_expr => {
+                const ife = self.arena.if_exprs.items[data];
+                return self.lengthMisfits(slot, ife.then_block) or self.lengthMisfits(slot, ife.else_branch);
+            },
+            .match_expr => {
+                const m = self.arena.match_exprs.items[data];
+                var i: u32 = 0;
+                while (i < m.arms_len) : (i += 1) {
+                    if (self.lengthMisfits(slot, self.arena.match_arms.items[m.arms_start + i].body)) return true;
+                }
+                return false;
+            },
+            .some_lit => return self.lengthMisfits(slot, @bitCast(data)),
+            .loop_expr => {
+                for (self.loopBreaks(value)) |v| {
+                    if (self.lengthMisfits(slot, v)) return true;
+                }
+                return false;
+            },
+            .array_lit => {
+                if (!isArray(slot)) return slot != .unknown and slot != .generic and isEmptyArrayLit(self.arena, value);
+                const al = self.arena.array_lits.items[data];
+                if (slot == .array_fixed) {
+                    const len: u64 = if (al.is_fill) (self.constArrayLen(al.fill_count) orelse return false) else al.elements_len;
+                    if (len != slot.array_fixed.len) return true;
+                }
+                var i: u32 = 0;
+                while (i < al.elements_len) : (i += 1) {
+                    if (self.lengthMisfits(arrayElem(slot).*, @bitCast(self.arena.extra.items[al.elements_start + i]))) return true;
+                }
+                return false;
+            },
+            .map_lit => {
+                if (slot != .map_t) return false;
+                const ml = self.arena.map_lits.items[data];
+                var i: u32 = 0;
+                while (i < ml.entries_len) : (i += 1) {
+                    const entry = self.arena.map_entries.items[ml.entries_start + i];
+                    if (self.lengthMisfits(slot.map_t.key.*, entry.key) or self.lengthMisfits(slot.map_t.value.*, entry.value)) return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    /// Whether a collection whose elements are `have` is one whose elements are
+    /// `want`: an element takes no conversion.
+    fn sameElement(self: *TypeChecker, want: ResolvedType, have: ResolvedType) TypeError!bool {
+        return self.valueCompares(want, NodeId.none, have);
+    }
+
+    fn arrayElem(t: ResolvedType) *const ResolvedType {
+        return switch (t) {
+            .array_fixed => |info| info.elem,
+            .array_dyn => |elem| elem,
+            else => unreachable,
+        };
+    }
+
+    fn runFits(self: *TypeChecker, want: ResolvedType, al: ast_mod.ArrayLitExpr, have: ResolvedType) !bool {
+        var i: u32 = 0;
+        while (i < al.elements_len) : (i += 1) {
+            if (!try self.elementFits(want, @bitCast(self.arena.extra.items[al.elements_start + i]), have)) return false;
+        }
+        return true;
+    }
+
+    /// One element of a collection literal: a numeric literal by the literal
+    /// rule, anything else by the literal's own element type.
+    fn elementFits(self: *TypeChecker, want: ResolvedType, e: NodeId, have: ResolvedType) TypeError!bool {
+        if (want == .builtin) {
+            var lit = e;
+            if (self.arena.exprKind(lit) == .unary and self.arena.unary_exprs.items[self.arena.exprData(lit)].op == .neg) {
+                lit = self.arena.unary_exprs.items[self.arena.exprData(lit)].operand;
+            }
+            switch (self.arena.exprKind(lit)) {
+                .int_lit => return self.literalTypeFits(want.builtin, e, .int_),
+                .float_lit => return self.literalTypeFits(want.builtin, e, .float_),
+                else => {},
+            }
+        }
+        return self.valueFits(want, e, have);
+    }
+
+    fn isArray(t: ResolvedType) bool {
+        return t == .array_fixed or t == .array_dyn;
+    }
+
+    fn builtinWhere(t: ResolvedType, comptime pred: fn (BuiltinType) bool) bool {
+        return switch (t) {
+            .unknown, .generic => true,
+            .builtin => |bt| pred(bt),
+            else => false,
+        };
+    }
+
+    fn isBool(bt: BuiltinType) bool {
+        return bt == .bool_;
+    }
+
+    fn isDuration(bt: BuiltinType) bool {
+        return bt == .duration;
+    }
+
+    fn isString(bt: BuiltinType) bool {
+        return bt == .string_;
+    }
+
+    /// A loop a `break` can target; `yields` for a `loop`, whose value is its
+    /// breaks', each checked against `expected`.
+    const BreakFrame = struct {
+        label: StringId,
+        yields: bool,
+        expected: ResolvedType = .unknown,
+        values: std.ArrayListUnmanaged(Branch) = .empty,
+    };
+
+    /// A value one branch of an `if`, a `match` or a loop's `break`s yields.
+    const Branch = struct { node: NodeId, t: ResolvedType, span: SourceSpan };
+
+    /// The index of the loop a `break` leaves: the innermost one of any kind
+    /// when unlabeled, else the `loop` carrying its label. An index and not a
+    /// pointer: typing the break's value can push frames and move the list.
+    fn breakTarget(self: *const TypeChecker, label: StringId) ?usize {
+        var i = self.break_frames.items.len;
+        while (i > self.break_base) {
+            i -= 1;
+            if (label == 0 or self.break_frames.items[i].label == label) return i;
+        }
+        return null;
+    }
+
+    /// Whether a match arm's or a break value's type agrees with the earlier
+    /// ones': two builtins only when equal, such a value being a bare literal
+    /// as often as not.
+    fn armsAgree(self: *TypeChecker, earlier: ResolvedType, body: NodeId, body_t: ResolvedType) !bool {
+        if (earlier == .builtin and body_t == .builtin) return ResolvedType.eql(earlier, body_t);
+        return self.valueFits(earlier, body, body_t);
+    }
+
+    /// Whether `value` yields `none` on every path.
+    fn yieldsNone(self: *TypeChecker, value: NodeId) bool {
+        return self.everyPathYields(value, isNoneLit);
+    }
+
+    /// Whether `value` yields `[]` on every path.
+    fn yieldsEmptyArray(self: *TypeChecker, value: NodeId) bool {
+        return self.everyPathYields(value, isEmptyArrayLit);
+    }
+
+    fn isNoneLit(a: *const AstArena, value: NodeId) bool {
+        return a.exprKind(value) == .none_lit;
+    }
+
+    fn isEmptyArrayLit(a: *const AstArena, value: NodeId) bool {
+        if (a.exprKind(value) != .array_lit) return false;
+        const al = a.array_lits.items[a.exprData(value)];
+        return !al.is_fill and al.elements_len == 0;
+    }
+
+    fn everyPathYields(self: *TypeChecker, value: NodeId, comptime leaf: fn (*const AstArena, NodeId) bool) bool {
+        if (value.isNone()) return false;
+        const data = self.arena.exprData(value);
+        switch (self.arena.exprKind(value)) {
+            .block_expr => return self.everyPathYields(self.arena.block_exprs.items[data].value, leaf),
+            .if_expr => {
+                const ife = self.arena.if_exprs.items[data];
+                return self.everyPathYields(ife.then_block, leaf) and self.everyPathYields(ife.else_branch, leaf);
+            },
+            .match_expr => {
+                const m = self.arena.match_exprs.items[data];
+                var i: u32 = 0;
+                while (i < m.arms_len) : (i += 1) {
+                    if (!self.everyPathYields(self.arena.match_arms.items[m.arms_start + i].body, leaf)) return false;
+                }
+                return m.arms_len != 0;
+            },
+            .loop_expr => {
+                const breaks = self.loopBreaks(value);
+                for (breaks) |v| {
+                    if (!self.everyPathYields(v, leaf)) return false;
+                }
+                return breaks.len != 0;
+            },
+            else => return leaf(self.arena, value),
+        }
+    }
+
+    /// The type `branches` join to (`etch-reference-part1.md` §3.6): the first
+    /// value's, the optional of it that a later value is, the dynamic array two
+    /// arrays of one element and two lengths are (`[]` being of length zero),
+    /// and the optional of it when a branch yields `none`.
+    fn joinBranches(self: *TypeChecker, branches: []const Branch) TypeError!ResolvedType {
+        var join: ?ResolvedType = null;
+        var none = false;
+        var empty = false;
+        for (branches) |b| {
+            if (self.yieldsNone(b.node)) {
+                none = true;
+            } else if (self.yieldsEmptyArray(b.node)) {
+                empty = true;
+            } else if (join) |j| {
+                if (optionalDepth(b.t) > optionalDepth(j) and try self.valueFits(b.t, NodeId.none, j)) {
+                    join = b.t;
+                } else if (isArray(j) and isArray(b.t) and !j.eql(b.t) and arrayElem(j).eql(arrayElem(b.t).*)) {
+                    join = .{ .array_dyn = arrayElem(j) };
+                }
+            } else join = b.t;
+        }
+        const first = join orelse return ResolvedType.unknown;
+        const t: ResolvedType = if (empty and first == .array_fixed and first.array_fixed.len != 0) .{ .array_dyn = first.array_fixed.elem } else first;
+        if (none and t != .optional and t != .unknown and t != .unit) return self.optionalOf(t);
+        return t;
+    }
+
+    /// The expected type of a slot whose type is declared: one the checker does
+    /// not resolve is still a slot, as opaque as a type parameter, so an empty
+    /// `[]` in it is not E0207.
+    fn declaredSlot(t: ResolvedType) ResolvedType {
+        return if (t == .unknown) .{ .generic = 0 } else t;
+    }
+
+    /// Whether branch `b` fits the type its branches join to; `strict` applies
+    /// `armsAgree`. A branch that is `[]` on every path fits a join of no
+    /// array: its slot judges it, else E0207 has.
+    fn branchFits(self: *TypeChecker, join: ResolvedType, b: Branch, strict: bool) TypeError!bool {
+        if (self.yieldsNone(b.node)) return true;
+        var payload = join;
+        while (payload == .optional) payload = payload.optional.*;
+        if (!isArray(payload) and self.yieldsEmptyArray(b.node)) return true;
+        return if (strict) self.armsAgree(join, b.node, b.t) else self.valueFits(join, b.node, b.t);
+    }
+
+    fn isNominal(t: ResolvedType) bool {
+        return switch (t) {
+            .struct_t, .enum_t, .component, .resource, .builtin_resource, .event_t => true,
+            else => false,
+        };
+    }
+
+    /// Polymorphic int / float literal rule (`etch-resolver-types.md` §4.3).
+    /// When the declared context type is given and the value is a literal of
+    /// the same numeric family (int family → any integer builtin, float family
+    /// → any float builtin), the literal fits its family, and a literal outside
+    /// the declared type's range is refused here. All other forms require exact
+    /// equality (no implicit numeric coercion).
+    fn literalTypeFits(self: *TypeChecker, declared: BuiltinType, actual_expr: NodeId, actual: BuiltinType) !bool {
+        if (declared == actual) return true;
+        var lit = actual_expr;
+        var negated = false;
+        if (self.arena.exprKind(actual_expr) == .unary) {
+            const un = self.arena.unary_exprs.items[self.arena.exprData(actual_expr)];
+            if (un.op != .neg) return false;
+            lit = un.operand;
+            negated = true;
+        }
+        const kind = self.arena.exprKind(lit);
+        const int_family = kind == .int_lit and actual == .int_ and declared.isInteger();
+        const float_family = kind == .float_lit and actual == .float_ and declared.isFloat();
+        if (!int_family and !float_family) return false;
+        if (self.range_reported.contains(lit.raw())) return true;
+        const text = self.arena.strings.slice(self.arena.exprData(lit));
+        const fits = if (int_family) blk: {
+            const v = const_eval.intLiteralValue(text, negated) orelse return true;
+            break :blk switch (declared) {
+                .i32_ => std.math.cast(i32, v) != null,
+                .u32_ => std.math.cast(u32, v) != null,
+                else => true,
+            };
+        } else blk: {
+            const v = (try const_eval.floatLiteralValue(self.gpa, text)) orelse return true;
+            break :blk declared != .f32_ or std.math.isFinite(@as(f32, @floatCast(v)));
+        };
+        if (!fits) {
+            try self.range_reported.put(self.gpa, lit.raw(), {});
+            const type_name: []const u8 = switch (declared) {
+                .i32_ => "i32",
+                .u32_ => "u32",
+                else => "f32",
+            };
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(actual_expr), "literal {s}{s} does not fit in {s}", .{ if (negated) "-" else "", text, type_name });
+        }
+        return true;
     }
 
     /// Resolve a type node to a `ResolvedType`. Despite the historical name it
     /// dispatches on the node kind: `.named` resolves through the alias chain
-    /// to a builtin / component / resource; the collection kinds (`.array` /
-    /// `.slice` / `.map_type` / `.set_type`) resolve their element /
-    /// key / value to a builtin.
+    /// to a builtin or a declared type; the collection kinds (`.array` /
+    /// `.slice` / `.map_type` / `.set_type`) resolve their element / key /
+    /// value, an unknown one leaving the collection unknown.
     fn namedTypeToResolved(self: *TypeChecker, type_node: NodeId) ResolvedType {
         switch (self.arena.typeNodeKind(type_node)) {
             .named => {
-                const named_idx = self.arena.typeNodeData(type_node);
-                const named = self.arena.named_types.items[named_idx];
+                const name = self.arena.namedTypeName(type_node).?;
                 // A type-parameter name in scope resolves to a generic variable
                 // checked before alias / builtin / symbol.
-                if (self.generic_scope.contains(named.name)) return .{ .generic = named.name };
+                if (self.generic_scope.contains(name)) return .{ .generic = name };
                 // Resolve through any top-level `type` alias chain first.
-                const resolved_name = self.arena.resolveTypeAliasName(named.name);
+                const resolved_name = self.arena.resolveTypeAliasName(name);
                 const tname = self.arena.strings.slice(resolved_name);
                 // `string` in a declared-type position.
                 // Kept out of `fromName` so the component/resource POD
@@ -4158,38 +5921,20 @@ pub const TypeChecker = struct {
                 if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
                 if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
                 if (self.symbols.get(resolved_name)) |sym| {
-                    return switch (sym.kind) {
-                        .component => .{ .component = resolved_name },
-                        .resource => .{ .resource = resolved_name },
-                        .struct_ => .{ .struct_t = resolved_name },
-                        .enum_ => .{ .enum_t = resolved_name },
-                        else => .unknown,
-                    };
+                    if (sym.kind == .event_) return .unknown;
+                    return nominalOf(.{ .arena = self.arena, .item = sym.item_id }) orelse .unknown;
                 }
-                // a selectively-imported type resolves in any type
-                // position (`type HA = Health`, field types, signatures). Identity
-                // is the local-name `StringId`; the defining arena is reached via
-                // `imported_symbols` only where the decl itself is needed (the
-                // cross-arena component check, `checkComponentInstance`).
                 if (self.imported_symbols.get(resolved_name)) |entry| {
                     return switch (entry.kind) {
-                        .component => .{ .component = resolved_name },
-                        .resource => .{ .resource = resolved_name },
-                        .struct_ => .{ .struct_t = resolved_name },
-                        .enum_ => .{ .enum_t = resolved_name },
-                        else => .unknown,
+                        .type_alias => self.importedAliasTarget(entry),
+                        .event_ => .unknown,
+                        else => nominalOf(exportRef(self.project.?, entry)) orelse .unknown,
                     };
                 }
                 return .unknown;
             },
             .path => {
-                // `alias.Member` qualified type. Resolve silently
-                // through the whole-module aliases + project exports — the
-                // qualified twin of the `imported_symbols` branch above. A
-                // failure (unknown alias / absent / private member) is a
-                // silent `.unknown` here; the use-site diagnostics
-                // (E0102/E0104/E0107) are minted where a selective type would
-                // be (the type-alias target, `validateTypeAliases`).
+                // `validatePathTypesIn` reports a path naming no type.
                 return switch (self.resolvePathTypeNode(type_node)) {
                     .resolved => |t| t,
                     else => .unknown,
@@ -4202,52 +5947,46 @@ pub const TypeChecker = struct {
                 // (e.g. `T<…>`, unusual) resolves to the variable.
                 const gt = self.arena.generic_type_nodes.items[self.arena.typeNodeData(type_node)];
                 if (self.generic_scope.contains(gt.name)) return .{ .generic = gt.name };
-                if (self.symbols.get(gt.name)) |sym| {
-                    return switch (sym.kind) {
-                        .struct_ => .{ .struct_t = gt.name },
-                        .enum_ => .{ .enum_t = gt.name },
-                        else => .unknown,
-                    };
-                }
-                return .unknown;
+                return switch (self.kindNamed(gt.name) orelse return .unknown) {
+                    .struct_, .enum_ => self.nominalNamed(gt.name).?,
+                    else => .unknown,
+                };
             },
             .array => {
                 const at = self.arena.array_types.items[self.arena.typeNodeData(type_node)];
                 const elem = self.namedTypeToResolved(at.elem);
-                if (elem != .builtin) return .unknown;
+                if (elem == .unknown) return .unknown;
                 const len = self.constArrayLen(at.size) orelse return .unknown;
-                return .{ .array_fixed = .{ .elem = elem.builtin, .len = len } };
+                return .{ .array_fixed = .{ .elem = self.internedPayload(self.arena, type_node, 0, elem), .len = len } };
             },
             .slice => {
                 const at = self.arena.array_types.items[self.arena.typeNodeData(type_node)];
                 const elem = self.namedTypeToResolved(at.elem);
-                if (elem != .builtin) return .unknown;
-                return .{ .array_dyn = elem.builtin };
+                if (elem == .unknown) return .unknown;
+                return .{ .array_dyn = self.internedPayload(self.arena, type_node, 0, elem) };
             },
             .map_type => {
                 const mt = self.arena.map_types.items[self.arena.typeNodeData(type_node)];
                 const k = self.namedTypeToResolved(mt.key);
                 const v = self.namedTypeToResolved(mt.value);
-                if (k != .builtin or v != .builtin) return .unknown;
-                return .{ .map_t = .{ .key = k.builtin, .value = v.builtin } };
+                if (k == .unknown or v == .unknown) return .unknown;
+                return .{ .map_t = .{ .key = self.internedPayload(self.arena, type_node, 0, k), .value = self.internedPayload(self.arena, type_node, 1, v) } };
             },
             .set_type => {
                 const st = self.arena.set_types.items[self.arena.typeNodeData(type_node)];
                 const elem = self.namedTypeToResolved(st.elem);
-                if (elem != .builtin) return .unknown;
-                return .{ .set_t = elem.builtin };
+                if (elem == .unknown) return .unknown;
+                return .{ .set_t = self.internedPayload(self.arena, type_node, 0, elem) };
             },
-            .optional => {
-                // `T?`. The payload type-node is stored as the
-                // type-node data. A builtin-scalar payload → `.optional(bt)`;
-                // a non-builtin payload (`struct?`/`enum?`) is deferred → `.unknown`.
-                const payload_node: NodeId = @bitCast(self.arena.typeNodeData(type_node));
-                const payload = self.namedTypeToResolved(payload_node);
-                if (payload != .builtin) return .unknown;
-                return .{ .optional = payload.builtin };
-            },
+            .optional => return self.internedOptional(self.arena, type_node, self.namedTypeToResolved(@bitCast(self.arena.typeNodeData(type_node)))),
             else => return .unknown,
         }
+    }
+
+    /// The type an imported `type` alias names, read in the arena declaring it.
+    fn importedAliasTarget(self: *TypeChecker, entry: ExportEntry) ResolvedType {
+        const a = &self.project.?.arenas[entry.arena_index];
+        return self.foreignType(a, a.type_alias_decls.items[a.itemData(entry.item_id)].target);
     }
 
     /// Outcome of resolving a `.path` qualified type node (`alias.Member`,
@@ -4255,9 +5994,8 @@ pub const TypeChecker = struct {
     /// and the emitting use site (`validateTypeAliases`) share one lookup, each
     /// deciding whether/how to diagnose.
     const PathResolution = union(enum) {
-        /// The member resolved to a type kind (component / resource / struct /
-        /// enum), or `.unknown` when it is exported but not a type (fn / const
-        /// / …) — mirrors the `imported_symbols` arm's `else => .unknown`.
+        /// The member is a type. An event member is `.unknown`, as an event
+        /// named in this file is.
         resolved: ResolvedType,
         /// The receiver ident is not a whole-module alias in scope → E0102.
         alias_unresolved,
@@ -4265,15 +6003,13 @@ pub const TypeChecker = struct {
         member_absent,
         /// The member exists in the target module but is `private` → E0107.
         member_private,
+        /// The member is exported and is no type: a trait, a fn, a const → E0102.
+        not_a_type,
     };
 
-    /// Resolve a `.path` type node (`alias.Member`) against the
-    /// whole-module import aliases (`imported_aliases` → target file index) and
-    /// the project exports index — the qualified twin of the `imported_symbols`
-    /// branch in `namedTypeToResolved`. Pure lookup, no diagnostics. Identity of
-    /// a resolved kind is the member's `StringId` in THIS arena (`path.member`),
-    /// matching how the selective arm keys on the local name. No-op-ish when
-    /// `project == null` (single-file mode has no aliases → `.alias_unresolved`).
+    /// Resolve a `.path` type node (`alias.Member`) through the whole-module
+    /// import aliases and the project exports. Pure lookup, no diagnostics; a
+    /// single file has no aliases.
     fn resolvePathTypeNode(self: *TypeChecker, type_node: NodeId) PathResolution {
         const path = self.arena.path_types.items[self.arena.typeNodeData(type_node)];
         const project = self.project orelse return .alias_unresolved;
@@ -4281,23 +6017,24 @@ pub const TypeChecker = struct {
         const member_bytes = self.arena.strings.slice(path.member);
         const entry = project.exports[target_idx].get(member_bytes) orelse return .member_absent;
         if (entry.visibility == .private) return .member_private;
-        return .{ .resolved = switch (entry.kind) {
-            .component => .{ .component = path.member },
-            .resource => .{ .resource = path.member },
-            .struct_ => .{ .struct_t = path.member },
-            .enum_ => .{ .enum_t = path.member },
-            else => .unknown,
-        } };
+        return switch (entry.kind) {
+            .type_alias => .{ .resolved = self.importedAliasTarget(entry) },
+            .event_ => .{ .resolved = .unknown },
+            else => if (nominalOf(exportRef(project, entry))) |t| .{ .resolved = t } else .not_a_type,
+        };
     }
 
     /// Const-fold a fixed-array size node to its `u64` length. It accepts a
     /// bare integer literal (`int[8]`); a more general const expression is a
     /// later refinement, so anything else returns `null` (→ `unknown` type).
     fn constArrayLen(self: *TypeChecker, size_node: NodeId) ?u64 {
+        return constArrayLenIn(self.arena, size_node);
+    }
+
+    fn constArrayLenIn(a: *const AstArena, size_node: NodeId) ?u64 {
         if (size_node.isNone()) return null;
-        if (self.arena.exprKind(size_node) != .int_lit) return null;
-        const text = self.arena.strings.slice(self.arena.exprData(size_node));
-        return std.fmt.parseInt(u64, text, 10) catch null;
+        if (a.exprKind(size_node) != .int_lit) return null;
+        return const_eval.intLiteralMagnitude(a.strings.slice(a.exprData(size_node)));
     }
 
     // ─── Pass 2 ──────────────────────────────────────────────────────────
@@ -4321,7 +6058,26 @@ pub const TypeChecker = struct {
                 // Nothing in pass 1 reads the result — the only consumers are
                 // this function's own cycle and unknown-requisite diagnostics.
                 .component_decl => try self.checkRequiresAnnotation(self.arena.component_decls.items[data]),
+                .service_decl => try self.checkServiceSignatures(self.arena.service_decls.items[data]),
                 else => {},
+            }
+        }
+    }
+
+    /// A `service`'s method signatures, judged as a bodyless fn's are.
+    fn checkServiceSignatures(self: *TypeChecker, decl: ast_mod.ServiceDecl) !void {
+        var mi: u32 = 0;
+        while (mi < decl.methods_len) : (mi += 1) {
+            const m = self.arena.impl_methods.items[decl.methods_start + mi];
+            var i: u32 = 0;
+            while (i < m.params_len) : (i += 1) {
+                const p = self.arena.fn_params.items[m.params_start + i];
+                if (self.namedTypeToResolved(p.type_node) == .unknown and !self.holdsUnresolvedPath(p.type_node)) {
+                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown or unsupported parameter type on service method '{s}'", .{self.arena.strings.slice(m.name)});
+                }
+            }
+            if (!m.return_type.isNone() and self.namedTypeToResolved(m.return_type) == .unknown and !self.holdsUnresolvedPath(m.return_type)) {
+                try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(m.return_type), "unknown or unsupported return type on service method '{s}'", .{self.arena.strings.slice(m.name)});
             }
         }
     }
@@ -4331,14 +6087,13 @@ pub const TypeChecker = struct {
     /// receivers) to the impl's target type so `self.field` / `self.method()`
     /// resolve. Associated fns (`self_kind == .none`) bind no receiver.
     fn checkImpl(self: *TypeChecker, impl: ast_mod.ImplDecl) !void {
-        // The receiver type for `self`: the impl's target. A declared struct →
-        // `.struct_t`; a component / resource → their resolved type; the builtin
-        // `Entity` (a trait impl `impl Trait for Entity`) → `.entity`; anything
-        // else (validateImpls already flagged it) → `unknown`.
-        const self_type: ResolvedType = if (self.symbols.get(impl.type_name)) |sym| switch (sym.kind) {
-            .struct_ => .{ .struct_t = impl.type_name },
-            .component => .{ .component = impl.type_name },
-            .resource => .{ .resource = impl.type_name },
+        // The receiver type for `self`: the impl's target, declared or
+        // imported — a struct, component, resource or enum as its resolved
+        // type, the builtin `Entity` (a trait impl `impl Trait for Entity`) as
+        // `.entity`, anything else (validateImpls already flagged it) as
+        // `unknown`.
+        const self_type: ResolvedType = if (self.kindNamed(impl.type_name)) |kind| switch (kind) {
+            .struct_, .component, .resource, .enum_ => self.nominalNamed(impl.type_name).?,
             else => ResolvedType.unknown,
         } else if (std.mem.eql(u8, self.arena.strings.slice(impl.type_name), "Entity"))
             .{ .builtin = .entity }
@@ -4373,7 +6128,7 @@ pub const TypeChecker = struct {
 
         if (decl.self_kind != .none) {
             const self_id = try self.arena.strings.intern(self.gpa, "self");
-            try ctx.locals.put(self.gpa, self_id, .{ .type_ = self_type, .is_mut = decl.self_kind == .by_mut });
+            _ = try ctx.bind(self.gpa, self_id, .{ .type_ = self_type, .is_mut = decl.self_kind == .by_mut });
         }
         if (when_root != ast_mod.RuleDecl.none_when) try self.collectWhen(&ctx, when_root);
 
@@ -4381,16 +6136,19 @@ pub const TypeChecker = struct {
         while (i < decl.params_len) : (i += 1) {
             const p = self.arena.fn_params.items[decl.params_start + i];
             const ptype = self.namedTypeToResolved(p.type_node);
-            if (ptype == .unknown) {
+            if (ptype == .unknown and !self.holdsUnresolvedPath(p.type_node)) {
                 try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown or unsupported parameter type on method '{s}'", .{self.arena.strings.slice(decl.name)});
             }
-            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+            try self.bindLocal(&ctx, p.name, .{ .type_ = ptype, .is_mut = false }, self.arena.typeNodeSpan(p.type_node));
         }
 
         const ret_t: ResolvedType = if (decl.return_type.isNone())
             ResolvedType.unknown
         else
             self.namedTypeToResolved(decl.return_type);
+        if (!decl.return_type.isNone() and ret_t == .unknown and !self.holdsUnresolvedPath(decl.return_type)) {
+            try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.return_type), "unknown or unsupported return type on method '{s}'", .{self.arena.strings.slice(decl.name)});
+        }
         const saved_ret = self.current_fn_return;
         self.current_fn_return = ret_t;
         defer self.current_fn_return = saved_ret;
@@ -4415,8 +6173,8 @@ pub const TypeChecker = struct {
         }
 
         if (!decl.value.isNone()) {
-            const vt = self.synthExpr(decl.value, &ctx);
-            if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
+            const vt = try self.checkExpr(decl.value, ret_t, &ctx);
+            if (!decl.return_type.isNone() and !try self.valueFits(ret_t, decl.value, vt)) {
                 try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(decl.value), "method '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
             }
         }
@@ -4433,17 +6191,91 @@ pub const TypeChecker = struct {
         /// a when clause there (the construct's Tier-1 runtime owns the
         /// scheduling, no archetype query is derived). Rules keep the gate.
         unrestricted_ecs_access: bool = false,
-        /// Local variables in the rule body, keyed by name.
+        /// The bindings visible at the point being checked, keyed by name.
         locals: std.AutoHashMapUnmanaged(StringId, Local) = .empty,
+        /// Every binding made in the scopes still open, with the one it
+        /// shadows, which `leave` puts back (`etch-reference-part1.md` §4.3).
+        scope_log: std.ArrayListUnmanaged(Shadowed) = .empty,
+        /// Where each open nested scope begins in `scope_log`; the body's own
+        /// scope begins at 0.
+        scope_starts: std.ArrayListUnmanaged(usize) = .empty,
 
-        pub const Local = struct { type_: ResolvedType, is_mut: bool };
+        pub const Local = struct { type_: ResolvedType, is_mut: bool, ref: RefMode = .none };
+
+        /// What a binding of an ECS ref may write through: a `get` ref is
+        /// read-only and a `get_mut` one mutable, whatever `mut` the binding
+        /// carries.
+        pub const RefMode = enum { none, read_only, mutable };
+        const Shadowed = struct { name: StringId, shadowed: ?Local };
 
         pub fn deinit(self: *RuleCtx, gpa: std.mem.Allocator) void {
             self.components_in_when.deinit(gpa);
             self.resources_in_when.deinit(gpa);
             self.locals.deinit(gpa);
+            self.scope_log.deinit(gpa);
+            self.scope_starts.deinit(gpa);
+        }
+
+        fn scopeStart(self: *const RuleCtx) usize {
+            return if (self.scope_starts.items.len == 0) 0 else self.scope_starts.getLast();
+        }
+
+        /// Whether the innermost scope binds `name`.
+        fn boundHere(self: *const RuleCtx, name: StringId) bool {
+            return self.loggedSince(self.scopeStart(), name);
+        }
+
+        /// Whether an open scope bound `name` at or after `scope_log[base]`.
+        fn loggedSince(self: *const RuleCtx, base: usize, name: StringId) bool {
+            for (self.scope_log.items[base..]) |e| {
+                if (e.name == name) return true;
+            }
+            return false;
+        }
+
+        /// Bind `name` in the innermost scope. False when that scope binds it
+        /// already: the new binding then replaces it there.
+        fn bind(self: *RuleCtx, gpa: std.mem.Allocator, name: StringId, local: Local) !bool {
+            if (self.boundHere(name)) {
+                try self.locals.put(gpa, name, local);
+                return false;
+            }
+            try self.scope_log.ensureUnusedCapacity(gpa, 1);
+            const shadowed = self.locals.get(name);
+            try self.locals.put(gpa, name, local);
+            self.scope_log.appendAssumeCapacity(.{ .name = name, .shadowed = shadowed });
+            return true;
+        }
+
+        fn enter(self: *RuleCtx, gpa: std.mem.Allocator) !void {
+            try self.scope_starts.append(gpa, self.scope_log.items.len);
+        }
+
+        /// Close the innermost scope: each of its bindings gives back the one
+        /// it shadowed, or leaves.
+        fn leave(self: *RuleCtx) void {
+            const start = self.scope_starts.pop().?;
+            var i = self.scope_log.items.len;
+            while (i > start) {
+                i -= 1;
+                const e = self.scope_log.items[i];
+                if (e.shadowed) |prev| {
+                    self.locals.getPtr(e.name).?.* = prev;
+                } else {
+                    _ = self.locals.remove(e.name);
+                }
+            }
+            self.scope_log.shrinkRetainingCapacity(start);
         }
     };
+
+    /// Bind `name` in `ctx`'s innermost scope; a second binding of one name in
+    /// one scope is E0101 (`etch-reference-part1.md` §4.2).
+    fn bindLocal(self: *TypeChecker, ctx: *RuleCtx, name: StringId, local: RuleCtx.Local, span: SourceSpan) !void {
+        if (!try ctx.bind(self.gpa, name, local)) {
+            try self.emit(.duplicate_symbol, .error_, span, "'{s}' is already bound in this scope", .{self.arena.strings.slice(name)});
+        }
+    }
 
     /// Number of structural-observer lifecycle annotations on a rule.
     fn observerAnnotationCount(self: *TypeChecker, rule: ast_mod.RuleDecl) u32 {
@@ -4470,7 +6302,8 @@ pub const TypeChecker = struct {
         const p = self.arena.rule_params.items[rule.params_start + idx];
         if (!std.mem.eql(u8, self.arena.strings.slice(p.name), name)) return false;
         const t = self.namedTypeToResolved(p.type_node);
-        return t == .component and t.component == comp;
+        const want = self.declNamed(comp) orelse return false;
+        return t == .component and t.component.eql(want);
     }
 
     /// Emit E1208 ObserverSignatureMismatch with the parameter shape required by
@@ -4501,8 +6334,7 @@ pub const TypeChecker = struct {
         var comp_name: ?StringId = null;
         if (needs_component) {
             if (self.arena.observerComponentName(annot)) |cn| {
-                const sym = self.symbols.get(cn);
-                if (sym != null and sym.?.kind == .component) {
+                if (self.componentNamed(cn) != null) {
                     comp_name = cn;
                 } else {
                     try self.emit(.observer_component_invalid, .error_, annot.span, "@{s}(T) requires T to be a declared component; '{s}' is not", .{ aname, self.arena.strings.slice(cn) });
@@ -4546,16 +6378,14 @@ pub const TypeChecker = struct {
         while (i < rule.params_len) : (i += 1) {
             const p = self.arena.rule_params.items[rule.params_start + i];
             const ptype = self.namedTypeToResolved(p.type_node);
-            if (ptype == .unknown) {
-                if (self.arena.typeNodeKind(p.type_node) == .named) {
-                    const tname_idx = self.arena.typeNodeData(p.type_node);
-                    const tname = self.arena.strings.slice(self.arena.named_types.items[tname_idx].name);
-                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown type '{s}' on rule parameter", .{tname});
-                } else {
-                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unsupported parameter type in E1 (rule parameters must be scalar or Entity)", .{});
+            if (self.arena.namedTypeName(p.type_node)) |tn| {
+                if (ptype == .unknown) {
+                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown type '{s}' on rule parameter", .{self.arena.strings.slice(tn)});
                 }
+            } else if (!self.holdsUnresolvedPath(p.type_node)) {
+                try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unsupported parameter type in E1 (rule parameters must be scalar or Entity)", .{});
             }
-            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+            try self.bindLocal(&ctx, p.name, .{ .type_ = ptype, .is_mut = false }, self.arena.typeNodeSpan(p.type_node));
         }
 
         // `@on_event(T)` observer: bind the implicit `event` payload
@@ -4566,14 +6396,12 @@ pub const TypeChecker = struct {
         // binding named `event`, self-style like `self` in a method).
         if (self.arena.onEventAnnotation(rule)) |annot| {
             if (self.arena.onEventTypeName(annot)) |event_type| {
-                const sym = self.symbols.get(event_type);
-                const local_event = sym != null and sym.?.kind == .event_;
                 // A `.d.etch`-declared event resolves here too —
                 // which is the whole point of admitting `event_decl` into §20.1
                 // a rule can only observe an event whose type Etch knows.
-                if (local_event or self.declaredEvent(event_type) != null) {
+                if (self.eventNamed(event_type) orelse self.declaredEvent(event_type)) |ev| {
                     const event_id = try self.arena.strings.intern(self.gpa, "event");
-                    try ctx.locals.put(self.gpa, event_id, .{ .type_ = .{ .event_t = event_type }, .is_mut = false });
+                    try self.bindLocal(&ctx, event_id, .{ .type_ = .{ .event_t = .{ .arena = ev.arena, .item = ev.item } }, .is_mut = false }, annot.span);
                 } else {
                     try self.emit(.on_event_type_mismatch, .error_, annot.span, "@on_event(...) requires a declared event type; '{s}' is not an event", .{self.arena.strings.slice(event_type)});
                 }
@@ -4741,13 +6569,13 @@ pub const TypeChecker = struct {
             };
             const req_name = self.arena.strings.slice(name_id);
             if (self.requisiteDecl(name_id) == null) {
-                try self.emit(
-                    .unknown_requisite,
-                    .error_,
-                    annot.span,
-                    "@requires names `{s}`, which is not a declared component",
-                    .{req_name},
-                );
+                const is_resource = builtinResourceByName(req_name) != null or
+                    (if (self.symbols.get(name_id)) |sym| sym.kind == .resource else false);
+                if (is_resource) {
+                    try self.emit(.unknown_requisite, .error_, annot.span, "@requires names `{s}`, which is a resource: no entity carries one", .{req_name});
+                } else {
+                    try self.emit(.unknown_requisite, .error_, annot.span, "@requires names `{s}`, which is not a declared component", .{req_name});
+                }
                 return;
             }
         }
@@ -4765,14 +6593,9 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// The component declaration named by `sid`, or null when `sid` names no
-    /// local component.
-    ///
-    /// Through `symbols` + `component_decls`, which is the mechanism
-    /// `checkComponentInstance` already uses — a second lookup by byte
-    /// comparison would be a second answer to one question. Keyed by
-    /// `StringId` because the arena's pool INTERNS, so one name is one id and a
-    /// byte comparison would only re-derive that.
+    /// The component declaration named by `sid` among this file's own
+    /// declarations, or null: `@requires` names a component its module
+    /// declares, never one it imports.
     fn requisiteDecl(self: *TypeChecker, sid: ast_mod.StringId) ?ast_mod.ComponentDecl {
         const sym = self.symbols.get(sid) orelse return null;
         if (sym.kind != .component) return null;
@@ -4941,10 +6764,10 @@ pub const TypeChecker = struct {
         while (i < decl.params_len) : (i += 1) {
             const p = self.arena.fn_params.items[decl.params_start + i];
             const ptype = self.namedTypeToResolved(p.type_node);
-            if (ptype == .unknown) {
+            if (ptype == .unknown and !self.holdsUnresolvedPath(p.type_node)) {
                 try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown or unsupported parameter type on function '{s}'", .{self.arena.strings.slice(decl.name)});
             }
-            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+            try self.bindLocal(&ctx, p.name, .{ .type_ = ptype, .is_mut = false }, self.arena.typeNodeSpan(p.type_node));
         }
 
         // Declared return type drives `return` / trailing-value checks. A void
@@ -4954,6 +6777,9 @@ pub const TypeChecker = struct {
             ResolvedType.unknown
         else
             self.namedTypeToResolved(decl.return_type);
+        if (!decl.return_type.isNone() and ret_t == .unknown and !self.holdsUnresolvedPath(decl.return_type)) {
+            try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.return_type), "unknown or unsupported return type on function '{s}'", .{self.arena.strings.slice(decl.name)});
+        }
         const saved_ret = self.current_fn_return;
         self.current_fn_return = ret_t;
         defer self.current_fn_return = saved_ret;
@@ -4982,8 +6808,8 @@ pub const TypeChecker = struct {
         // The trailing block value is the implicit return — check it against the
         // declared return type (E0200, consistent with the closure-call path).
         if (!decl.value.isNone()) {
-            const vt = self.synthExpr(decl.value, &ctx);
-            if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
+            const vt = try self.checkExpr(decl.value, ret_t, &ctx);
+            if (!decl.return_type.isNone() and !try self.valueFits(ret_t, decl.value, vt)) {
                 try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(decl.value), "function '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
             }
         }
@@ -5006,12 +6832,10 @@ pub const TypeChecker = struct {
                 // filter on a non-component is just an unknown component); the
                 // resolver/ruling deliberately does NOT mint a new E12xx for it.
                 const tname_slice = self.arena.strings.slice(node.type_name);
-                if (self.symbols.get(node.type_name)) |sym| {
-                    if (sym.kind != .component) {
-                        try self.emit(.unknown_component_in_when, .error_, node.span, "'has' clause requires a component, '{s}' is a {s}", .{ tname_slice, @tagName(sym.kind) });
-                    } else {
-                        try ctx.components_in_when.put(self.gpa, node.type_name, {});
-                    }
+                if (self.componentNamed(node.type_name) != null) {
+                    try ctx.components_in_when.put(self.gpa, node.type_name, {});
+                } else if (self.kindNamed(node.type_name)) |k| {
+                    try self.emit(.unknown_component_in_when, .error_, node.span, "'has' clause requires a component, '{s}' is a {s}", .{ tname_slice, @tagName(k) });
                 } else {
                     try self.emit(.unknown_component_in_when, .error_, node.span, "unknown component '{s}' in when clause", .{tname_slice});
                 }
@@ -5022,12 +6846,10 @@ pub const TypeChecker = struct {
             },
             .resource, .resource_changed => {
                 const tname_slice = self.arena.strings.slice(node.type_name);
-                if (self.symbols.get(node.type_name)) |sym| {
-                    if (sym.kind != .resource) {
-                        try self.emit(.resource_expected_in_when, .error_, node.span, "'resource' clause requires a resource, '{s}' is a {s}", .{ tname_slice, @tagName(sym.kind) });
-                    } else {
-                        try ctx.resources_in_when.put(self.gpa, node.type_name, {});
-                    }
+                if (self.resourceNamed(node.type_name) != null) {
+                    try ctx.resources_in_when.put(self.gpa, node.type_name, {});
+                } else if (self.kindNamed(node.type_name)) |k| {
+                    try self.emit(.resource_expected_in_when, .error_, node.span, "'resource' clause requires a resource, '{s}' is a {s}", .{ tname_slice, @tagName(k) });
                 } else {
                     try self.emit(.resource_expected_in_when, .error_, node.span, "unknown resource '{s}' in when clause", .{tname_slice});
                 }
@@ -5050,14 +6872,11 @@ pub const TypeChecker = struct {
                 // fields bound by name) and must be bool (E1211). An unknown
                 // name inside the filter surfaces as the regular E0102.
                 const tname_slice = self.arena.strings.slice(node.type_name);
-                if (self.symbols.get(node.type_name)) |sym| {
-                    if (sym.kind != .component) {
-                        try self.emit(.unknown_component_in_when, .error_, node.span, "'has' clause requires a component, '{s}' is a {s}", .{ tname_slice, @tagName(sym.kind) });
-                    } else {
-                        try ctx.components_in_when.put(self.gpa, node.type_name, {});
-                        const decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
-                        try self.checkWhenExprFilter(node, decl.fields_start, decl.fields_len);
-                    }
+                if (self.componentNamed(node.type_name)) |c| {
+                    try ctx.components_in_when.put(self.gpa, node.type_name, {});
+                    try self.checkWhenExprFilter(node, c.arena, c.decl.fields_start, c.decl.fields_len);
+                } else if (self.kindNamed(node.type_name)) |k| {
+                    try self.emit(.unknown_component_in_when, .error_, node.span, "'has' clause requires a component, '{s}' is a {s}", .{ tname_slice, @tagName(k) });
                 } else {
                     try self.emit(.unknown_component_in_when, .error_, node.span, "unknown component '{s}' in when clause", .{tname_slice});
                 }
@@ -5066,14 +6885,11 @@ pub const TypeChecker = struct {
                 // `resource T { expression }` (— §6). Resource check
                 // identical to `.resource`; same fields-only filter typing.
                 const tname_slice = self.arena.strings.slice(node.type_name);
-                if (self.symbols.get(node.type_name)) |sym| {
-                    if (sym.kind != .resource) {
-                        try self.emit(.resource_expected_in_when, .error_, node.span, "'resource' clause requires a resource, '{s}' is a {s}", .{ tname_slice, @tagName(sym.kind) });
-                    } else {
-                        try ctx.resources_in_when.put(self.gpa, node.type_name, {});
-                        const decl = self.arena.resource_decls.items[self.arena.itemData(sym.item_id)];
-                        try self.checkWhenExprFilter(node, decl.fields_start, decl.fields_len);
-                    }
+                if (self.resourceNamed(node.type_name)) |r| {
+                    try ctx.resources_in_when.put(self.gpa, node.type_name, {});
+                    try self.checkWhenExprFilter(node, r.arena, r.decl.fields_start, r.decl.fields_len);
+                } else if (self.kindNamed(node.type_name)) |k| {
+                    try self.emit(.resource_expected_in_when, .error_, node.span, "'resource' clause requires a resource, '{s}' is a {s}", .{ tname_slice, @tagName(k) });
                 } else {
                     try self.emit(.resource_expected_in_when, .error_, node.span, "unknown resource '{s}' in when clause", .{tname_slice});
                 }
@@ -5098,13 +6914,18 @@ pub const TypeChecker = struct {
     /// `resource T`) in a FIELDS-ONLY scope: each field of the
     /// filtered component/resource is bound by name to its declared type.
     /// Non-bool filters are E1211 (the field-filter code family).
-    fn checkWhenExprFilter(self: *TypeChecker, node: ast_mod.WhenNode, fields_start: u32, fields_len: u32) !void {
+    fn checkWhenExprFilter(self: *TypeChecker, node: ast_mod.WhenNode, a: *const AstArena, fields_start: u32, fields_len: u32) !void {
         var scratch: RuleCtx = .{};
         defer scratch.deinit(self.gpa);
         var f: u32 = 0;
         while (f < fields_len) : (f += 1) {
-            const field = self.arena.fields.items[fields_start + f];
-            try scratch.locals.put(self.gpa, field.name, .{ .type_ = self.namedTypeToResolved(field.type_node), .is_mut = false });
+            const field = a.fields.items[fields_start + f];
+            if (a == self.arena) {
+                try scratch.locals.put(self.gpa, field.name, .{ .type_ = self.namedTypeToResolved(field.type_node), .is_mut = false });
+            } else {
+                const name = try self.arena.strings.intern(self.gpa, a.strings.slice(field.name));
+                try scratch.locals.put(self.gpa, name, .{ .type_ = self.foreignType(a, field.type_node), .is_mut = false });
+            }
         }
         const t = try self.synthExprE(node.filter_value, &scratch);
         if (t != .unknown and !(t == .builtin and t.builtin == .bool_)) {
@@ -5139,28 +6960,16 @@ pub const TypeChecker = struct {
 
     fn checkFieldFilter(self: *TypeChecker, node: ast_mod.WhenNode) !void {
         // `entity has T { field == value }` — verify field on T and value type.
-        const comp_sym = self.symbols.get(node.type_name) orelse return;
-        if (comp_sym.kind != .component) return;
-        const comp_data = self.arena.itemData(comp_sym.item_id);
-        const comp_decl = self.arena.component_decls.items[comp_data];
-        var f_i: u32 = 0;
-        var found: ?ast_mod.Field = null;
-        while (f_i < comp_decl.fields_len) : (f_i += 1) {
-            const f = self.arena.fields.items[comp_decl.fields_start + f_i];
-            if (f.name == node.field_name) {
-                found = f;
-                break;
-            }
-        }
-        if (found == null) {
+        const comp = self.componentNamed(node.type_name) orelse return;
+        const declared = self.fieldTypeIn(comp.arena, comp.decl.fields_start, comp.decl.fields_len, node.field_name) orelse {
             const fname = self.arena.strings.slice(node.field_name);
             const tname = self.arena.strings.slice(node.type_name);
             try self.emit(.invalid_field_filter, .error_, node.span, "component '{s}' has no field '{s}'", .{ tname, fname });
             return;
-        }
-        const declared = self.namedTypeToResolved(found.?.type_node);
-        const actual = self.synthExpr(node.filter_value, null);
-        if (declared == .builtin and actual == .builtin and !declared.eql(actual)) {
+        };
+        if (!try self.foldsAsConstant(node.filter_value, "field filter value must be a constant expression")) return;
+        const actual = try self.synthExprE(node.filter_value, null);
+        if (!try self.valueCompares(declared, node.filter_value, actual)) {
             try self.emit(.invalid_field_filter, .error_, node.span, "field filter type does not match field declared type", .{});
         }
     }
@@ -5170,28 +6979,21 @@ pub const TypeChecker = struct {
     /// `entity_event` / `global_event` payload filter: each `IDENT :
     /// expression` must name a field of `T` (`E1211 InvalidFieldFilter` else)
     /// and its value must fit that field's declared type (`E0200 TypeMismatch`
-    /// else). `event_decl_index` indexes `arena.event_decls`.
-    fn checkEventFieldRun(self: *TypeChecker, event_decl_index: u32, start: u32, len: u32, ctx_opt: ?*RuleCtx) !void {
-        const decl = self.arena.event_decls.items[event_decl_index];
+    /// else).
+    fn checkEventFieldRun(self: *TypeChecker, ev: ForeignEvent, start: u32, len: u32, compares: bool, ctx_opt: ?*RuleCtx) !void {
+        const decl = ev.decl;
         var i: u32 = 0;
         while (i < len) : (i += 1) {
             const flit = self.arena.struct_lit_fields.items[start + i];
-            var declared: ?ResolvedType = null;
-            var f_i: u32 = 0;
-            while (f_i < decl.fields_len) : (f_i += 1) {
-                const f = self.arena.fields.items[decl.fields_start + f_i];
-                if (f.name == flit.name) {
-                    declared = self.namedTypeToResolved(f.type_node);
-                    break;
-                }
-            }
-            const actual = self.synthExpr(flit.value, ctx_opt);
+            const declared = self.fieldTypeIn(ev.arena, decl.fields_start, decl.fields_len, flit.name);
+            const actual = try self.checkExpr(flit.value, declaredSlot(declared orelse .unknown), ctx_opt);
             if (declared) |d| {
-                if (d == .builtin and actual == .builtin and !self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
+                const fits = if (compares) try self.valueCompares(d, flit.value, actual) else try self.valueFits(d, flit.value, actual);
+                if (!fits) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "event field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
                 }
             } else {
-                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(flit.value), "event '{s}' has no field '{s}'", .{ self.arena.strings.slice(decl.name), self.arena.strings.slice(flit.name) });
+                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(flit.value), "event '{s}' has no field '{s}'", .{ ev.arena.strings.slice(decl.name), self.arena.strings.slice(flit.name) });
             }
         }
     }
@@ -5203,20 +7005,18 @@ pub const TypeChecker = struct {
     /// `arena.resolveEventEntityTarget`). The optional payload filter is validated for
     /// both targets.
     fn checkEventTarget(self: *TypeChecker, await_id: NodeId, aw: ast_mod.AwaitExpr, entity_scoped: bool, ctx_opt: ?*RuleCtx) !void {
-        const sym = self.symbols.get(aw.event_type);
-        if (sym == null or sym.?.kind != .event_) {
+        const ev = self.eventNamed(aw.event_type) orelse {
             try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(await_id), "'{s}' is not a declared event", .{self.arena.strings.slice(aw.event_type)});
             return;
-        }
-        const decl_index = self.arena.itemData(sym.?.item_id);
+        };
         if (entity_scoped) {
-            switch (self.arena.resolveEventEntityTarget(self.arena.event_decls.items[decl_index])) {
+            switch (ev.arena.resolveEventEntityTarget(ev.decl)) {
                 .field => {},
                 .none_entity => try self.emit(.event_not_entity_scoped, .error_, self.arena.exprSpan(await_id), "event '{s}' has no Entity field — 'await entity_event' requires a designated entity target", .{self.arena.strings.slice(aw.event_type)}),
                 .ambiguous => try self.emit(.ambiguous_event_entity_target, .error_, self.arena.exprSpan(await_id), "event '{s}' has multiple Entity fields — annotate the target field with '@entity_target'", .{self.arena.strings.slice(aw.event_type)}),
             }
         }
-        try self.checkEventFieldRun(decl_index, aw.filter_start, aw.filter_len, ctx_opt);
+        try self.checkEventFieldRun(ev, aw.filter_start, aw.filter_len, true, ctx_opt);
     }
 
     fn checkStmt(self: *TypeChecker, ctx: *RuleCtx, stmt_id: NodeId) !void {
@@ -5254,29 +7054,12 @@ pub const TypeChecker = struct {
             .let_stmt => {
                 const let = self.arena.let_stmts.items[data];
                 var declared: ?ResolvedType = null;
-                if (!let.type_annotation.isNone()) {
-                    declared = self.namedTypeToResolved(let.type_annotation);
-                    // The literal/constructor and annotation paths are the
-                    // only two gates through which a `map_t` / `set_t` enters
-                    // the program (fields and params reject composite types)
-                    // — the Hash bound is checked at both.
-                    if (declared.? == .map_t) try self.checkHashBound(declared.?.map_t.key, "map key type", "K: Hash", self.arena.typeNodeSpan(let.type_annotation));
-                    if (declared.? == .set_t) try self.checkHashBound(declared.?.set_t, "set element type", "T: Hash", self.arena.typeNodeSpan(let.type_annotation));
-                }
-                // Anonymous `.{ … }` initializer against a struct annotation: check
-                // mode — the annotation is the expected type (resolver-types §4), the
-                // same propagation as the field-value position.
-                const inferred = blk: {
-                    if (declared != null and declared.? == .struct_t and self.arena.exprKind(let.value) == .struct_lit) {
-                        const sl_data = self.arena.exprData(let.value);
-                        if (self.arena.struct_lits.items[sl_data].type_name == 0) {
-                            break :blk self.checkStructLitAgainst(let.value, sl_data, declared.?.struct_t, ctx) catch ResolvedType.unknown;
-                        }
-                    }
-                    break :blk self.synthHeadValue(let.value, ctx);
-                };
+                if (!let.type_annotation.isNone()) declared = self.namedTypeToResolved(let.type_annotation);
+                const inferred = try self.synthHeadValue(let.value, ctx, if (declared) |d| declaredSlot(d) else .unknown);
                 const final = if (declared) |d| blk: {
-                    if (d == .builtin and inferred == .builtin and !self.literalTypeFits(d.builtin, let.value, inferred.builtin)) {
+                    const reported = self.diagnostics.items.len;
+                    try self.checkCollectionLitAgainst(let.value, d, inferred);
+                    if (self.diagnostics.items.len == reported and !try self.valueFits(d, let.value, inferred)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(let.value), "let initializer type does not match declared type", .{});
                     }
                     break :blk d;
@@ -5284,12 +7067,8 @@ pub const TypeChecker = struct {
                 // A binding to `entity.get_mut(T)` aliases the mutable
                 // component reference, so the local inherits mutability
                 // even when written `let h = ...` without `mut`.
-                const value_is_get_mut = self.arena.exprKind(let.value) == .method_get_mut;
-                // A `let` inside a closure body re-declaring a captured name
-                // owns it from there (nested-scope shadowing) — it is no
-                // longer a capture for the E0221 gate.
-                if (self.closure_captures) |caps| _ = caps.remove(let.name);
-                try ctx.locals.put(self.gpa, let.name, .{ .type_ = final, .is_mut = let.is_mut or value_is_get_mut });
+                const ref = refModeOf(ctx, self.arena, let.value, final);
+                try self.bindLocal(ctx, let.name, .{ .type_ = final, .is_mut = let.is_mut or ref == .mutable, .ref = ref }, self.arena.stmtSpan(stmt_id));
             },
             .assign_stmt => {
                 const assign = self.arena.assign_stmts.items[data];
@@ -5298,21 +7077,20 @@ pub const TypeChecker = struct {
                 if (target_kind == .ident) {
                     const name_id = self.arena.exprData(assign.target);
                     if (ctx.locals.get(name_id)) |local| {
-                        // E0221 (resolver-types §8.2):
-                        // a closure body cannot mutate a captured binding —
-                        // captures are value snapshots in both backends. The
-                        // capture check precedes the mutability check (a
-                        // captured `let mut` is still immutable here).
-                        const is_captured = if (self.closure_captures) |caps| caps.contains(name_id) else false;
-                        if (is_captured) {
-                            const span = self.arena.exprSpan(assign.target);
-                            try self.emit(.closure_cannot_mutate_capture, .error_, span, "closure cannot mutate captured binding '{s}' (pass it as an argument or mutate through entity.get_mut)", .{self.arena.strings.slice(name_id)});
+                        // E0221 (resolver-types §8.2): a closure body writes no
+                        // binding it captured, `let mut` included, by
+                        // assignment or through one (`placeOf`).
+                        if (self.isClosureCapture(ctx, name_id)) {
+                            try self.emitCapturedWrite(self.arena.exprSpan(assign.target), name_id);
                         } else if (!local.is_mut) {
                             const span = self.arena.exprSpan(assign.target);
                             try self.emit(.type_mismatch, .error_, span, "cannot assign to immutable binding (use 'let mut')", .{});
+                        } else if (local.ref == .mutable and refModeOf(ctx, self.arena, assign.value, local.type_) != .mutable) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "a binding of get_mut(T) is rebound only to get_mut(T)", .{});
                         }
-                        const rhs_type = self.synthHeadValue(assign.value, ctx);
-                        if (local.type_ == .builtin and rhs_type == .builtin and !self.literalTypeFits(local.type_.builtin, assign.value, rhs_type.builtin)) {
+                        const rhs_type = try self.synthHeadValue(assign.value, ctx, if (assign.op == .assign) declaredSlot(local.type_) else .unknown);
+                        const fits = if (assign.op == .assign) try self.valueFits(local.type_, assign.value, rhs_type) else try self.valueCompares(local.type_, assign.value, rhs_type);
+                        if (!fits) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match binding type", .{});
                         }
                         // Compound assignment on strings (`s += t`) is not in
@@ -5327,20 +7105,30 @@ pub const TypeChecker = struct {
                         const name = self.arena.strings.slice(name_id);
                         try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(assign.target), "unknown binding '{s}'", .{name});
                     }
-                } else if (target_kind == .field_access) {
-                    // Walk down: assignment is valid if the chain ends at
-                    // either `entity.get_mut(T)` directly or an ident
-                    // whose local binding is mutable (e.g. one bound via
-                    // `let h = entity.get_mut(T)`).
-                    const ok = isAssignTargetReachable(self.arena, ctx, assign.target);
-                    if (!ok) {
-                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.target), "assignment target field must be accessed via entity.get_mut(T) or a mutable binding", .{});
+                } else if (target_kind == .field_access or target_kind == .index) {
+                    const place = self.placeOf(ctx, assign.target);
+                    const span = self.arena.exprSpan(assign.target);
+                    switch (place.verdict) {
+                        .ok => {},
+                        .immutable_binding, .not_a_place => try self.emit(.type_mismatch, .error_, span, "an assignment target must be reached through entity.get_mut(T) or a mutable binding", .{}),
+                        .read_only_ref => try self.emit(.type_mismatch, .error_, span, "cannot write through a read-only ECS ref (get(T)); write through get_mut(T)", .{}),
+                        .through_optional => try self.emit(.type_mismatch, .error_, span, "cannot write through '?.': unwrap the optional first", .{}),
+                        .through_slice => try self.emit(.type_mismatch, .error_, span, "cannot write through a slice: a slice is a copy", .{}),
+                        .captured => try self.emitCapturedWrite(span, place.root),
                     }
-                    // Synthesize the field type and check the value matches it.
-                    const lhs_type = self.synthExpr(assign.target, ctx);
-                    const rhs_type = self.synthExpr(assign.value, ctx);
-                    if (lhs_type == .builtin and rhs_type == .builtin and !self.literalTypeFits(lhs_type.builtin, assign.value, rhs_type.builtin)) {
-                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match field type", .{});
+                    const lhs_type = if (target_kind == .index and place.verdict != .through_slice)
+                        try self.synthIndex(assign.target, self.arena.exprData(assign.target), ctx, if (assign.op == .assign) .write else .compound)
+                    else
+                        try self.synthExprE(assign.target, ctx);
+                    const rhs_type = try self.checkExpr(assign.value, if (assign.op == .assign) declaredSlot(lhs_type) else .unknown, ctx);
+                    if (place.verdict != .through_optional and place.verdict != .through_slice) {
+                        const fits = if (assign.op == .assign) try self.valueFits(lhs_type, assign.value, rhs_type) else try self.valueCompares(lhs_type, assign.value, rhs_type);
+                        if (!fits) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match field type", .{});
+                        }
+                    }
+                    if (assign.op != .assign and ((lhs_type == .builtin and lhs_type.builtin == .string_) or (rhs_type == .builtin and rhs_type.builtin == .string_))) {
+                        try self.emit(.type_mismatch, .error_, span, "compound assignment on strings is not in the M0.8 minimal subset (use 's = s + ...')", .{});
                     }
                 } else {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.target), "unsupported assignment target in S3 rule body", .{});
@@ -5350,19 +7138,19 @@ pub const TypeChecker = struct {
                 const expr_id: NodeId = @bitCast(data);
                 // A structural `spawn(...)` is statement-position only (§4.5, no
                 // body handle): check it here so the value-position refusal
-                // (E0304) in `synthExpr` does NOT fire on a legal statement use.
+                // (E0304) in `synthExprE` does NOT fire on a legal statement use.
                 // Every other expression types normally.
                 if (self.arena.exprKind(expr_id) == .spawn_struct) {
                     _ = try self.checkSpawnStruct(expr_id, self.arena.exprData(expr_id), ctx, false);
                 } else {
-                    _ = self.synthExpr(expr_id, ctx);
+                    _ = try self.synthExprE(expr_id, ctx);
                 }
             },
             .assert_stmt => {
                 // `assert(cond[, msg])` — the condition must be bool (v0.6
                 // foundations, `etch-reference-part1.md` §10.3).
                 const a = self.arena.assert_stmts.items[data];
-                const cond_t = self.synthExpr(a.cond, ctx);
+                const cond_t = try self.synthExprE(a.cond, ctx);
                 if (cond_t != .builtin or cond_t.builtin != .bool_) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(a.cond), "assert condition must be a bool expression", .{});
                 }
@@ -5372,7 +7160,11 @@ pub const TypeChecker = struct {
                 // variable binds to the range's integer element type, then the
                 // body is checked with it in scope.
                 const f = self.arena.for_stmts.items[data];
-                const iter_t = self.synthExpr(f.iterable, ctx);
+                const iter_t = try self.synthExprE(f.iterable, ctx);
+                // The loop variables share the body's scope.
+                try ctx.enter(self.gpa);
+                defer ctx.leave();
+                const stmt_span = self.arena.stmtSpan(stmt_id);
                 if (iter_t == .map_t) {
                     // `for k, v in m` — two bindings: key then value. A single-
                     // binding map for-in is rejected.
@@ -5380,9 +7172,9 @@ pub const TypeChecker = struct {
                     if (f.index_name == 0) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "map for-in binds two variables (for k, v in m)", .{});
                     } else {
-                        try ctx.locals.put(self.gpa, f.index_name, .{ .type_ = .{ .builtin = mi.value }, .is_mut = false });
+                        try self.bindLocal(ctx, f.index_name, .{ .type_ = mi.value.*, .is_mut = false }, stmt_span);
                     }
-                    try ctx.locals.put(self.gpa, f.var_name, .{ .type_ = .{ .builtin = mi.key }, .is_mut = false });
+                    try self.bindLocal(ctx, f.var_name, .{ .type_ = mi.key.*, .is_mut = false }, stmt_span);
                 } else {
                     var elem_t: ResolvedType = ResolvedType.unknown;
                     if (iter_t == .range) {
@@ -5394,25 +7186,27 @@ pub const TypeChecker = struct {
                         // out-of-subset policy. Must precede `elementType`,
                         // which would otherwise bind the element.
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "set for-in is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{});
-                    } else if (iter_t.elementType()) |bt| {
+                    } else if (iter_t.elementType()) |e| {
                         // Array / slice iteration binds the element type.
-                        elem_t = .{ .builtin = bt };
+                        elem_t = e.*;
                     } else if (iter_t != .unknown) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "for-in iterable must be a range, array, or map in E1", .{});
                     }
                     if (f.index_name != 0) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "this for-in binds a single loop variable", .{});
                     }
-                    try ctx.locals.put(self.gpa, f.var_name, .{ .type_ = elem_t, .is_mut = false });
+                    try self.bindLocal(ctx, f.var_name, .{ .type_ = elem_t, .is_mut = false }, stmt_span);
                 }
                 // a loop opened here is INSIDE any enclosing
                 // concurrency branch: its `break`/`continue` are legal (E0907
                 // fires only on the boundary-crossing ones).
                 self.conc_loop_depth += 1;
                 defer self.conc_loop_depth -= 1;
+                try self.break_frames.append(self.gpa, .{ .label = 0, .yields = false });
+                defer _ = self.break_frames.pop();
                 // The ITERATOR is what survives a suspension here, and it is
                 // nobody's local — `x` is the element, typically an `int`.
-                const iter_retained = iteratorRetainedAcrossSuspension(iter_t);
+                const iter_retained = self.iteratorRetainedAcrossSuspension(ctx, f.iterable, iter_t);
                 if (iter_retained) self.arena_iter_depth += 1;
                 defer if (iter_retained) {
                     self.arena_iter_depth -= 1;
@@ -5428,27 +7222,40 @@ pub const TypeChecker = struct {
                 // `while let x = <optional> { body }` — `x`
                 // binds the optional's payload in the body scope each iteration.
                 const wh = self.arena.while_stmts.items[data];
-                const cond_t = self.synthExpr(wh.cond, ctx);
+                const cond_t = try self.synthExprE(wh.cond, ctx);
+                // The `while let` payload shares the body's scope.
+                try ctx.enter(self.gpa);
+                defer ctx.leave();
                 if (wh.let_binding != 0) {
                     const payload = try self.optionalPayload(cond_t, self.arena.exprSpan(wh.cond), "while let");
-                    try ctx.locals.put(self.gpa, wh.let_binding, .{ .type_ = payload, .is_mut = false });
-                } else if (cond_t == .builtin and cond_t.builtin != .bool_) {
+                    try self.bindLocal(ctx, wh.let_binding, .{ .type_ = payload, .is_mut = false }, self.arena.stmtSpan(stmt_id));
+                } else if (!builtinWhere(cond_t, isBool)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(wh.cond), "while condition must be a bool expression", .{});
                 }
                 // in-branch loop, mirror of the `for` arm.
                 self.conc_loop_depth += 1;
                 defer self.conc_loop_depth -= 1;
+                try self.break_frames.append(self.gpa, .{ .label = 0, .yields = false });
+                defer _ = self.break_frames.pop();
                 var i: u32 = 0;
                 while (i < wh.body_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[wh.body_start + i]));
                 }
-                if (wh.let_binding != 0) _ = ctx.locals.remove(wh.let_binding);
             },
             .break_stmt => {
-                // `break [label] [value]`. Type the value if
-                // present; loop-membership / label validity is permissive.
+                // `break [label] [value]`. Loop membership and label validity
+                // are permissive.
                 const b = self.arena.break_stmts.items[data];
-                if (!b.value.isNone()) _ = self.synthExpr(b.value, ctx);
+                const target = self.breakTarget(b.label);
+                const expected: ResolvedType = if (target) |i| self.break_frames.items[i].expected else .unknown;
+                const t: ResolvedType = if (b.value.isNone()) .unit else try self.checkExpr(b.value, expected, ctx);
+                if (target) |i| {
+                    const frame = &self.break_frames.items[i];
+                    if (frame.yields) {
+                        const span = if (b.value.isNone()) self.arena.stmtSpan(stmt_id) else self.arena.exprSpan(b.value);
+                        try frame.values.append(self.gpa, .{ .node = b.value, .t = t, .span = span });
+                    }
+                }
                 // E0907: the break must not cross the enclosing
                 // concurrency-branch task boundary (§9.2).
                 try self.checkConcControlFlow(stmt_id, b.label, "break");
@@ -5466,9 +7273,12 @@ pub const TypeChecker = struct {
                 // statically an `Error`, so a non-Error operand is rejected
                 // here (no runtime coercion). The interpreter's carrier stays
                 // an arbitrary `Value` — unreachable for checked programs.
+                if (self.in_hook_body and !self.current_can_throw) {
+                    try self.emit(.illegal_statement_in_extension_hook, .error_, self.arena.stmtSpan(stmt_id), "'throw' outside a 'try' is illegal in an extension hook (on_attach / on_detach): a hook has no error channel", .{});
+                }
                 const t = self.arena.throw_stmts.items[data];
-                const vt = self.synthExpr(t.value, ctx);
-                const is_error = vt == .struct_t and vt.struct_t == self.arena.error_type_name;
+                const vt = try self.synthExprE(t.value, ctx);
+                const is_error = vt == .struct_t and isErrorDecl(vt.struct_t);
                 if (!is_error and vt != .unknown) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(t.value), "thrown value must be the builtin 'Error' struct (part1 §10.2)", .{});
                 }
@@ -5485,12 +7295,17 @@ pub const TypeChecker = struct {
                 // needs whatever the surrounding context offers, not `true`.
                 const saved_try_throw = self.current_can_throw;
                 self.current_can_throw = true;
+                try ctx.enter(self.gpa);
                 var i: u32 = 0;
                 while (i < tc.try_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[tc.try_start + i]));
                 }
+                ctx.leave();
                 self.current_can_throw = saved_try_throw;
-                try ctx.locals.put(self.gpa, tc.catch_name, .{ .type_ = .{ .struct_t = self.arena.error_type_name }, .is_mut = false });
+                // The caught binding shares the catch body's scope.
+                try ctx.enter(self.gpa);
+                defer ctx.leave();
+                try self.bindLocal(ctx, tc.catch_name, .{ .type_ = self.nominalNamed(self.arena.error_type_name).?, .is_mut = false }, self.arena.stmtSpan(stmt_id));
                 i = 0;
                 while (i < tc.catch_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[tc.catch_start + i]));
@@ -5510,6 +7325,9 @@ pub const TypeChecker = struct {
                 // parent has potentially already advanced — no propagation
                 // site (`etch-resolver-types.md` §9.2). Asymmetric by design
                 // — do NOT generalize.
+                if (self.in_hook_body) {
+                    try self.emit(.illegal_statement_in_extension_hook, .error_, self.arena.stmtSpan(stmt_id), "'return' is illegal in an extension hook (on_attach / on_detach): a hook has no caller to return to", .{});
+                }
                 if (self.conc_branch) |ck| {
                     if (ck != .race) {
                         try self.emit(.illegal_return_in_concurrency_branch, .error_, self.arena.stmtSpan(stmt_id), "'return' is illegal in a '{s}' {s} (only a 'race' branch may return — the winner's return propagates at the race site)", .{ @tagName(ck), if (ck == .sync) "branch" else "body" });
@@ -5517,9 +7335,18 @@ pub const TypeChecker = struct {
                 }
                 const value: NodeId = @bitCast(data);
                 if (!value.isNone()) {
-                    const vt = self.synthHeadValue(value, ctx);
+                    const vt = try self.synthHeadValue(value, ctx, self.current_fn_return orelse .unknown);
+                    // The winner's value is parked in `AsyncTask.result` and
+                    // re-raised at the race site several ticks later, after the
+                    // rule arena has been reset — and `result` is a bare `Value`
+                    // that stabilises nothing.
+                    if (self.conc_branch) |ck| {
+                        if (ck == .race and isRuleArenaType(vt)) {
+                            try self.emit(.rule_arena_value_escapes, .error_, self.arena.exprSpan(value), "this 'race' branch returns a value stored in the rule arena; the winner's value is parked and re-raised at the race site after the arena has been reset", .{});
+                        }
+                    }
                     if (self.current_fn_return) |ret| {
-                        if (ret == .builtin and vt == .builtin and !self.literalTypeFits(ret.builtin, value, vt.builtin)) {
+                        if (!try self.valueFits(ret, value, vt)) {
                             try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(value), "return value type does not match the declared return type", .{});
                         }
                     }
@@ -5533,13 +7360,12 @@ pub const TypeChecker = struct {
                 // enqueued at runtime (interp dynamic event store / codegen
                 // `world.event_bus.emit`).
                 const em = self.arena.emit_stmts.items[data];
-                const sym = self.symbols.get(em.event_type);
-                if (sym == null or sym.?.kind != .event_) {
-                    try self.emit(.undefined_symbol, .error_, self.arena.stmtSpan(stmt_id), "'{s}' is not a declared event", .{self.arena.strings.slice(em.event_type)});
-                } else {
+                if (self.eventNamed(em.event_type)) |ev| {
                     // Field-value validation is shared with the `entity_event` /
                     // `global_event` payload filter.
-                    try self.checkEventFieldRun(self.arena.itemData(sym.?.item_id), em.fields_start, em.fields_len, ctx);
+                    try self.checkEventFieldRun(ev, em.fields_start, em.fields_len, false, ctx);
+                } else {
+                    try self.emit(.undefined_symbol, .error_, self.arena.stmtSpan(stmt_id), "'{s}' is not a declared event", .{self.arena.strings.slice(em.event_type)});
                 }
             },
             .tag_mutation_stmt => {
@@ -5549,7 +7375,7 @@ pub const TypeChecker = struct {
                 // clears a single bit. Resolves only; the deferred structural mutation
                 // runs in the interpreter / codegen.
                 const tm = self.arena.tag_mutation_stmts.items[data];
-                const recv_t = self.synthExpr(tm.receiver, ctx);
+                const recv_t = try self.synthExprE(tm.receiver, ctx);
                 if (recv_t != .builtin or recv_t.builtin != .entity) {
                     const op_name = switch (tm.kind) {
                         .add => "add_tag",
@@ -5592,8 +7418,8 @@ pub const TypeChecker = struct {
                 while (i < range.branches_len) : (i += 1) {
                     const br = self.arena.concurrency_branches.items[range.branches_start + i];
                     if (!br.cond.isNone()) {
-                        const cond_t = self.synthExpr(br.cond, ctx);
-                        if (cond_t == .builtin and cond_t.builtin != .bool_) {
+                        const cond_t = try self.synthExprE(br.cond, ctx);
+                        if (!builtinWhere(cond_t, isBool)) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(br.cond), "conditional branch guard must be a bool expression", .{});
                         }
                     }
@@ -5625,7 +7451,7 @@ pub const TypeChecker = struct {
                 const ss = self.arena.spawn_stmts.items[data];
                 try self.checkConcBodyRun(ctx, ss.body_start, ss.body_len, .spawn);
                 if (ss.binding != 0) {
-                    try ctx.locals.put(self.gpa, ss.binding, .{ .type_ = .{ .builtin = .task_handle }, .is_mut = false });
+                    try self.bindLocal(ctx, ss.binding, .{ .type_ = .{ .builtin = .task_handle }, .is_mut = false }, self.arena.stmtSpan(stmt_id));
                 }
             },
             .timer_stmt => {
@@ -5634,10 +7460,13 @@ pub const TypeChecker = struct {
                 // carries no `{async}` effect (absent from the §9.4
                 // builtin-effect table), so there is no E0901 gate on the
                 // statement itself.
+                if (self.in_hook_body) {
+                    try self.emit(.illegal_statement_in_extension_hook, .error_, self.arena.stmtSpan(stmt_id), "a timer is illegal in an extension hook (on_attach / on_detach): a hook runs to completion and has no task to schedule it on", .{});
+                }
                 const ts = self.arena.timer_stmts.items[data];
                 // The duration argument is a full expression typed `Duration`
                 // (§9.10), evaluated once at scheduling time.
-                const arg_t = self.synthExpr(ts.arg, ctx);
+                const arg_t = try self.synthExprE(ts.arg, ctx);
                 if (arg_t != .unknown and !(arg_t == .builtin and arg_t.builtin == .duration)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ts.arg), "timer argument must be a Duration expression", .{});
                 }
@@ -5647,7 +7476,7 @@ pub const TypeChecker = struct {
                 // scope snapshot taken at scheduling, before the parent binds
                 // the handle — the handle does not exist inside the body.
                 if (ts.binding != 0) {
-                    try ctx.locals.put(self.gpa, ts.binding, .{ .type_ = .{ .builtin = .timer_handle }, .is_mut = false });
+                    try self.bindLocal(ctx, ts.binding, .{ .type_ = .{ .builtin = .timer_handle }, .is_mut = false }, self.arena.stmtSpan(stmt_id));
                 }
             },
             else => {},
@@ -5677,14 +7506,19 @@ pub const TypeChecker = struct {
         self.conc_branch = null;
         self.conc_loop_depth = 0;
         self.conc_labels_base = self.conc_labels.items.len;
+        const saved_break_base = self.break_base;
+        self.break_base = self.break_frames.items.len;
         const esc = try self.openEscapeWindow(ctx, .timer);
+        try ctx.enter(self.gpa);
         defer {
+            ctx.leave();
             self.closeEscapeWindow(esc);
             self.current_is_async = saved_async;
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
             self.arena_iter_depth = saved_iter;
             self.conc_labels_base = saved_base;
+            self.break_base = saved_break_base;
         }
         var i: u32 = 0;
         while (i < len) : (i += 1) {
@@ -5698,19 +7532,15 @@ pub const TypeChecker = struct {
     /// branch body stays an ORDINARY async context otherwise — E0905 applies
     /// recursively inside it (§9.2 revision 2: the constructs relocate the
     /// `await`, they do not replace it).
-    /// Open an escape window: record every name visible RIGHT NOW, so anything
-    /// the snapshot body references from this set is a capture rather than one
-    /// of its own locals.
-    ///
-    /// Recording the names at ENTRY is what makes the distinction cheap and
-    /// exact: `ctx.locals` only grows while a body is checked, so a name absent
-    /// from the window was declared inside the body and captures nothing. The
-    /// alternative — diffing the map at exit — would answer the same question
-    /// after the references have already been typed.
+    /// Open an escape window: record every name visible now, and where the
+    /// snapshot body's own bindings begin, so that a name the body reads is a
+    /// capture unless the body bound it.
     fn openEscapeWindow(self: *TypeChecker, ctx: *RuleCtx, site: EscapeSite) TypeError!EscapeSave {
-        const save: EscapeSave = .{ .base = self.escape_base, .site = self.escape_site };
+        const save: EscapeSave = .{ .base = self.escape_base, .site = self.escape_site, .log_base = self.escape_log_base, .closure_own = self.closure_own };
         self.escape_base = self.escape_names.items.len;
+        self.escape_log_base = ctx.scope_log.items.len;
         self.escape_site = site;
+        self.closure_own = null;
         var it = ctx.locals.keyIterator();
         while (it.next()) |k| try self.escape_names.append(self.gpa, k.*);
         return save;
@@ -5719,14 +7549,46 @@ pub const TypeChecker = struct {
     fn closeEscapeWindow(self: *TypeChecker, save: EscapeSave) void {
         self.escape_names.shrinkRetainingCapacity(self.escape_base);
         self.escape_base = save.base;
+        self.escape_log_base = save.log_base;
         self.escape_site = save.site;
+        self.closure_own = save.closure_own;
     }
 
-    const EscapeSave = struct { base: usize, site: ?EscapeSite };
+    const EscapeSave = struct { base: usize, site: ?EscapeSite, log_base: usize, closure_own: ?*const std.AutoHashMapUnmanaged(StringId, void) };
 
-    /// True when `name` was visible before the innermost snapshot body opened —
-    /// i.e. referencing it inside that body captures it.
-    fn isCaptured(self: *const TypeChecker, name: StringId) bool {
+    /// The scope a closure literal was written in, which its body sees at
+    /// every call (`etch-resolver-types.md` §8.1), and the names of it that
+    /// the innermost snapshot body enclosing the literal bound itself.
+    const ClosureEnv = struct {
+        locals: std.AutoHashMapUnmanaged(StringId, RuleCtx.Local) = .empty,
+        own: std.AutoHashMapUnmanaged(StringId, void) = .empty,
+
+        fn deinit(self: *ClosureEnv, gpa: std.mem.Allocator) void {
+            self.locals.deinit(gpa);
+            self.own.deinit(gpa);
+        }
+    };
+
+    fn recordClosureEnv(self: *TypeChecker, ctx: *const RuleCtx) !u32 {
+        var env: ClosureEnv = .{};
+        errdefer env.deinit(self.gpa);
+        var it = ctx.locals.iterator();
+        while (it.next()) |e| {
+            try env.locals.put(self.gpa, e.key_ptr.*, e.value_ptr.*);
+            if (self.escape_site != null and !self.isCaptured(ctx, e.key_ptr.*)) try env.own.put(self.gpa, e.key_ptr.*, {});
+        }
+        try self.closure_envs.append(self.gpa, env);
+        return @intCast(self.closure_envs.items.len - 1);
+    }
+
+    /// True when `name` resolves, inside the innermost snapshot body, to a
+    /// binding visible before that body opened — a capture — and not to one
+    /// the body made.
+    fn isCaptured(self: *const TypeChecker, ctx: *const RuleCtx, name: StringId) bool {
+        if (ctx.loggedSince(self.escape_log_base, name)) return false;
+        if (self.closure_own) |own| {
+            if (own.contains(name)) return false;
+        }
         for (self.escape_names.items[self.escape_base..]) |n| {
             if (n == name) return true;
         }
@@ -5832,8 +7694,19 @@ pub const TypeChecker = struct {
         while (it.next()) |kv| {
             if (isRuleArenaType(kv.value_ptr.type_)) try offenders.append(self.gpa, kv.key_ptr.*);
         }
+        // A shadowed binding lives on until its shadow's scope closes, in the
+        // task that suspends: a task body holds only what its nested scopes
+        // shadow, its top scope replacing what it inherits.
+        const held_from = if (self.escape_site != null) taskNestedStart(ctx, self.escape_log_base) else 0;
+        for (ctx.scope_log.items[held_from..]) |e| {
+            const prev = e.shadowed orelse continue;
+            if (isRuleArenaType(prev.type_)) try offenders.append(self.gpa, e.name);
+        }
         std.mem.sort(StringId, offenders.items, {}, std.sort.asc(StringId));
+        var last: ?StringId = null;
         for (offenders.items) |name_id| {
+            if (last == name_id) continue;
+            last = name_id;
             try self.emit(
                 .rule_arena_value_escapes,
                 .error_,
@@ -5844,64 +7717,54 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Does the `ForFrame` this loop pushes retain a handle into a per-body store
-    /// across a suspension?
-    ///
-    /// **THE QUESTION IS WHAT THE FRAME RETAINS, NOT WHAT THE AUTHOR NAMED.** The
-    /// interpreter's `ForIter` has five variants: `.range` is fully self-contained,
-    /// `.array` and `.map` carry an INDEX into the rule-arena collection store, and
-    /// `.array_persistent` / `.map_persistent` carry a block pointer that outlives
-    /// any body. Only the first is provably safe from a type alone, so everything
-    /// else is refused.
-    ///
-    /// **ONLY `.array_fixed` IS SEPARABLE, AND THE BOUNDARY WAS MEASURED CELL BY
-    /// CELL.** The resolved type does not carry the storage ZONE, so most iterables
-    /// cannot be told apart from their type alone:
-    ///
-    /// - `[1, 2, 3]` and a local bound to one resolve `.array_fixed`, and NO
-    ///   resource path produces that type — a `resource F { arr: int[3] }` field is
-    ///   not a collection field at all and its read is `undefined_symbol`. So
-    ///   `.array_fixed` is unambiguously rule-arena, and refusing it costs zero.
-    /// - `.array_dyn` is AMBIGUOUS: a resource `int[]` resolves there, and so does
-    ///   `let xs: int[] = [1, 2]`, a rule-arena literal given a slice type.
-    /// - `.map_t` is AMBIGUOUS the same way: a resource `[K: V]` and a local
-    ///   `let m = [1: 10]` are one type.
-    /// - `.range` is self-contained at runtime (`ForIter.range` holds two integers
-    ///   and a flag), so it is safe whatever its provenance.
-    ///
-    /// Separating the two ambiguous families needs the iterable's PROVENANCE, which
-    /// is a structural property of the expression and not of its type — and a
-    /// memory-safety verdict resting on a structural read is what this rule's
-    /// sibling refused. So this covers the half that is decidable from a type and
-    /// leaves the other half to the milestone entry that gives `ResolvedType` a
-    /// zone; refusing the ambiguous families instead would cost the ability to
-    /// iterate ANY resource collection inside an async rule, which is a capability
-    /// and not a false refusal.
-    fn iteratorRetainedAcrossSuspension(t: ResolvedType) bool {
-        return t == .array_fixed;
+    /// Where the first scope nested in the task body whose own bindings begin
+    /// at `scope_log[base]` begins, or the log's end when none is open.
+    fn taskNestedStart(ctx: *const RuleCtx, base: usize) usize {
+        var body_top: ?usize = null;
+        for (ctx.scope_starts.items) |start| {
+            if (start < base) continue;
+            if (body_top == null) {
+                body_top = start;
+                continue;
+            }
+            return start;
+        }
+        return ctx.scope_log.items.len;
+    }
+
+    /// Whether the frame of a `for` over `iterable`, of type `t`, holds a handle
+    /// into the rule body's arena across a suspension: the `for` iterates a
+    /// copy, which only a resource's collection field keeps out of the arena.
+    fn iteratorRetainedAcrossSuspension(self: *TypeChecker, ctx: *const RuleCtx, iterable: NodeId, t: ResolvedType) bool {
+        return switch (t) {
+            .array_fixed => true,
+            .array_dyn, .map_t => !self.isResourceField(ctx, iterable),
+            else => false,
+        };
+    }
+
+    /// Whether `id` reads a field of a resource: `get(R).f`, `get_mut(R).f`,
+    /// or a field of a binding of one.
+    fn isResourceField(self: *TypeChecker, ctx: *const RuleCtx, id: NodeId) bool {
+        if (self.arena.exprKind(id) != .field_access) return false;
+        const fa = self.arena.field_accesses.items[self.arena.exprData(id)];
+        if (fa.opt_chain) return false;
+        return switch (self.arena.exprKind(fa.receiver)) {
+            .method_get, .method_get_mut => self.arena.method_gets.items[self.arena.exprData(fa.receiver)].receiver.isNone(),
+            .ident => blk: {
+                const local = ctx.locals.get(self.arena.exprData(fa.receiver)) orelse break :blk false;
+                break :blk local.type_ == .resource;
+            },
+            else => false,
+        };
     }
 
     fn isRuleArenaType(t: ResolvedType) bool {
         return switch (t) {
             .array_fixed, .array_dyn, .map_t, .set_t => true,
             .closure, .struct_t, .optional => true,
-            // AN UNRESOLVED TYPE IS REFUSED, and this is not symmetry with the
-            // arms above: it is the admission that safety cannot be ESTABLISHED.
-            // `.unknown` carries two meanings under one tag — the fallback after a
-            // diagnostic, and a DEFERRAL emitted with no diagnostic at all (the
-            // `.optional` and `.some_lit` arms return it for a non-builtin
-            // payload). So `Spec?` arrives here as `.unknown`, and reading the tag
-            // as "a diagnostic already fired" let a struct-payload optional escape
-            // into a capture with nothing said. The cost of that reading was a
-            // SIGABRT reachable from ordinary code.
-            //
-            // `.generic` joins it for the reason its own doc gives — "operations
-            // are permissive, like `unknown`" — and costs nothing: measured, it
-            // adds zero refusals to the corpus.
-            //
-            // The direction is `E0223`'s own: a false refusal is a compile error
-            // the author reads, a missed capture is an abort in production.
-            // Measured at 0 false refusals over the whole suite.
+            // `.unknown` also marks a deferral no diagnostic reported, and a
+            // `.generic` is as permissive, so neither can be shown safe.
             .unknown, .generic => true,
             .builtin => |b| b == .string_,
             else => false,
@@ -5922,18 +7785,23 @@ pub const TypeChecker = struct {
         self.conc_branch = kind;
         self.conc_loop_depth = 0;
         self.conc_labels_base = self.conc_labels.items.len;
+        const saved_break_base = self.break_base;
+        self.break_base = self.break_frames.items.len;
         const esc = try self.openEscapeWindow(ctx, switch (kind) {
             .race => .race_branch,
             .sync => .sync_branch,
             .branch => .branch,
             .spawn => .spawn,
         });
+        try ctx.enter(self.gpa);
         defer {
+            ctx.leave();
             self.closeEscapeWindow(esc);
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
             self.arena_iter_depth = saved_iter;
             self.conc_labels_base = saved_base;
+            self.break_base = saved_break_base;
         }
         try self.checkStmt(ctx, stmt);
     }
@@ -5954,18 +7822,23 @@ pub const TypeChecker = struct {
         self.conc_branch = kind;
         self.conc_loop_depth = 0;
         self.conc_labels_base = self.conc_labels.items.len;
+        const saved_break_base = self.break_base;
+        self.break_base = self.break_frames.items.len;
         const esc = try self.openEscapeWindow(ctx, switch (kind) {
             .race => .race_branch,
             .sync => .sync_branch,
             .branch => .branch,
             .spawn => .spawn,
         });
+        try ctx.enter(self.gpa);
         defer {
+            ctx.leave();
             self.closeEscapeWindow(esc);
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
             self.arena_iter_depth = saved_iter;
             self.conc_labels_base = saved_base;
+            self.break_base = saved_break_base;
         }
         var i: u32 = 0;
         while (i < len) : (i += 1) {
@@ -6025,21 +7898,47 @@ pub const TypeChecker = struct {
 
     const TypeError = std.mem.Allocator.Error;
 
-    fn synthExpr(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) ResolvedType {
-        return self.synthExprE(id, ctx_opt) catch ResolvedType.unknown;
-    }
-
     /// Synthesize a statement-head VALUE expression (`let` init / assignment RHS /
     /// `return` operand) with the correct suspendable context: the
     /// value is on the frame-driven spine ONLY if it IS this statement's head
     /// `await` (`let x = await f()`). Any other value (an `if`/`match`/`loop`/
     /// block, or an expression merely containing an `await`) is synchronous, so a
     /// statement-head `await` nested inside it is inexecutable → E0904.
-    fn synthHeadValue(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) ResolvedType {
+    fn synthHeadValue(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx, expected: ResolvedType) TypeError!ResolvedType {
         const saved = self.await_suspendable;
         self.await_suspendable = @as(u32, @bitCast(id)) == @as(u32, @bitCast(self.stmt_head_await));
         defer self.await_suspendable = saved;
-        return self.synthExpr(id, ctx_opt);
+        return self.checkExpr(id, expected, ctx_opt);
+    }
+
+    /// Type `id` against the type its slot expects (`etch-resolver-types.md`
+    /// §4.1): a `.variant` takes the enum and an anonymous `.{ … }` the struct
+    /// it names, under any optional, as an element, a map key or value or
+    /// `some`'s payload, and as
+    /// the value of a block, an `if`, a `match` or a loop's `break`; an array
+    /// literal takes the element of the array it fills, and `[]` needs a slot
+    /// (§4.2, E0207).
+    fn checkExpr(self: *TypeChecker, id: NodeId, expected: ResolvedType, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        var target = expected;
+        while (target == .optional) target = target.optional.*;
+        const data = self.arena.exprData(id);
+        switch (self.arena.exprKind(id)) {
+            .tag_path => if (self.arena.isEnumShorthand(id) and target != .unknown and target != .generic) {
+                if (target == .enum_t) return self.checkEnumShorthand(id, target.enum_t);
+                try self.refuseShorthand(id, null);
+                return ResolvedType.unknown;
+            },
+            .struct_lit => if (target == .struct_t and self.arena.struct_lits.items[data].type_name == 0) return self.checkStructLitAgainst(id, data, target.struct_t, ctx_opt),
+            .some_lit => if (expected != .unknown) return self.optionalOf(try self.checkExpr(@bitCast(data), if (expected == .optional) expected.optional.* else expected, ctx_opt)),
+            .array_lit => if (target != .unknown) return self.synthArrayLit(id, data, ctx_opt, if (isArray(target)) declaredSlot(arrayElem(target).*) else ResolvedType.unknown),
+            .map_lit => if (target == .map_t) return self.synthMapLit(id, data, ctx_opt, declaredSlot(target.map_t.key.*), target.map_t.value.*),
+            .block_expr => return self.synthBlock(data, ctx_opt, expected),
+            .if_expr => return self.synthIf(id, data, ctx_opt, expected),
+            .match_expr => return self.synthMatch(id, data, ctx_opt, expected),
+            .loop_expr => return self.synthLoop(id, data, ctx_opt, expected),
+            else => {},
+        }
+        return self.synthExprE(id, ctx_opt);
     }
 
     fn synthExprE(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
@@ -6076,24 +7975,17 @@ pub const TypeChecker = struct {
                 }
                 return ResolvedType{ .builtin = .string_ };
             },
-            .tag_path => return ResolvedType.unknown, // enum-variant shorthand; the type is unknown here
+            .tag_path => return self.synthShorthand(id),
             // `none`: an optional with an unknown payload —
             // typed by the binding annotation / context (e.g. `let o: int? = none`).
             .none_lit => return ResolvedType.unknown,
-            // `some(x)`: an optional of `x`'s type. Builtin-scalar payload →
-            // `.optional(bt)`; a non-builtin payload (`some(struct)`) is deferred.
-            .some_lit => {
-                const inner: NodeId = @bitCast(data);
-                const inner_t = try self.synthExprE(inner, ctx_opt);
-                if (inner_t == .builtin) return .{ .optional = inner_t.builtin };
-                return ResolvedType.unknown;
-            },
+            .some_lit => return self.optionalOf(try self.synthExprE(@bitCast(data), ctx_opt)),
             .ident => {
                 const name_id: StringId = data;
                 if (ctx_opt) |ctx| {
                     if (ctx.locals.get(name_id)) |local| {
                         if (self.escape_site) |site| {
-                            if (isRuleArenaType(local.type_) and self.isCaptured(name_id)) {
+                            if (isRuleArenaType(local.type_) and self.isCaptured(ctx, name_id)) {
                                 try self.emit(
                                     .rule_arena_value_escapes,
                                     .error_,
@@ -6106,6 +7998,16 @@ pub const TypeChecker = struct {
                         return local.type_;
                     }
                 }
+                if (self.constType(name_id)) |t| return t;
+                try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown identifier '{s}'", .{self.arena.strings.slice(name_id)});
+                return ResolvedType.unknown;
+            },
+            .path => {
+                // An uppercase name in value position is a const read; a type
+                // name there is typed by the construct that reads it.
+                const name_id: StringId = data;
+                if (self.constType(name_id)) |t| return t;
+                if (self.symbols.contains(name_id) or self.importedBinding(name_id) != null or isBuiltinTypeName(self.arena.strings.slice(name_id))) return ResolvedType.unknown;
                 try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown identifier '{s}'", .{self.arena.strings.slice(name_id)});
                 return ResolvedType.unknown;
             },
@@ -6140,26 +8042,33 @@ pub const TypeChecker = struct {
             },
             .field_access => {
                 const fa = self.arena.field_accesses.items[data];
-                // `recv?.field`: optional payloads are
-                // builtin scalars — they have no fields, so the
-                // chained field form has nothing to resolve against. The
-                // interpreter stays the reference for the op set delivered
-                // (`?.method`, `??`, `!`, patterns).
-                if (fa.opt_chain) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "optional-chained field access is not in the M0.8 minimal subset (scalar optional payloads have no fields)", .{});
-                    return ResolvedType.unknown;
+                // `recv?.field`, or a field read after one, is the field of the
+                // payload, optional; a field already optional stays `U?`
+                // (`etch-reference-part1.md` §6.6).
+                if (fa.opt_chain or self.arena.inOptionalChain(fa.receiver)) {
+                    const recv_t = try self.synthExprE(fa.receiver, ctx_opt);
+                    if (recv_t == .unknown) return ResolvedType.unknown;
+                    if (recv_t != .optional) {
+                        if (!fa.opt_chain) return self.lookupFieldType(recv_t, fa.field_name, self.arena.exprSpan(id));
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "optional chain '?.' requires an optional receiver", .{});
+                        return ResolvedType.unknown;
+                    }
+                    const field_t = try self.lookupFieldType(recv_t.optional.*, fa.field_name, self.arena.exprSpan(id));
+                    if (field_t == .optional) return field_t;
+                    return self.optionalOf(field_t);
                 }
                 // Enum value `Difficulty.hard`: a
                 // `.path` receiver naming a declared enum + a variant field.
                 // Resolved here (a bare type is not field-accessible otherwise).
                 if (self.arena.exprKind(fa.receiver) == .path) {
                     const path_name = self.arena.exprData(fa.receiver);
-                    if (self.enumDecl(path_name) != null) {
-                        if (self.enumVariantIndex(path_name, fa.field_name) == null) {
+                    if (self.enumNamed(path_name) != null) {
+                        const ref = self.declNamed(path_name).?;
+                        if (self.enumVariantIndex(ref, fa.field_name) == null) {
                             try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(id), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(path_name), self.arena.strings.slice(fa.field_name) });
                             return ResolvedType.unknown;
                         }
-                        return .{ .enum_t = path_name };
+                        return .{ .enum_t = ref };
                     }
                 }
                 const receiver_type = try self.synthExprE(fa.receiver, ctx_opt);
@@ -6179,15 +8088,15 @@ pub const TypeChecker = struct {
                     // when-clause gate does not apply: the time resources are
                     // ambient, readable from any rule (the spec examples read
                     // `get(GameTime).dt` without a `when resource` clause).
-                    if (builtinResourceByName(tname) != null) {
-                        return .{ .resource = mg.type_name };
+                    if (builtinResourceByName(tname)) |br| {
+                        return .{ .builtin_resource = br };
                     }
-                    if (self.symbols.get(mg.type_name)) |sym| {
-                        if (sym.kind == .component) {
+                    if (self.kindNamed(mg.type_name)) |k| {
+                        if (k == .component) {
                             try self.emit(.resource_expected_component_given, .error_, self.arena.exprSpan(id), "'{s}' is a component — receiver-less get(...) accesses a resource; use entity.get({s})", .{ tname, tname });
                             return ResolvedType.unknown;
                         }
-                        if (sym.kind != .resource) {
+                        if (k != .resource) {
                             try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a resource", .{tname});
                             return ResolvedType.unknown;
                         }
@@ -6197,10 +8106,14 @@ pub const TypeChecker = struct {
                     }
                     if (ctx_opt) |ctx| {
                         if (!ctx.unrestricted_ecs_access and !ctx.resources_in_when.contains(mg.type_name)) {
-                            try self.emit(.resource_expected_in_when, .error_, self.arena.exprSpan(id), "resource '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                            if (self.in_hook_body) {
+                                try self.emit(.resource_expected_in_when, .error_, self.arena.exprSpan(id), "resource '{s}' is not accessible — an extension hook reads engine resources only", .{tname});
+                            } else {
+                                try self.emit(.resource_expected_in_when, .error_, self.arena.exprSpan(id), "resource '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                            }
                         }
                     }
-                    return .{ .resource = mg.type_name };
+                    return self.nominalNamed(mg.type_name).?;
                 }
 
                 // Receiver form `entity.get(T)` — component access.
@@ -6216,17 +8129,33 @@ pub const TypeChecker = struct {
                         try self.emit(.component_expected_resource_given, .error_, self.arena.exprSpan(id), "'{s}' is a resource — entity.get(...) accesses a component; use get({s})", .{ tname, tname });
                         return ResolvedType.unknown;
                     }
+                    if (sym.kind != .component) {
+                        try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a component", .{tname});
+                        return ResolvedType.unknown;
+                    }
+                } else if (self.imported_symbols.get(mg.type_name)) |entry| {
+                    if (entry.kind != .component) {
+                        try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a component", .{tname});
+                        return ResolvedType.unknown;
+                    }
+                } else {
+                    try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown component '{s}'", .{tname});
+                    return ResolvedType.unknown;
                 }
                 if (ctx_opt) |ctx| {
                     if (!ctx.unrestricted_ecs_access and !ctx.components_in_when.contains(mg.type_name)) {
-                        try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                        if (self.in_hook_body) {
+                            try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the prefab's requires clause", .{tname});
+                        } else {
+                            try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                        }
                     }
                 }
-                return .{ .component = mg.type_name };
+                return self.nominalNamed(mg.type_name).?;
             },
             .binary => return try self.synthBinary(id, data, ctx_opt),
             .unary => return try self.synthUnary(id, data, ctx_opt),
-            .match_expr => return try self.synthMatch(id, data, ctx_opt),
+            .match_expr => return try self.synthMatch(id, data, ctx_opt, .unknown),
             .range => {
                 // `start..end` / `start..=end` — both bounds must be the same
                 // integer type. Result is a range over
@@ -6257,24 +8186,50 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "cast target must be a numeric primitive type ('as' converts between numbers in the S3 subset)", .{});
                     return ResolvedType.unknown;
                 }
-                if (operand_t == .builtin and !operand_t.builtin.isNumeric()) {
+                if (!builtinWhere(operand_t, BuiltinType.isNumeric)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "cast operand must be a numeric primitive", .{});
                     return ResolvedType.unknown;
                 }
                 return target_t;
             },
-            .array_lit => return try self.synthArrayLit(id, data, ctx_opt),
-            .map_lit => return try self.synthMapLit(id, data, ctx_opt),
-            .index => return try self.synthIndex(id, data, ctx_opt),
-            .closure => return .{ .closure = id },
+            .array_lit => return try self.synthArrayLit(id, data, ctx_opt, null),
+            .map_lit => return try self.synthMapLit(id, data, ctx_opt, .unknown, .unknown),
+            .index => return try self.synthIndex(id, data, ctx_opt, .read),
+            .closure => {
+                const ce = self.arena.closure_exprs.items[data];
+                var i: u32 = 0;
+                while (i < ce.params_len) : (i += 1) {
+                    const name = self.arena.closure_params.items[ce.params_start + i].name;
+                    var j: u32 = 0;
+                    while (j < i) : (j += 1) {
+                        if (self.arena.closure_params.items[ce.params_start + j].name == name) {
+                            try self.emit(.duplicate_symbol, .error_, self.arena.exprSpan(id), "'{s}' is already bound in this scope", .{self.arena.strings.slice(name)});
+                            break;
+                        }
+                    }
+                }
+                const ctx = ctx_opt orelse return .{ .closure = .{ .literal = id, .env = ClosureType.no_env } };
+                const env = try self.recordClosureEnv(ctx);
+                // Checked here, called or not: a call types it again with its
+                // arguments.
+                var param_types: std.ArrayListUnmanaged(ResolvedType) = .empty;
+                defer param_types.deinit(self.gpa);
+                i = 0;
+                while (i < ce.params_len) : (i += 1) {
+                    const p = self.arena.closure_params.items[ce.params_start + i];
+                    try param_types.append(self.gpa, if (p.type_node.isNone()) .unknown else self.namedTypeToResolved(p.type_node));
+                }
+                _ = try self.typeClosureBody(ctx, ce, env, param_types.items);
+                return .{ .closure = .{ .literal = id, .env = env } };
+            },
             .fn_call => return try self.synthCall(id, data, ctx_opt),
             .struct_lit => return try self.synthStructLit(id, data, ctx_opt),
             .method_call => return try self.synthMethodCall(id, data, ctx_opt),
-            .loop_expr => return try self.synthLoop(data, ctx_opt),
-            .block_expr => return try self.synthBlock(data, ctx_opt),
+            .loop_expr => return try self.synthLoop(id, data, ctx_opt, .unknown),
+            .block_expr => return try self.synthBlock(data, ctx_opt, .unknown),
             .measure_expr => return try self.synthMeasure(id, data, ctx_opt),
-            .if_expr => return try self.synthIf(id, data, ctx_opt),
-            // Reaching a structural spawn through `synthExpr` means it is being
+            .if_expr => return try self.synthIf(id, data, ctx_opt, .unknown),
+            // Reaching a structural spawn through `synthExprE` means it is being
             // used as a VALUE (let binding, field receiver, call argument) — the
             // v0.6 refusal (E0304): structural spawn is statement-position only,
             // no body handle (§4.5). `checkStmt` handles the legal statement
@@ -6320,7 +8275,7 @@ pub const TypeChecker = struct {
                         // The entity operand (evaluated once at suspension in the
                         // interpreter) must type `Entity` — reuse E0200 (
                         // this operand was never synthesized before).
-                        const et = self.synthExpr(aw.entity_expr, ctx_opt);
+                        const et = try self.synthExprE(aw.entity_expr, ctx_opt);
                         if (!(et == .builtin and et.builtin == .entity)) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(aw.entity_expr), "the first argument of entity_event(e, T) must be an Entity", .{});
                         }
@@ -6340,9 +8295,8 @@ pub const TypeChecker = struct {
                         if (ak == .fn_call or ak == .method_call) return t;
                         // Non-call target: the handle-await form (§9.8) — the target
                         // must be a TaskHandle. The result is
-                        // unit (spawn bodies have no value channel);
-                        // `unknown` ≈ unit, the house convention.
-                        if (t == .builtin and t.builtin == .task_handle) return ResolvedType.unknown;
+                        // unit (spawn bodies have no value channel).
+                        if (t == .builtin and t.builtin == .task_handle) return ResolvedType.unit;
                         // A `TimerHandle` is NOT awaitable (§9.10):
                         // a timer is not a task — no join semantics. Precise
                         // message ahead of the generic rejection below.
@@ -6356,106 +8310,110 @@ pub const TypeChecker = struct {
                         return ResolvedType.unknown;
                     },
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             },
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
         }
     }
 
-    /// Type an array literal. `[a, b, c]` (and `[v; n]`)
-    /// without an annotation infers a **fixed** array of the unified builtin
-    /// element type; an empty `[]` stays `unknown` so the `let`'s annotation
-    /// supplies the type. Arrays carry builtin primitive elements only.
-    fn synthArrayLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    /// Type an array literal against `elem_expected`, the element its slot
+    /// expects, null when no slot expects one. `[a, b, c]` (and `[v; n]`)
+    /// infers a **fixed** array of the type its elements join to; an empty `[]`
+    /// stays `unknown`, its slot judging it, and with no slot is E0207.
+    fn synthArrayLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx, elem_expected: ?ResolvedType) TypeError!ResolvedType {
         const al = self.arena.array_lits.items[data];
+        const elem_slot = elem_expected orelse ResolvedType.unknown;
         if (al.is_fill) {
             const elem_id: NodeId = @bitCast(self.arena.extra.items[al.elements_start]);
-            const elem_t = try self.synthExprE(elem_id, ctx_opt);
+            const elem_t = try self.checkExpr(elem_id, elem_slot, ctx_opt);
             const count_t = try self.synthExprE(al.fill_count, ctx_opt);
             if (count_t == .builtin and !count_t.builtin.isInteger()) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(al.fill_count), "array fill count must be an integer", .{});
             }
-            if (elem_t != .builtin) {
-                if (elem_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array elements must be a builtin primitive in E1", .{});
+            if (elem_t == .unknown) return ResolvedType.unknown;
+            const len = self.constArrayLen(al.fill_count) orelse {
+                try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(al.fill_count), "array fill count must be a non-negative integer literal", .{});
                 return ResolvedType.unknown;
-            }
-            const len = self.constArrayLen(al.fill_count) orelse 0;
-            return .{ .array_fixed = .{ .elem = elem_t.builtin, .len = len } };
+            };
+            return .{ .array_fixed = .{ .elem = try self.payloadOf(elem_t), .len = len } };
         }
-        if (al.elements_len == 0) return ResolvedType.unknown; // empty: type from annotation
-        var elem_bt: ?BuiltinType = null;
+        if (al.elements_len == 0) {
+            if (elem_expected == null) try self.emit(.empty_array_type_annotation_required, .error_, self.arena.exprSpan(id), "an empty array literal '[]' needs an expected array type from its context", .{});
+            return ResolvedType.unknown;
+        }
+        var elements: std.ArrayListUnmanaged(Branch) = .empty;
+        defer elements.deinit(self.gpa);
         var i: u32 = 0;
         while (i < al.elements_len) : (i += 1) {
             const e: NodeId = @bitCast(self.arena.extra.items[al.elements_start + i]);
-            const et = try self.synthExprE(e, ctx_opt);
-            if (et != .builtin) {
-                if (et != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(e), "array elements must be a builtin primitive in E1", .{});
-                return ResolvedType.unknown;
-            }
-            if (elem_bt) |bt| {
-                if (!self.literalTypeFits(bt, e, et.builtin)) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(e), "array elements must all have the same type", .{});
-                }
-            } else elem_bt = et.builtin;
+            try elements.append(self.gpa, .{ .node = e, .t = try self.checkExpr(e, elem_slot, ctx_opt), .span = self.arena.exprSpan(e) });
         }
-        return .{ .array_fixed = .{ .elem = elem_bt.?, .len = al.elements_len } };
+        const elem_t = try self.joinBranches(elements.items);
+        for (elements.items) |e| {
+            if (!try self.branchFits(elem_t, e, false)) try self.emit(.type_mismatch, .error_, e.span, "array elements must all have the same type", .{});
+        }
+        if (elem_t == .unknown) return ResolvedType.unknown;
+        return .{ .array_fixed = .{ .elem = try self.payloadOf(elem_t), .len = al.elements_len } };
     }
 
-    /// Type a map literal. `[k: v, ...]` infers a map whose key / value are the unified
-    /// builtin types of the entries. Maps carry builtin key / value types — a
-    /// non-builtin (e.g. a `string` key, which is not a builtin) leaves the literal
-    /// `unknown` (the interpreter still builds it from the runtime values; precise
-    /// string-keyed map typing is a later refinement). Empty `[:]` stays `unknown` so
-    /// the annotation types it. stdlib §14 / §15 pin `K: Hash + Eq` on map keys and
-    /// `T: Hash + Eq` on set elements, and the builtin Hash set excludes float/f32/f64
-    /// (NaN != NaN, hash undefined — stdlib §4.3): a float map key or set element is an
-    /// invalid program, rejected at the resolver so NEITHER backend ever sees one
-    /// (E0601 BoundNotSatisfied). Generalized from the optional-op
-    /// `checkMapKeyHashable` for the Set vertical — same code, same
-    /// wording family, `what`/`bound` carry the per-collection nouns.
-    fn checkHashBound(self: *TypeChecker, t: BuiltinType, comptime what: []const u8, comptime bound: []const u8, span: SourceSpan) !void {
-        if (t.isFloat()) {
+    /// E0601 unless `t` can key a map or be a set element: `Hash + Eq`
+    /// (`etch-stdlib.md` §4.3, §14, §15) — a builtin other than a float or a
+    /// handle, an enum, or an optional of such a type. A type parameter is not
+    /// checked.
+    fn checkHashBound(self: *TypeChecker, t: ResolvedType, comptime what: []const u8, comptime bound: []const u8, span: SourceSpan) !void {
+        if (isKeyType(t)) return;
+        if (t == .builtin and t.builtin.isFloat()) {
             try self.emit(.bound_not_satisfied, .error_, span, what ++ " does not satisfy the '" ++ bound ++ "' bound (float/f32/f64 are not hashable); wrap the float in a struct with a custom Hash", .{});
+        } else {
+            try self.emit(.bound_not_satisfied, .error_, span, what ++ " does not satisfy the '" ++ bound ++ "' bound", .{});
         }
     }
 
-    fn synthMapLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    fn isKeyType(t: ResolvedType) bool {
+        return switch (t) {
+            .unknown, .generic, .enum_t => true,
+            .builtin => |b| b.isEq() and !b.isFloat(),
+            .optional => |p| isKeyType(p.*),
+            .array_fixed => |info| isKeyType(info.elem.*),
+            else => false,
+        };
+    }
+
+    /// Type a map literal. `[k: v, ...]` infers a map of the types its keys and
+    /// its values join to, checked against `key_expected` and `value_expected`;
+    /// an empty `[:]` stays `unknown` so the annotation types it.
+    fn synthMapLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx, key_expected: ResolvedType, value_expected: ResolvedType) TypeError!ResolvedType {
         _ = id;
         const ml = self.arena.map_lits.items[data];
         if (ml.entries_len == 0) return ResolvedType.unknown; // empty: type from annotation
-        var key_bt: ?BuiltinType = null;
-        var val_bt: ?BuiltinType = null;
-        var all_builtin = true;
+        var keys: std.ArrayListUnmanaged(Branch) = .empty;
+        defer keys.deinit(self.gpa);
+        var values: std.ArrayListUnmanaged(Branch) = .empty;
+        defer values.deinit(self.gpa);
         var i: u32 = 0;
         while (i < ml.entries_len) : (i += 1) {
             const entry = self.arena.map_entries.items[ml.entries_start + i];
-            const kt = try self.synthExprE(entry.key, ctx_opt);
-            const vt = try self.synthExprE(entry.value, ctx_opt);
-            if (kt != .builtin or vt != .builtin) {
-                all_builtin = false;
-                continue;
-            }
-            if (key_bt) |kb| {
-                if (!self.literalTypeFits(kb, entry.key, kt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.key), "map keys must all have the same type", .{});
-            } else {
-                key_bt = kt.builtin;
-                try self.checkHashBound(kt.builtin, "map key type", "K: Hash", self.arena.exprSpan(entry.key));
-            }
-            if (val_bt) |vb| {
-                if (!self.literalTypeFits(vb, entry.value, vt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.value), "map values must all have the same type", .{});
-            } else val_bt = vt.builtin;
+            try keys.append(self.gpa, .{ .node = entry.key, .t = try self.checkExpr(entry.key, key_expected, ctx_opt), .span = self.arena.exprSpan(entry.key) });
+            try values.append(self.gpa, .{ .node = entry.value, .t = try self.checkExpr(entry.value, value_expected, ctx_opt), .span = self.arena.exprSpan(entry.value) });
         }
-        if (!all_builtin or key_bt == null or val_bt == null) return ResolvedType.unknown;
-        return .{ .map_t = .{ .key = key_bt.?, .value = val_bt.? } };
+        const key_t = try self.joinBranches(keys.items);
+        const value_t = try self.joinBranches(values.items);
+        for (keys.items) |k| {
+            if (!try self.branchFits(key_t, k, false)) try self.emit(.type_mismatch, .error_, k.span, "map keys must all have the same type", .{});
+        }
+        for (values.items) |v| {
+            if (!try self.branchFits(value_t, v, false)) try self.emit(.type_mismatch, .error_, v.span, "map values must all have the same type", .{});
+        }
+        if (key_t == .unknown or value_t == .unknown) return ResolvedType.unknown;
+        try self.checkHashBound(key_t, "map key type", "K: Hash", keys.items[0].span);
+        return .{ .map_t = .{ .key = try self.payloadOf(key_t), .value = try self.payloadOf(value_t) } };
     }
 
-    /// Type a `loop { body }` expression. The body statements
-    /// are checked, and the loop's value is the type of a top-level `break`
-    /// value (permissive: `unknown` when none — a labeled break out of a nested
-    /// loop is typed only through execution, the interpreter being the
-    /// reference; the assignment site treats `unknown` as a wildcard).
-    fn synthLoop(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    /// The type the values breaking out of the loop `id` join to, each checked
+    /// against `expected`; `unknown` when none breaks. Without a rule context,
+    /// the type of the first top-level break, checked the same way.
+    fn synthLoop(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx, expected: ResolvedType) TypeError!ResolvedType {
         const lp = self.arena.loop_exprs.items[data];
         if (ctx_opt) |ctx| {
             // a `loop` opened here (incl. a labeled one) is
@@ -6468,29 +8426,72 @@ pub const TypeChecker = struct {
             defer if (lp.label != 0) {
                 _ = self.conc_labels.pop();
             };
+            try self.break_frames.append(self.gpa, .{ .label = lp.label, .yields = true, .expected = expected });
+            defer {
+                var frame = self.break_frames.pop().?;
+                frame.values.deinit(self.gpa);
+            }
+            try ctx.enter(self.gpa);
+            defer ctx.leave();
             var i: u32 = 0;
             while (i < lp.body_len) : (i += 1) {
                 const stmt: NodeId = @bitCast(self.arena.extra.items[lp.body_start + i]);
                 try self.checkStmt(ctx, stmt);
             }
+            const values = self.break_frames.getLast().values.items;
+            try self.recordLoopBreaks(id, values);
+            const join = try self.joinBranches(values);
+            for (values) |v| {
+                if (!try self.branchFits(join, v, true)) try self.emit(.type_mismatch, .error_, v.span, "break values of a loop must all have the same type", .{});
+            }
+            return join;
         }
         var i: u32 = 0;
         while (i < lp.body_len) : (i += 1) {
             const stmt: NodeId = @bitCast(self.arena.extra.items[lp.body_start + i]);
             if (self.arena.stmtKind(stmt) == .break_stmt) {
                 const b = self.arena.break_stmts.items[self.arena.stmtData(stmt)];
-                if (!b.value.isNone()) return self.synthExpr(b.value, ctx_opt);
+                if (b.value.isNone()) return ResolvedType.unit;
+                const t = try self.checkExpr(b.value, expected, ctx_opt);
+                try self.recordLoopBreaks(id, &.{.{ .node = b.value, .t = t, .span = self.arena.exprSpan(b.value) }});
+                return t;
             }
         }
         return ResolvedType.unknown;
     }
 
-    /// Type a block expression `{ stmts; value }`. The body
-    /// statements are checked in order, then the block's type is the trailing
-    /// value's type (or `unknown` ≈ unit when value-less). Locals declared in
-    /// the block use the flat per-rule locals map — lexical scoping is a later
-    /// refinement (the interpreter is the reference).
-    fn synthBlock(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    /// Keep the values breaking out of the loop `id` for `loopBreaks`.
+    fn recordLoopBreaks(self: *TypeChecker, id: NodeId, values: []const Branch) TypeError!void {
+        const start: u32 = @intCast(self.loop_break_nodes.items.len);
+        for (values) |v| try self.loop_break_nodes.append(self.gpa, v.node);
+        try self.loop_breaks.put(self.gpa, id.raw(), .{ .start = start, .len = @intCast(values.len) });
+    }
+
+    /// The values the loop `value` breaks with; none when no body checked it.
+    fn loopBreaks(self: *const TypeChecker, value: NodeId) []const NodeId {
+        const run = self.loop_breaks.get(value.raw()) orelse return &.{};
+        return self.loop_break_nodes.items[run.start..][0..run.len];
+    }
+
+    /// Type a block expression `{ stmts; value }` in a scope of its own. The
+    /// body statements are checked in order, then the block's type is the
+    /// trailing value's type, or unit when value-less.
+    fn synthBlock(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx, expected: ResolvedType) TypeError!ResolvedType {
+        const ctx = ctx_opt orelse return self.blockValue(data, null, expected);
+        try ctx.enter(self.gpa);
+        defer ctx.leave();
+        return self.blockValue(data, ctx, expected);
+    }
+
+    /// Type the body of a construct whose own bindings share the body's scope:
+    /// a block's statements join the scope open now.
+    fn synthBodyIn(self: *TypeChecker, body: NodeId, ctx_opt: ?*RuleCtx, expected: ResolvedType) TypeError!ResolvedType {
+        if (self.arena.exprKind(body) == .block_expr) return self.blockValue(self.arena.exprData(body), ctx_opt, expected);
+        return self.checkExpr(body, expected, ctx_opt);
+    }
+
+    /// The statements and value of the block `data`, in the scope open now.
+    fn blockValue(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx, expected: ResolvedType) TypeError!ResolvedType {
         const blk = self.arena.block_exprs.items[data];
         if (ctx_opt) |ctx| {
             var i: u32 = 0;
@@ -6499,8 +8500,20 @@ pub const TypeChecker = struct {
                 try self.checkStmt(ctx, stmt);
             }
         }
-        if (blk.value.isNone()) return ResolvedType.unknown;
-        return try self.synthExprE(blk.value, ctx_opt);
+        if (blk.value.isNone()) return if (self.runDiverges(blk.body_start, blk.body_len)) ResolvedType.unknown else ResolvedType.unit;
+        return try self.checkExpr(blk.value, expected, ctx_opt);
+    }
+
+    /// Whether a statement run ends in a statement that never completes. Such
+    /// a run has no type rather than unit, so a block that returns or throws
+    /// fits any destination.
+    fn runDiverges(self: *TypeChecker, start: u32, len: u32) bool {
+        if (len == 0) return false;
+        const last: NodeId = @bitCast(self.arena.extra.items[start + len - 1]);
+        return switch (self.arena.stmtKind(last)) {
+            .return_stmt, .throw_stmt, .break_stmt, .continue_stmt => true,
+            else => false,
+        };
     }
 
     /// Type a `measure { block }` expression (§17 erratum). Result type
@@ -6514,11 +8527,15 @@ pub const TypeChecker = struct {
         }
         const m = self.arena.measure_exprs.items[data];
         if (ctx_opt) |ctx| {
+            try ctx.enter(self.gpa);
+            defer ctx.leave();
             var i: u32 = 0;
             while (i < m.body_len) : (i += 1) {
                 const stmt: NodeId = @bitCast(self.arena.extra.items[m.body_start + i]);
                 try self.checkStmt(ctx, stmt);
             }
+            if (!m.value.isNone()) _ = try self.synthExprE(m.value, ctx);
+            return .{ .builtin = .duration };
         }
         if (!m.value.isNone()) _ = try self.synthExprE(m.value, ctx_opt);
         return .{ .builtin = .duration };
@@ -6527,36 +8544,43 @@ pub const TypeChecker = struct {
     /// Type an `if` expression. The condition must be
     /// `bool`; the then / else branches (block expressions, `else if` chaining
     /// through a nested `if`) must unify to one result type. An `if` with no
-    /// `else` has no value (`unknown` ≈ unit) — valid only in statement
-    /// position (the type-checker does not separately reject a value-position
-    /// else-less `if`; the codegen surfaces it as `UnsupportedConstruct`).
-    fn synthIf(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    /// `else` is unit.
+    fn synthIf(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx, expected: ResolvedType) TypeError!ResolvedType {
         const ife = self.arena.if_exprs.items[data];
         const cond_t = try self.synthExprE(ife.cond, ctx_opt);
         if (ife.let_binding != 0) {
             // `if let x = <optional>`: the cond must be an
             // optional; `x` binds its payload in the then-block scope.
             const payload = try self.optionalPayload(cond_t, self.arena.exprSpan(ife.cond), "if let");
-            if (ctx_opt) |ctx| try ctx.locals.put(self.gpa, ife.let_binding, .{ .type_ = payload, .is_mut = false });
-            const then_t = try self.synthExprE(ife.then_block, ctx_opt);
-            if (ctx_opt) |ctx| _ = ctx.locals.remove(ife.let_binding);
-            if (ife.else_branch.isNone()) return ResolvedType.unknown;
-            const else_t = try self.synthExprE(ife.else_branch, ctx_opt);
-            if (then_t == .builtin and else_t == .builtin and !ResolvedType.eql(then_t, else_t)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "if branches must yield the same type", .{});
-            }
-            return then_t;
+            // The payload shares the then-block's scope.
+            const then_t = if (ctx_opt) |ctx| blk: {
+                try ctx.enter(self.gpa);
+                defer ctx.leave();
+                try self.bindLocal(ctx, ife.let_binding, .{ .type_ = payload, .is_mut = false }, self.arena.exprSpan(id));
+                break :blk try self.synthBodyIn(ife.then_block, ctx, expected);
+            } else try self.checkExpr(ife.then_block, expected, null);
+            if (ife.else_branch.isNone()) return ResolvedType.unit;
+            return self.joinIf(id, ife, then_t, try self.checkExpr(ife.else_branch, expected, ctx_opt));
         }
-        if (cond_t == .builtin and cond_t.builtin != .bool_) {
+        if (!builtinWhere(cond_t, isBool)) {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ife.cond), "if condition must be a bool expression", .{});
         }
-        const then_t = try self.synthExprE(ife.then_block, ctx_opt);
-        if (ife.else_branch.isNone()) return ResolvedType.unknown;
-        const else_t = try self.synthExprE(ife.else_branch, ctx_opt);
-        if (then_t == .builtin and else_t == .builtin and !ResolvedType.eql(then_t, else_t)) {
-            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "if branches must yield the same type", .{});
+        const then_t = try self.checkExpr(ife.then_block, expected, ctx_opt);
+        if (ife.else_branch.isNone()) return ResolvedType.unit;
+        return self.joinIf(id, ife, then_t, try self.checkExpr(ife.else_branch, expected, ctx_opt));
+    }
+
+    fn joinIf(self: *TypeChecker, id: NodeId, ife: ast_mod.IfExpr, then_t: ResolvedType, else_t: ResolvedType) TypeError!ResolvedType {
+        const span = self.arena.exprSpan(id);
+        const branches = [_]Branch{ .{ .node = ife.then_block, .t = then_t, .span = span }, .{ .node = ife.else_branch, .t = else_t, .span = span } };
+        const join = try self.joinBranches(&branches);
+        for (branches) |b| {
+            if (!try self.branchFits(join, b, false)) {
+                try self.emit(.type_mismatch, .error_, span, "if branches must yield the same type", .{});
+                break;
+            }
         }
-        return then_t;
+        return join;
     }
 
     /// The payload type unwrapped by `if let` / `while let`.
@@ -6565,7 +8589,7 @@ pub const TypeChecker = struct {
     /// non-optional scrutinee is an error.
     fn optionalPayload(self: *TypeChecker, cond_t: ResolvedType, span: SourceSpan, comptime form: []const u8) TypeError!ResolvedType {
         return switch (cond_t) {
-            .optional => |bt| .{ .builtin = bt },
+            .optional => |p| p.*,
             .unknown => ResolvedType.unknown,
             else => blk: {
                 try self.emit(.type_mismatch, .error_, span, "'" ++ form ++ "' requires an optional (T?) value", .{});
@@ -6579,14 +8603,10 @@ pub const TypeChecker = struct {
         return try self.synthExprE(arg, ctx_opt);
     }
 
-    /// Whether a type has a meaningful runtime equality for `assert_eq`/`assert_neq`:
-    /// scalars/strings (`.builtin`, incl. `string_`/`Entity`), enums, or `unknown`
-    /// (already-diagnosed). Aggregates lack a structural `Value.eql`.
+    /// Whether a type has an equality for `assert_eq`/`assert_neq`: an `Eq`
+    /// type, or `unknown` (already-diagnosed).
     fn assertComparable(t: ResolvedType) bool {
-        return switch (t) {
-            .builtin, .enum_t, .unknown => true,
-            else => false,
-        };
+        return t == .unknown or isEqType(t);
     }
 
     /// Whether a type is a float (or `unknown`, already-diagnosed) — the operand
@@ -6603,7 +8623,7 @@ pub const TypeChecker = struct {
     /// (`assert_eq`/`assert_neq`/`assert_approx`/`assert_some`/`assert_none`,
     /// `etch-stdlib.md §19.4`) + `panic`/`todo`/`unreachable` — resolve anywhere;
     /// test-scoped builtins (`test_world`, `tick_until`) only inside a test body.
-    /// Statement-effect builtins yield `unknown` (≈ unit); args are synth-checked
+    /// The assertions yield unit and the diverging builtins `unknown`; args are synth-checked
     /// so nested expressions are typed and light shape checks surface misuse.
     fn synthBuiltinCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, callee_name: StringId, ctx_opt: ?*RuleCtx) TypeError!?ResolvedType {
         const name = self.arena.strings.slice(callee_name);
@@ -6622,7 +8642,7 @@ pub const TypeChecker = struct {
                 } else {
                     _ = try self.synthArg(call, 0, ctx_opt);
                     const t1 = try self.synthArg(call, 1, ctx_opt);
-                    if (t1 == .builtin and t1.builtin != .duration) {
+                    if (!builtinWhere(t1, isDuration)) {
                         try self.emit(.type_mismatch, .error_, span, "tick_until timeout must be a Duration", .{});
                     }
                 }
@@ -6637,19 +8657,14 @@ pub const TypeChecker = struct {
             } else {
                 const ta = try self.synthArg(call, 0, ctx_opt);
                 const tb = try self.synthArg(call, 1, ctx_opt);
-                // Only scalar / enum / string values compare at runtime:
-                // aggregates (struct/array/map/set/optional/closure)
-                // have no structural `Value.eql`, so an aggregate operand would
-                // false-fail `assert_eq` and false-PASS `assert_neq`. Reject them
-                // fail-loud rather than mis-compare.
                 if (!assertComparable(ta) or !assertComparable(tb)) {
-                    try self.emit(.type_mismatch, .error_, span, "{s} compares scalar / string / enum values (structs, arrays, maps, sets, optionals are not comparable in v0.6)", .{name});
-                } else if (ta == .builtin and tb == .builtin and ta.builtin != tb.builtin) {
+                    try self.emit(.type_mismatch, .error_, span, "{s} compares two values of a type with equality (structs, dynamic arrays, maps and sets have none)", .{name});
+                } else if (ta != .unknown and tb != .unknown and !ResolvedType.eql(ta, tb)) {
                     try self.emit(.type_mismatch, .error_, span, "{s} compares two values of the same type", .{name});
                 }
                 if (call.args_len == 3) _ = try self.synthArg(call, 2, ctx_opt);
             }
-            return ResolvedType.unknown;
+            return ResolvedType.unit;
         }
         if (std.mem.eql(u8, name, "assert_approx")) {
             if (call.args_len < 2 or call.args_len > 4) {
@@ -6671,7 +8686,7 @@ pub const TypeChecker = struct {
                 }
                 if (call.args_len == 4) _ = try self.synthArg(call, 3, ctx_opt);
             }
-            return ResolvedType.unknown;
+            return ResolvedType.unit;
         }
         if (std.mem.eql(u8, name, "assert_some") or std.mem.eql(u8, name, "assert_none")) {
             if (call.args_len < 1 or call.args_len > 2) {
@@ -6683,7 +8698,7 @@ pub const TypeChecker = struct {
                 }
                 if (call.args_len == 2) _ = try self.synthArg(call, 1, ctx_opt);
             }
-            return ResolvedType.unknown;
+            return ResolvedType.unit;
         }
         if (std.mem.eql(u8, name, "panic")) {
             if (call.args_len != 1) {
@@ -6725,11 +8740,7 @@ pub const TypeChecker = struct {
                 // outside a test body returns null → falls through to E0102
                 // (§32: "fall through to E0102").
                 if (try self.synthBuiltinCall(id, call, callee_name, ctx_opt)) |t| return t;
-                if (self.symbols.get(callee_name)) |sym| {
-                    if (sym.kind == .fn_) {
-                        return try self.synthFreeFnCall(id, call, sym.item_id, ctx_opt);
-                    }
-                }
+                if (self.fnNamed(callee_name)) |f| return try self.synthFreeFnCall(id, call, callee_name, f, ctx_opt);
             }
         }
 
@@ -6738,7 +8749,7 @@ pub const TypeChecker = struct {
             if (callee_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "call target is not callable in E1 (only closures can be called)", .{});
             return ResolvedType.unknown;
         }
-        const ce = self.arena.closure_exprs.items[self.arena.exprData(callee_t.closure)];
+        const ce = self.arena.closure_exprs.items[self.arena.exprData(callee_t.closure.literal)];
         // Named arguments on a closure call are a bound (item-16
         // scope: declared fns + methods; flagged for the gate) — the
         // binding machinery targets declared signatures.
@@ -6751,42 +8762,119 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
         const ctx = ctx_opt orelse return ResolvedType.unknown;
-        // Snapshot the caller-scope binding names BEFORE the params bind:
-        // those are the body's potential captures (`etch-resolver-types.md`
-        // §8.1 — any body ident resolving to the parent scope). Params are
-        // excluded below; a body-local `let` removes its name at the
-        // `let_stmt` check. The set gates E0221 in the assign-stmt path.
-        var captures: std.AutoHashMapUnmanaged(StringId, void) = .empty;
-        defer captures.deinit(self.gpa);
-        var locals_it = ctx.locals.iterator();
-        while (locals_it.next()) |e| try captures.put(self.gpa, e.key_ptr.*, {});
+        // The arguments are read where the closure is called.
+        var arg_types: std.ArrayListUnmanaged(ResolvedType) = .empty;
+        defer arg_types.deinit(self.gpa);
         var i: u32 = 0;
         while (i < ce.params_len) : (i += 1) {
             const p = self.arena.closure_params.items[ce.params_start + i];
-            const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
-            const arg_t = try self.synthExprE(arg, ctx_opt);
-            var ptype = arg_t;
-            if (!p.type_node.isNone()) {
-                ptype = self.namedTypeToResolved(p.type_node);
-                if (ptype == .builtin and arg_t == .builtin and !self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "closure argument type does not match the parameter type", .{});
-                }
-            }
-            _ = captures.remove(p.name);
-            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+            const expected: ResolvedType = if (p.type_node.isNone()) .unknown else declaredSlot(self.namedTypeToResolved(p.type_node));
+            try arg_types.append(self.gpa, try self.checkExpr(@bitCast(self.arena.extra.items[call.args_start + i]), expected, ctx));
         }
-        const saved_captures = self.closure_captures;
-        self.closure_captures = &captures;
-        defer self.closure_captures = saved_captures;
-        const ret = try self.synthExprE(ce.body, ctx_opt);
-        // Remove the parameter bindings (a closure's params do not collide
-        // with outer locals in practice; a save/restore is a later refinement).
+        if (callee_t.closure.env == ClosureType.no_env) return ResolvedType.unknown;
         i = 0;
         while (i < ce.params_len) : (i += 1) {
             const p = self.arena.closure_params.items[ce.params_start + i];
-            _ = ctx.locals.remove(p.name);
+            if (p.type_node.isNone()) continue;
+            const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
+            const ptype = self.namedTypeToResolved(p.type_node);
+            if (!try self.valueFits(ptype, arg, arg_types.items[i])) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "closure argument type does not match the parameter type", .{});
+            }
+            arg_types.items[i] = ptype;
         }
-        return ret;
+        // The body was checked at its literal; what typing it again here
+        // repeats is dropped.
+        const base = self.diagnostics.items.len;
+        const t = try self.typeClosureBody(ctx, ce, callee_t.closure.env, arg_types.items);
+        self.dropRepeatedDiagnostics(base);
+        return t;
+    }
+
+    /// Type a closure's body over the scope it is written in, its params bound
+    /// to `param_types`, and return its value's type.
+    fn typeClosureBody(self: *TypeChecker, ctx: *RuleCtx, ce: ast_mod.ClosureExpr, env_index: u32, param_types: []const ResolvedType) TypeError!ResolvedType {
+        const env = &self.closure_envs.items[env_index];
+        // The body sees the scope the closure is written in, its params bound
+        // over it. Copied: typing the body can record another closure.
+        var own = try env.own.clone(self.gpa);
+        defer own.deinit(self.gpa);
+        const body_locals = try env.locals.clone(self.gpa);
+        var captures: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer captures.deinit(self.gpa);
+        var names = body_locals.keyIterator();
+        while (names.next()) |k| try captures.put(self.gpa, k.*, {});
+        const caller_locals = ctx.locals;
+        const caller_log = ctx.scope_log;
+        const caller_starts = ctx.scope_starts;
+        ctx.locals = body_locals;
+        ctx.scope_log = .empty;
+        ctx.scope_starts = .empty;
+        defer {
+            ctx.locals.deinit(self.gpa);
+            ctx.scope_log.deinit(self.gpa);
+            ctx.scope_starts.deinit(self.gpa);
+            ctx.locals = caller_locals;
+            ctx.scope_log = caller_log;
+            ctx.scope_starts = caller_starts;
+        }
+        for (param_types, 0..) |ptype, i| {
+            const p = self.arena.closure_params.items[ce.params_start + i];
+            // A second param of one name is refused once, at the literal.
+            _ = try ctx.bind(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+        }
+        const saved_captures = self.closure_captures;
+        const saved_own = self.closure_own;
+        const saved_log_base = self.escape_log_base;
+        self.closure_captures = &captures;
+        self.closure_own = &own;
+        self.escape_log_base = 0;
+        defer {
+            self.closure_captures = saved_captures;
+            self.closure_own = saved_own;
+            self.escape_log_base = saved_log_base;
+        }
+        // A `return` in a closure leaves the closure, which declares no type,
+        // and no jump leaves it for the caller's loops or task branch.
+        const saved_ret = self.current_fn_return;
+        const saved_branch = self.conc_branch;
+        const saved_depth = self.conc_loop_depth;
+        const saved_labels = self.conc_labels_base;
+        const saved_break_base = self.break_base;
+        self.current_fn_return = null;
+        self.conc_branch = null;
+        self.conc_loop_depth = 0;
+        self.conc_labels_base = self.conc_labels.items.len;
+        self.break_base = self.break_frames.items.len;
+        defer {
+            self.current_fn_return = saved_ret;
+            self.conc_branch = saved_branch;
+            self.conc_loop_depth = saved_depth;
+            self.conc_labels_base = saved_labels;
+            self.break_base = saved_break_base;
+        }
+        self.closure_calls += 1;
+        defer self.closure_calls -= 1;
+        return try self.synthBodyIn(ce.body, ctx, .unknown);
+    }
+
+    /// Drop each diagnostic from `base` on that one before `base` already
+    /// says, at the same place.
+    fn dropRepeatedDiagnostics(self: *TypeChecker, base: usize) void {
+        var w = base;
+        for (self.diagnostics.items[base..]) |d| {
+            const seen = for (self.diagnostics.items[0..base]) |e| {
+                if (e.code == d.code and std.meta.eql(e.primary_span, d.primary_span) and std.mem.eql(u8, e.primary_message, d.primary_message)) break true;
+            } else false;
+            if (seen) {
+                var dropped = d;
+                dropped.deinit(self.gpa);
+            } else {
+                self.diagnostics.items[w] = d;
+                w += 1;
+            }
+        }
+        self.diagnostics.items.len = w;
     }
 
     /// Validate a call's argument BINDING against a parameter-name list
@@ -6840,11 +8928,14 @@ pub const TypeChecker = struct {
         return ok;
     }
 
-    /// Collect a callee's parameter names into a caller-owned buffer.
-    fn fnParamNames(self: *TypeChecker, params_start: u32, params_len: u32, buf: *std.ArrayListUnmanaged(StringId)) !void {
+    /// Collect the parameter names of `f` into a caller-owned buffer, as this
+    /// file's names: a name this file never writes is `0`, which no argument
+    /// label is.
+    fn fnParamNames(self: *TypeChecker, f: FnRef, buf: *std.ArrayListUnmanaged(StringId)) !void {
         var i: u32 = 0;
-        while (i < params_len) : (i += 1) {
-            try buf.append(self.gpa, self.arena.fn_params.items[params_start + i].name);
+        while (i < f.decl.params_len) : (i += 1) {
+            const name = f.arena.fn_params.items[f.decl.params_start + i].name;
+            try buf.append(self.gpa, if (f.arena == self.arena) name else self.arena.strings.find(f.arena.strings.slice(name)) orelse 0);
         }
     }
 
@@ -6852,41 +8943,42 @@ pub const TypeChecker = struct {
     /// the argument binding (named arguments per §3.3 — E0203) then
     /// each bound argument against its declared parameter type; the result
     /// is the declared return type (`unknown` for a void fn).
-    fn synthFreeFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, item_id: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
-        const decl = self.arena.fn_decls.items[self.arena.itemData(item_id)];
+    fn synthFreeFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, callee_name: StringId, f: FnRef, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const decl = f.decl;
+        const name = self.arena.strings.slice(callee_name);
         // Function coloring (§9.3): calling an `async fn` from a
         // non-async context is E0901. (A legal async→async call is via `await`,
         // which reaches here with `current_is_async` true.)
         if (decl.is_async and !self.current_is_async) {
-            try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async fn` '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{self.arena.strings.slice(decl.name)});
+            try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async fn` '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{name});
         } else if (decl.is_async and !self.consumesAsyncEffect(id)) {
             // E0905: a BARE async call in an async context. The
             // `await` is the SOLE call-grain consumer of the `{async}` effect
             // (§9.2 revision 2) — the four constructs relocate the suspension,
             // they do not consume it.
-            try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async fn` '{s}' — consume the async effect with `await` (inside spawn/branch/race/sync bodies too: the constructs relocate the await into a child task, they do not replace it)", .{self.arena.strings.slice(decl.name)});
+            try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async fn` '{s}' — consume the async effect with `await` (inside spawn/branch/race/sync bodies too: the constructs relocate the await into a child task, they do not replace it)", .{name});
         }
         // E0902: a `throws` callee needs somewhere for its throw
         // to go — an enclosing `try`/`catch`, or a `throws` caller.
         if (decl.throws and !self.current_can_throw) {
-            try self.emitUnhandledThrows(id, self.arena.strings.slice(decl.name));
+            try self.emitUnhandledThrows(id, name);
         }
-        const ret: ResolvedType = if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
+        const ret: ResolvedType = if (decl.return_type.isNone()) ResolvedType.unknown else self.typeIn(f.arena, decl.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
         defer pnames.deinit(self.gpa);
-        try self.fnParamNames(decl.params_start, decl.params_len, &pnames);
-        if (!try self.checkCallBinding(id, call.args_start, call.args_len, call.names_start, pnames.items, "function", decl.name)) {
+        try self.fnParamNames(f, &pnames);
+        if (!try self.checkCallBinding(id, call.args_start, call.args_len, call.names_start, pnames.items, "function", callee_name)) {
             return ret;
         }
-        if (decl.generics_len > 0) return try self.synthGenericFnCall(id, call, decl, ctx_opt);
+        if (decl.generics_len > 0) return try self.synthGenericFnCall(id, call, name, f, pnames.items, ctx_opt);
         var i: u32 = 0;
         while (i < decl.params_len) : (i += 1) {
-            const p = self.arena.fn_params.items[decl.params_start + i];
-            const ptype = self.namedTypeToResolved(p.type_node);
-            const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse continue;
-            const arg_t = try self.synthExprE(arg, ctx_opt);
-            if (ptype == .builtin and arg_t == .builtin and !self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{self.arena.strings.slice(decl.name)});
+            const p = f.arena.fn_params.items[decl.params_start + i];
+            const ptype = self.typeIn(f.arena, p.type_node);
+            const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, pnames.items[i]) orelse continue;
+            const arg_t = try self.checkExpr(arg, declaredSlot(ptype), ctx_opt);
+            if (!try self.valueFits(ptype, arg, arg_t)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{name});
             }
         }
         return ret;
@@ -6900,41 +8992,47 @@ pub const TypeChecker = struct {
     /// monomorphisation instance table (§6.2) drives a bytecode codegen
     /// lowering — there is no consumer in the direct AST→Zig path, so the
     /// resolver computes the substitution per call without persisting it.
-    fn synthGenericFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, decl: ast_mod.FnDecl, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    fn synthGenericFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, name: []const u8, f: FnRef, pnames: []const StringId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const decl = f.decl;
+        // Keyed by the parameter names of `f.arena`.
         var subst: std.AutoHashMapUnmanaged(StringId, ResolvedType) = .empty;
         defer subst.deinit(self.gpa);
+        // A formal naming a type parameter checks nothing: `unifyGeneric`
+        // judges it.
+        const unbound: std.AutoHashMapUnmanaged(StringId, ResolvedType) = .empty;
 
-        var pnames: std.ArrayListUnmanaged(StringId) = .empty;
-        defer pnames.deinit(self.gpa);
-        try self.fnParamNames(decl.params_start, decl.params_len, &pnames);
         var i: u32 = 0;
         while (i < decl.params_len) : (i += 1) {
-            const p = self.arena.fn_params.items[decl.params_start + i];
-            const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse continue;
-            const arg_t = try self.synthExprE(arg, ctx_opt);
-            try self.unifyGeneric(decl, p.type_node, arg_t, &subst, self.arena.exprSpan(arg));
+            const p = f.arena.fn_params.items[decl.params_start + i];
+            const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, pnames[i]) orelse continue;
+            const formal = try self.substituteGeneric(f, p.type_node, &unbound);
+            const arg_t = try self.checkExpr(arg, formal, ctx_opt);
+            try self.unifyGeneric(f, p.type_node, arg_t, &subst, self.arena.exprSpan(arg));
+            if (!try self.valueFits(formal, arg, arg_t)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{name});
+            }
         }
 
         var gi: u32 = 0;
         while (gi < decl.generics_len) : (gi += 1) {
-            const gp = self.arena.generic_params.items[decl.generics_start + gi];
+            const gp = f.arena.generic_params.items[decl.generics_start + gi];
             const inferred = subst.get(gp.name);
             if (inferred == null) {
-                try self.emit(.generic_type_annotation_required, .error_, self.arena.exprSpan(id), "cannot infer type parameter '{s}' of '{s}' from the arguments", .{ self.arena.strings.slice(gp.name), self.arena.strings.slice(decl.name) });
+                try self.emit(.generic_type_annotation_required, .error_, self.arena.exprSpan(id), "cannot infer type parameter '{s}' of '{s}' from the arguments", .{ f.arena.strings.slice(gp.name), name });
                 continue;
             }
-            try self.checkGenericBounds(gp, inferred.?, self.arena.exprSpan(id));
+            try self.checkGenericBounds(f.arena, gp, inferred.?, self.arena.exprSpan(id));
         }
 
         if (decl.return_type.isNone()) return ResolvedType.unknown;
-        return self.substituteGeneric(decl, decl.return_type, &subst);
+        return try self.substituteGeneric(f, decl.return_type, &subst);
     }
 
-    /// `true` if `name` is a generic parameter of `decl`.
-    fn isGenericParamOf(self: *TypeChecker, decl: ast_mod.FnDecl, name: StringId) bool {
+    /// `true` if `name`, a name of `f.arena`, is a generic parameter of `f`.
+    fn isGenericParamOf(f: FnRef, name: StringId) bool {
         var i: u32 = 0;
-        while (i < decl.generics_len) : (i += 1) {
-            if (self.arena.generic_params.items[decl.generics_start + i].name == name) return true;
+        while (i < f.decl.generics_len) : (i += 1) {
+            if (f.arena.generic_params.items[f.decl.generics_start + i].name == name) return true;
         }
         return false;
     }
@@ -6943,53 +9041,80 @@ pub const TypeChecker = struct {
     /// type, binding generic variables into `subst` (§6.4).
     /// Handles a bare param `T` and an element-of `T[]` / `T[N]`; deeper nesting
     /// is not inferred (leaves the param unbound → E0603 if unresolved).
-    fn unifyGeneric(self: *TypeChecker, decl: ast_mod.FnDecl, formal: NodeId, actual: ResolvedType, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType), span: SourceSpan) TypeError!void {
-        switch (self.arena.typeNodeKind(formal)) {
+    fn unifyGeneric(self: *TypeChecker, f: FnRef, formal: NodeId, actual: ResolvedType, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType), span: SourceSpan) TypeError!void {
+        switch (f.arena.typeNodeKind(formal)) {
             .named => {
-                const named = self.arena.named_types.items[self.arena.typeNodeData(formal)];
-                if (!self.isGenericParamOf(decl, named.name)) return; // concrete formal — no binding
+                const name = f.arena.namedTypeName(formal).?;
+                if (!isGenericParamOf(f, name)) return; // concrete formal — no binding
                 if (actual == .unknown) return; // don't pin a param to a post-error unknown
-                if (subst.get(named.name)) |prev| {
+                if (subst.get(name)) |prev| {
                     if (!ResolvedType.eql(prev, actual)) {
-                        try self.emit(.inconsistent_generic_inference, .error_, span, "type parameter '{s}' is inferred as two different types", .{self.arena.strings.slice(named.name)});
+                        try self.emit(.inconsistent_generic_inference, .error_, span, "type parameter '{s}' is inferred as two different types", .{f.arena.strings.slice(name)});
                     }
                 } else {
-                    try subst.put(self.gpa, named.name, actual);
+                    try subst.put(self.gpa, name, actual);
                 }
             },
             .array, .slice => {
-                const at = self.arena.array_types.items[self.arena.typeNodeData(formal)];
+                const at = f.arena.array_types.items[f.arena.typeNodeData(formal)];
                 const elem: ?ResolvedType = switch (actual) {
-                    .array_fixed => |info| .{ .builtin = info.elem },
-                    .array_dyn => |e| .{ .builtin = e },
+                    .array_fixed => |info| info.elem.*,
+                    .array_dyn => |e| e.*,
                     else => null,
                 };
-                if (elem) |ea| try self.unifyGeneric(decl, at.elem, ea, subst, span);
+                if (elem) |ea| try self.unifyGeneric(f, at.elem, ea, subst, span);
             },
-            else => {}, // generic_type / map / set — not inferred
+            .set_type => if (actual == .set_t) try self.unifyGeneric(f, f.arena.set_types.items[f.arena.typeNodeData(formal)].elem, actual.set_t.*, subst, span),
+            .map_type => if (actual == .map_t) {
+                const mt = f.arena.map_types.items[f.arena.typeNodeData(formal)];
+                try self.unifyGeneric(f, mt.key, actual.map_t.key.*, subst, span);
+                try self.unifyGeneric(f, mt.value, actual.map_t.value.*, subst, span);
+            },
+            // A `T` argument fits a `T?` formal by the implicit wrap
+            // (`etch-reference-part1.md` §3.6).
+            .optional => {
+                const payload: NodeId = @bitCast(f.arena.typeNodeData(formal));
+                try self.unifyGeneric(f, payload, if (actual == .optional) actual.optional.* else actual, subst, span);
+            },
+            else => {}, // generic_type — not inferred
         }
     }
 
     /// Apply the inferred substitution to a declared return type-node. A bare
     /// param `T` → its inferred type (or `.generic` if still
-    /// unbound); `T[]` → a dynamic array of the substituted element; otherwise
-    /// the ordinary resolution.
-    fn substituteGeneric(self: *TypeChecker, decl: ast_mod.FnDecl, node: NodeId, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType)) ResolvedType {
-        switch (self.arena.typeNodeKind(node)) {
+    /// unbound); a collection or an optional → the same of its substituted
+    /// payloads; otherwise the ordinary resolution.
+    fn substituteGeneric(self: *TypeChecker, f: FnRef, node: NodeId, subst: *const std.AutoHashMapUnmanaged(StringId, ResolvedType)) TypeError!ResolvedType {
+        switch (f.arena.typeNodeKind(node)) {
             .named => {
-                const named = self.arena.named_types.items[self.arena.typeNodeData(node)];
-                if (self.isGenericParamOf(decl, named.name)) {
-                    return subst.get(named.name) orelse ResolvedType{ .generic = named.name };
+                const name = f.arena.namedTypeName(node).?;
+                if (isGenericParamOf(f, name)) {
+                    return subst.get(name) orelse ResolvedType{ .generic = name };
                 }
-                return self.namedTypeToResolved(node);
+                return self.typeIn(f.arena, node);
             },
-            .slice => {
-                const at = self.arena.array_types.items[self.arena.typeNodeData(node)];
-                const e = self.substituteGeneric(decl, at.elem, subst);
-                if (e == .builtin) return .{ .array_dyn = e.builtin };
-                return ResolvedType.unknown;
+            .array, .slice => {
+                const at = f.arena.array_types.items[f.arena.typeNodeData(node)];
+                const e = try self.substituteGeneric(f, at.elem, subst);
+                if (e == .unknown) return ResolvedType.unknown;
+                if (f.arena.typeNodeKind(node) == .slice) return .{ .array_dyn = try self.payloadOf(e) };
+                const len = constArrayLenIn(f.arena, at.size) orelse return ResolvedType.unknown;
+                return .{ .array_fixed = .{ .elem = try self.payloadOf(e), .len = len } };
             },
-            else => return self.namedTypeToResolved(node),
+            .set_type => {
+                const e = try self.substituteGeneric(f, f.arena.set_types.items[f.arena.typeNodeData(node)].elem, subst);
+                if (e == .unknown) return ResolvedType.unknown;
+                return .{ .set_t = try self.payloadOf(e) };
+            },
+            .map_type => {
+                const mt = f.arena.map_types.items[f.arena.typeNodeData(node)];
+                const k = try self.substituteGeneric(f, mt.key, subst);
+                const v = try self.substituteGeneric(f, mt.value, subst);
+                if (k == .unknown or v == .unknown) return ResolvedType.unknown;
+                return .{ .map_t = .{ .key = try self.payloadOf(k), .value = try self.payloadOf(v) } };
+            },
+            .optional => return self.optionalOf(try self.substituteGeneric(f, @bitCast(f.arena.typeNodeData(node)), subst)),
+            else => return self.typeIn(f.arena, node),
         }
     }
 
@@ -6997,77 +9122,340 @@ pub const TypeChecker = struct {
     /// 4, §6.5). `component` / `resource` require the RTTI category;
     /// `trait` requires an `impl Trait for <actual>` in the compilation set;
     /// E0601 otherwise.
-    fn checkGenericBounds(self: *TypeChecker, gp: ast_mod.GenericParam, actual: ResolvedType, span: SourceSpan) TypeError!void {
+    fn checkGenericBounds(self: *TypeChecker, a: *const AstArena, gp: ast_mod.GenericParam, actual: ResolvedType, span: SourceSpan) TypeError!void {
         var bi: u32 = 0;
         while (bi < gp.bounds_len) : (bi += 1) {
-            const b = self.arena.generic_bounds.items[gp.bounds_start + bi];
+            const b = a.generic_bounds.items[gp.bounds_start + bi];
             const ok = switch (b.kind) {
                 .component => actual == .component,
-                .resource => actual == .resource,
+                .resource => actual == .resource or actual == .builtin_resource,
                 .event => false, // `event` bound needs the `event` keyword
                 .trait_ => blk: {
-                    const tn = typeNameOfResolved(actual) orelse break :blk false;
-                    break :blk self.typeImplementsTrait(tn, b.trait_name);
+                    if (actual == .builtin) break :blk false;
+                    const target = implTargetOf(actual) orelse break :blk false;
+                    const trait = self.declNamedIn(a, b.trait_name) orelse break :blk false;
+                    break :blk self.typeImplementsTrait(target, trait);
                 },
             };
             if (!ok) {
-                try self.emit(.bound_not_satisfied, .error_, span, "type argument for '{s}' does not satisfy its bound", .{self.arena.strings.slice(gp.name)});
+                try self.emit(.bound_not_satisfied, .error_, span, "type argument for '{s}' does not satisfy its bound", .{a.strings.slice(gp.name)});
             }
         }
     }
 
-    /// `true` if an `impl <trait_name> for <type_name>` exists.
-    fn typeImplementsTrait(self: *TypeChecker, type_name: StringId, trait_name: StringId) bool {
+    /// `true` if an `impl` of `trait` for `target` is visible here.
+    fn typeImplementsTrait(self: *TypeChecker, target: ImplTarget, trait: DeclRef) bool {
         for (self.trait_impls.items) |entry| {
-            if (entry.type_name == type_name and entry.trait_name == trait_name) return true;
+            const t = self.implTargetIn(entry.arena, entry.type_name) orelse continue;
+            const tr = self.declNamedIn(entry.arena, entry.trait_name) orelse continue;
+            if (t.eql(target) and tr.eql(trait)) return true;
         }
         return false;
+    }
+
+    /// Resolve an enum-variant shorthand `.variant` against an expected enum
+    /// type — check mode, resolver-types §3.5/§4. In
+    /// expression position the parser stores the bare `tag_path` with the
+    /// variant ident as the expr data directly (multi-segment paths are a
+    /// parse error there). E0105 when the variant does not exist.
+    fn checkEnumShorthand(self: *TypeChecker, value: NodeId, enum_ref: DeclRef) TypeError!ResolvedType {
+        const variant: StringId = self.arena.exprData(value);
+        _ = self.unresolved_shorthands.swapRemove(value.raw());
+        if (self.enumVariantIndex(enum_ref, variant) != null) {
+            const earlier = try self.shorthand_enums.fetchPut(self.gpa, value.raw(), enum_ref);
+            if (self.closure_calls != 0 and earlier != null and !earlier.?.value.eql(enum_ref)) {
+                try self.emit(.ambiguous_enum_variant, .error_, self.arena.exprSpan(value), "this closure reads '.{s}' as a variant of another enum at each call; write it qualified", .{self.arena.strings.slice(variant)});
+            }
+            try self.recordShorthand(value, enum_ref);
+            return .{ .enum_t = enum_ref };
+        }
+        _ = self.shorthand_enums.remove(value.raw());
+        _ = self.arena.enum_shorthands.remove(value.raw());
+        try self.refuseShorthand(value, enum_ref);
+        return ResolvedType.unknown;
+    }
+
+    /// E0105 on the shorthand `value`, naming no variant of `enum_ref`, or where
+    /// no enum is expected; once per shorthand.
+    fn refuseShorthand(self: *TypeChecker, value: NodeId, enum_ref: ?DeclRef) TypeError!void {
+        _ = self.unresolved_shorthands.swapRemove(value.raw());
+        if ((try self.shorthand_misses.fetchPut(self.gpa, value.raw(), {})) != null) return;
+        const variant = self.arena.strings.slice(self.arena.exprData(value));
+        if (enum_ref) |e| {
+            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "enum '{s}' has no variant '{s}'", .{ declBytes(e), variant });
+        } else {
+            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "'.{s}' names an enum variant where no enum is expected", .{variant});
+        }
+    }
+
+    /// Hand the backends a shorthand's enum. They run one file, so an enum of
+    /// another file is the checker's alone.
+    fn recordShorthand(self: *TypeChecker, value: NodeId, enum_ref: DeclRef) TypeError!void {
+        if (enum_ref.arena == self.arena) {
+            try self.arena.enum_shorthands.put(self.gpa, value.raw(), declName(enum_ref));
+        } else {
+            _ = self.arena.enum_shorthands.remove(value.raw());
+        }
+    }
+
+    /// Hand the backends the struct a `.{ … }` names, as `recordShorthand` does
+    /// an enum.
+    fn recordAnonStruct(self: *TypeChecker, value: NodeId, struct_ref: DeclRef) TypeError!void {
+        if (struct_ref.arena == self.arena) {
+            try self.arena.anon_structs.put(self.gpa, value.raw(), declName(struct_ref));
+        } else {
+            _ = self.arena.anon_structs.remove(value.raw());
+        }
+    }
+
+    /// The enums this file names, each once whatever names it.
+    fn namedEnums(self: *TypeChecker, out: *std.ArrayListUnmanaged(DeclRef)) TypeError!void {
+        var local = self.symbols.iterator();
+        while (local.next()) |e| {
+            if (e.value_ptr.kind != .enum_ or self.imported_symbols.contains(e.key_ptr.*)) continue;
+            try appendDistinct(self.gpa, out, .{ .arena = self.arena, .item = e.value_ptr.item_id });
+        }
+        var imported = self.imported_symbols.iterator();
+        while (imported.next()) |e| {
+            if (e.value_ptr.kind != .enum_) continue;
+            try appendDistinct(self.gpa, out, exportRef(self.project.?, e.value_ptr.*));
+        }
+    }
+
+    fn appendDistinct(gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(DeclRef), ref: DeclRef) !void {
+        for (out.items) |r| {
+            if (r.eql(ref)) return;
+        }
+        try out.append(gpa, ref);
+    }
+
+    /// The slots of every payload of a composite type node of this file and of
+    /// every project file, the arenas `typeIn` can read a type node from: one
+    /// per type the payload can resolve to.
+    fn reservePayloadSlots(self: *TypeChecker) !void {
+        if (self.payload_slots_reserved) return;
+        var arenas: std.ArrayListUnmanaged(*const AstArena) = .empty;
+        defer arenas.deinit(self.gpa);
+        try arenas.append(self.gpa, self.arena);
+        if (self.project) |proj| {
+            for (proj.arenas) |*a| {
+                if (a != self.arena) try arenas.append(self.gpa, a);
+            }
+        }
+        var keys: usize = 0;
+        var count: usize = 0;
+        for (arenas.items) |a| {
+            for (0..a.type_nodes.len) |i| {
+                const children = payloadChildren(a, .{ .category = .type_node, .index = @intCast(i) });
+                for (children.nodes[0..children.len]) |c| {
+                    keys += 1;
+                    count += self.payloadCount(a, c);
+                }
+            }
+        }
+        const store = try self.gpa.alloc(ResolvedType, count);
+        errdefer self.gpa.free(store);
+        @memset(store, .unknown);
+        try self.payload_slots.ensureTotalCapacity(self.gpa, @intCast(keys));
+        var next: usize = 0;
+        for (arenas.items) |a| {
+            for (0..a.type_nodes.len) |i| {
+                const node: NodeId = .{ .category = .type_node, .index = @intCast(i) };
+                const children = payloadChildren(a, node);
+                for (children.nodes[0..children.len], 0..) |c, child| {
+                    const n = self.payloadCount(a, c);
+                    self.payload_slots.putAssumeCapacity(.{ .arena = @intFromPtr(a), .node = node.index, .child = @intCast(child) }, store[next .. next + n]);
+                    next += n;
+                }
+            }
+        }
+        self.payload_slot_store = store;
+        self.payload_slots_reserved = true;
+    }
+
+    /// How many types the payload node `node` of `a` can resolve to. A generic
+    /// scope changes it only through the names it holds that are type
+    /// parameters of this file: at most one type per subset of those, and at
+    /// most one per scope this file can open — each holds a parameter — plus
+    /// the empty scope. `foreignType` reads no scope.
+    fn payloadCount(self: *TypeChecker, a: *const AstArena, node: NodeId) usize {
+        if (a != self.arena) return 1;
+        const scopes = self.arena.generic_params.items.len + 1;
+        var names: [8]StringId = undefined;
+        var held: usize = 0;
+        if (!self.scopeNamesIn(node, &names, &held)) return scopes;
+        return @min(@as(usize, 1) << @intCast(held), scopes);
+    }
+
+    /// Adds to `names[0..held.*]` the type-parameter names the type node `node`
+    /// reads from a generic scope; false when they do not fit.
+    fn scopeNamesIn(self: *TypeChecker, node: NodeId, names: []StringId, held: *usize) bool {
+        const a = self.arena;
+        const name: StringId = switch (a.typeNodeKind(node)) {
+            .named => a.namedTypeName(node).?,
+            .generic => a.generic_type_nodes.items[a.typeNodeData(node)].name,
+            else => {
+                const children = payloadChildren(a, node);
+                for (children.nodes[0..children.len]) |c| {
+                    if (!self.scopeNamesIn(c, names, held)) return false;
+                }
+                return true;
+            },
+        };
+        for (a.generic_params.items) |p| {
+            if (p.name != name) continue;
+            for (names[0..held.*]) |n| {
+                if (n == name) return true;
+            }
+            if (held.* == names.len) return false;
+            names[held.*] = name;
+            held.* += 1;
+            return true;
+        }
+        return true;
+    }
+
+    /// `payload`, the type the payload `child` of the type node `node` of `a`
+    /// resolves to, in the slot holding it, else the first free one, so no
+    /// allocation. An unknown payload leaves its type unknown instead.
+    fn internedPayload(self: *TypeChecker, a: *const AstArena, node: NodeId, child: u1, payload: ResolvedType) *const ResolvedType {
+        std.debug.assert(payload != .unknown);
+        if (payload == .builtin) return builtinPayload(payload.builtin);
+        const slots = self.payload_slots.get(.{ .arena = @intFromPtr(a), .node = node.index, .child = child }) orelse unreachable;
+        for (slots) |*slot| {
+            if (slot.* == .unknown) slot.* = payload;
+            if (slot.eql(payload)) return slot;
+        }
+        unreachable;
+    }
+
+    /// The optional the type node `node` of `a` names, of `payload`.
+    fn internedOptional(self: *TypeChecker, a: *const AstArena, node: NodeId, payload: ResolvedType) ResolvedType {
+        if (payload == .unknown) return .unknown;
+        return .{ .optional = self.internedPayload(a, node, 0, payload) };
+    }
+
+    /// `payload` as a payload, built at check time.
+    fn payloadOf(self: *TypeChecker, payload: ResolvedType) TypeError!*const ResolvedType {
+        std.debug.assert(payload != .unknown);
+        if (payload == .builtin) return builtinPayload(payload.builtin);
+        try self.payloads.ensureUnusedCapacity(self.gpa, 1);
+        const p = try self.gpa.create(ResolvedType);
+        p.* = payload;
+        self.payloads.appendAssumeCapacity(p);
+        return p;
+    }
+
+    /// The optional of `payload`, built at check time.
+    fn optionalOf(self: *TypeChecker, payload: ResolvedType) TypeError!ResolvedType {
+        if (payload == .unknown) return .unknown;
+        return .{ .optional = try self.payloadOf(payload) };
+    }
+
+    /// A `.variant` shorthand with no expected type (`etch-resolver-types.md`
+    /// §3.5): the one enum naming the variant. A slot that expects a type
+    /// resolves it again through `fitShorthands`.
+    fn synthShorthand(self: *TypeChecker, id: NodeId) TypeError!ResolvedType {
+        if (!self.arena.isEnumShorthand(id)) return ResolvedType.unknown;
+        if (self.shorthand_enums.get(id.raw())) |ref| return .{ .enum_t = ref };
+        const variant: StringId = self.arena.exprData(id);
+        var enums: std.ArrayListUnmanaged(DeclRef) = .empty;
+        defer enums.deinit(self.gpa);
+        try self.namedEnums(&enums);
+        var found: ?DeclRef = null;
+        var count: u32 = 0;
+        for (enums.items) |ref| {
+            if (self.enumVariantIndex(ref, variant) != null) {
+                found = ref;
+                count += 1;
+            }
+        }
+        if (count != 1) {
+            try self.unresolved_shorthands.put(self.gpa, id.raw(), {});
+            return ResolvedType.unknown;
+        }
+        try self.shorthand_enums.put(self.gpa, id.raw(), found.?);
+        try self.recordShorthand(id, found.?);
+        return .{ .enum_t = found.? };
+    }
+
+    /// Resolve the shorthands `value` yields — itself, or the trailing values of
+    /// its branches — against the enum a slot expects.
+    fn fitShorthands(self: *TypeChecker, enum_name: DeclRef, value: NodeId) TypeError!void {
+        if (value.isNone()) return;
+        switch (self.arena.exprKind(value)) {
+            .tag_path => if (self.arena.isEnumShorthand(value)) {
+                _ = try self.checkEnumShorthand(value, enum_name);
+            },
+            .block_expr => try self.fitShorthands(enum_name, self.arena.block_exprs.items[self.arena.exprData(value)].value),
+            .if_expr => {
+                const ife = self.arena.if_exprs.items[self.arena.exprData(value)];
+                try self.fitShorthands(enum_name, ife.then_block);
+                try self.fitShorthands(enum_name, ife.else_branch);
+            },
+            .match_expr => {
+                const m = self.arena.match_exprs.items[self.arena.exprData(value)];
+                var i: u32 = 0;
+                while (i < m.arms_len) : (i += 1) try self.fitShorthands(enum_name, self.arena.match_arms.items[m.arms_start + i].body);
+            },
+            else => {},
+        }
+    }
+
+    /// Every shorthand no slot resolved: E0106 when several enums name its
+    /// variant, E0105 when none does.
+    fn reportUnresolvedShorthands(self: *TypeChecker) TypeError!void {
+        var enums: std.ArrayListUnmanaged(DeclRef) = .empty;
+        defer enums.deinit(self.gpa);
+        try self.namedEnums(&enums);
+        for (self.unresolved_shorthands.keys()) |raw| {
+            const id: NodeId = @bitCast(raw);
+            if (self.shorthand_enums.contains(raw)) continue;
+            const variant = self.arena.strings.slice(self.arena.exprData(id));
+            var count: u32 = 0;
+            for (enums.items) |ref| {
+                if (self.enumVariantIndex(ref, self.arena.exprData(id)) != null) count += 1;
+            }
+            if (count > 1) {
+                try self.emit(.ambiguous_enum_variant, .error_, self.arena.exprSpan(id), "'.{s}' is a variant of several enums; write it qualified", .{variant});
+            } else {
+                try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(id), "no enum has a variant '{s}'", .{variant});
+            }
+        }
+        self.unresolved_shorthands.clearRetainingCapacity();
     }
 
     /// Type a struct literal `T { f: v, … }`. `T` must name a
     /// declared struct; each provided field must exist on it with a matching
     /// value type. Fields may be omitted (the codegen / interpreter fill the
     /// struct's declared defaults). The result type is `.struct_t = T`. The
-    /// anonymous `.{ … }` form (deferred) carries `type_name == 0`.
-    /// Resolve an enum-variant shorthand `.variant` against an expected enum
-    /// type — check mode, resolver-types §3.5/§4. In
-    /// expression position the parser stores the bare `tag_path` with the
-    /// variant ident as the expr data directly (multi-segment paths are a
-    /// parse error there). E0105 when the variant does not exist.
-    fn checkEnumShorthand(self: *TypeChecker, value: NodeId, enum_name: StringId) TypeError!ResolvedType {
-        const variant: StringId = self.arena.exprData(value);
-        if (self.enumVariantIndex(enum_name, variant) != null) return .{ .enum_t = enum_name };
-        try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(enum_name), self.arena.strings.slice(variant) });
-        return ResolvedType.unknown;
-    }
-
+    /// anonymous `.{ … }` form, `type_name == 0`, needs its slot's struct.
     fn synthStructLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const sl = self.arena.struct_lits.items[data];
-        // Anonymous `.{ … }` in synth position: the
-        // form is check-mode-ONLY (resolver-types §4) — without an expected
-        // type from the context there is no struct to resolve against. The
-        // wired contexts are the let annotation and the typed field value;
-        // fn-arg / return positions are not wired (no differential requires
-        // them) and land here.
         if (sl.type_name == 0) {
-            try self.emit(.ambiguous_type, .error_, self.arena.exprSpan(id), "anonymous struct literal '.{{ … }}' needs an expected struct type from its context (let annotation or typed field value)", .{});
+            try self.emit(.ambiguous_type, .error_, self.arena.exprSpan(id), "anonymous struct literal '.{{ … }}' needs an expected struct type from its context", .{});
             return ResolvedType.unknown;
         }
-        return try self.checkStructLitAgainst(id, data, sl.type_name, ctx_opt);
+        const ref = self.declNamed(sl.type_name) orelse {
+            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a struct type", .{self.arena.strings.slice(sl.type_name)});
+            return ResolvedType.unknown;
+        };
+        if (ref.arena.itemKind(ref.item) != .struct_decl) {
+            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a struct type", .{self.arena.strings.slice(sl.type_name)});
+            return ResolvedType.unknown;
+        }
+        return try self.checkStructLitAgainst(id, data, ref, ctx_opt);
     }
 
     /// Check a struct literal's fields against the declared struct
     /// `struct_name` (split out so the
     /// anonymous `.{ … }` form checks through the same point with the name
     /// supplied by its context — check mode, resolver-types §4).
-    fn checkStructLitAgainst(self: *TypeChecker, id: NodeId, data: u32, struct_name: StringId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    fn checkStructLitAgainst(self: *TypeChecker, id: NodeId, data: u32, struct_ref: DeclRef, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const sl = self.arena.struct_lits.items[data];
-        const sym = self.symbols.get(struct_name);
-        if (sym == null or sym.?.kind != .struct_) {
-            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a struct type", .{self.arena.strings.slice(struct_name)});
-            return ResolvedType.unknown;
-        }
-        const decl = self.arena.struct_decls.items[self.arena.itemData(sym.?.item_id)];
+        if (sl.type_name == 0) try self.recordAnonStruct(id, struct_ref);
+        const target = structOf(struct_ref);
+        const decl = target.decl;
         var i: u32 = 0;
         while (i < sl.fields_len) : (i += 1) {
             const flit = self.arena.struct_lit_fields.items[sl.fields_start + i];
@@ -7075,41 +9463,19 @@ pub const TypeChecker = struct {
             var declared: ?ResolvedType = null;
             var f_i: u32 = 0;
             while (f_i < decl.fields_len) : (f_i += 1) {
-                const f = self.arena.fields.items[decl.fields_start + f_i];
-                if (f.name == flit.name) {
-                    declared = self.namedTypeToResolved(f.type_node);
+                const f = target.arena.fields.items[decl.fields_start + f_i];
+                if (self.sameName(target.arena, f.name, flit.name)) {
+                    declared = self.typeIn(target.arena, f.type_node);
                     break;
                 }
             }
-            // Check mode (resolver-types §4 + §3.5):
-            // the declared field type is the expected type, so a bare
-            // `.variant` shorthand in field-value position resolves against
-            // a declared enum field — the part1 §10.2 canonical form
-            // `Error { code: .io_fail }` — and an anonymous `.{ … }` value
-            // resolves against a declared struct field (the same
-            // propagation extended from the bare variant to the whole
-            // literal).
-            const actual = blk: {
-                if (declared != null and declared.? == .enum_t and self.arena.exprKind(flit.value) == .tag_path) {
-                    break :blk try self.checkEnumShorthand(flit.value, declared.?.enum_t);
-                }
-                if (declared != null and declared.? == .struct_t and self.arena.exprKind(flit.value) == .struct_lit) {
-                    const inner_data = self.arena.exprData(flit.value);
-                    if (self.arena.struct_lits.items[inner_data].type_name == 0) {
-                        break :blk try self.checkStructLitAgainst(flit.value, inner_data, declared.?.struct_t, ctx_opt);
-                    }
-                }
-                break :blk try self.synthExprE(flit.value, ctx_opt);
-            };
+            const actual = try self.checkExpr(flit.value, declaredSlot(declared orelse .unknown), ctx_opt);
             if (declared) |d| {
-                if (d == .builtin and actual == .builtin and !self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "struct-literal field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
-                }
-                if (d == .struct_t and actual == .struct_t and d.struct_t != actual.struct_t) {
+                if (!try self.valueFits(d, flit.value, actual)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "struct-literal field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
                 }
             } else {
-                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(id), "struct '{s}' has no field '{s}'", .{ self.arena.strings.slice(struct_name), self.arena.strings.slice(flit.name) });
+                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(id), "struct '{s}' has no field '{s}'", .{ declBytes(struct_ref), self.arena.strings.slice(flit.name) });
             }
         }
         // A builtin-`Error` literal must provide `message` and `code` (part1
@@ -7117,7 +9483,7 @@ pub const TypeChecker = struct {
         // field). Bounded to `Error` — general struct-literal completeness
         // stays permissive (declared defaults fill omissions), but Error's
         // fields have no defaults the two backends could agree on.
-        if (struct_name == self.arena.error_type_name) {
+        if (isErrorDecl(struct_ref)) {
             const required = [_][]const u8{ "message", "code" };
             for (required) |req| {
                 var provided = false;
@@ -7140,33 +9506,42 @@ pub const TypeChecker = struct {
         // zero-fill would diverge on nested declared defaults).
         var df_i: u32 = 0;
         while (df_i < decl.fields_len) : (df_i += 1) {
-            const f = self.arena.fields.items[decl.fields_start + df_i];
-            if (self.namedTypeToResolved(f.type_node) != .struct_t) continue;
+            const f = target.arena.fields.items[decl.fields_start + df_i];
+            if (self.typeIn(target.arena, f.type_node) != .struct_t) continue;
             var provided = false;
             var li: u32 = 0;
             while (li < sl.fields_len) : (li += 1) {
-                if (self.arena.struct_lit_fields.items[sl.fields_start + li].name == f.name) {
+                if (self.sameName(target.arena, f.name, self.arena.struct_lit_fields.items[sl.fields_start + li].name)) {
                     provided = true;
                     break;
                 }
             }
             if (!provided) {
-                try self.emit(.struct_field_missing, .error_, self.arena.exprSpan(id), "struct-typed field '{s}' must be provided in the literal (no declared default)", .{self.arena.strings.slice(f.name)});
+                try self.emit(.struct_field_missing, .error_, self.arena.exprSpan(id), "struct-typed field '{s}' must be provided in the literal (no declared default)", .{target.arena.strings.slice(f.name)});
             }
         }
-        return .{ .struct_t = struct_name };
+        return .{ .struct_t = struct_ref };
     }
 
-    /// The user type name carried by a struct / component / resource type, or
-    /// `null` for builtins / collections (no user methods on them —
-    /// builtin/stdlib methods like `Vec3.length` are §5.3, out of scope).
-    fn typeNameOfResolved(rt: ResolvedType) ?StringId {
-        return switch (rt) {
-            .struct_t => |n| n,
-            .component => |n| n,
-            .resource => |n| n,
-            .enum_t => |n| n,
+    /// Whether `ref` is the builtin `Error` of its file.
+    fn isErrorDecl(ref: DeclRef) bool {
+        return ref.arena.error_type_name != 0 and ref.arena.itemKind(ref.item) == .struct_decl and declName(ref) == ref.arena.error_type_name;
+    }
+
+    /// What an impl for a value of type `t` is for, null for a type no impl
+    /// can target.
+    fn implTargetOf(t: ResolvedType) ?ImplTarget {
+        return switch (t) {
+            .struct_t, .component, .resource, .enum_t => |r| .{ .decl = r },
+            .builtin => |b| if (b == .entity) .entity else null,
             else => null,
+        };
+    }
+
+    fn implTargetBytes(t: ImplTarget) []const u8 {
+        return switch (t) {
+            .decl => |r| declBytes(r),
+            .entity => "Entity",
         };
     }
 
@@ -7204,11 +9579,15 @@ pub const TypeChecker = struct {
                 }
                 return try self.synthSetAssociated(id, mc, ctx_opt);
             }
-            const method = self.lookupMethod(type_name, mc.method_name) orelse {
+            const target = self.implTargetIn(self.arena, type_name) orelse {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no associated function '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
                 return ResolvedType.unknown;
             };
-            if (method.self_kind != .none) {
+            const method = (try self.lookupMethod(target, mc.method_name, self.arena.exprSpan(id))) orelse {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no associated function '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
+                return ResolvedType.unknown;
+            };
+            if (method.decl.self_kind != .none) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'{s}' is a method (takes self) — call it as a receiver method 'value.{s}(...)'", .{ method_slice, method_slice });
                 return ResolvedType.unknown;
             }
@@ -7238,29 +9617,33 @@ pub const TypeChecker = struct {
         }
 
         const raw_t = try self.synthExprE(mc.receiver, ctx_opt);
+        const chained = mc.opt_chain or (raw_t == .optional and self.arena.inOptionalChain(mc.receiver));
+        const dispatch_t = if (chained and raw_t == .optional) raw_t.optional.* else raw_t;
 
         // Named arguments bind against DECLARED signatures: struct methods
         // route through `checkMethodArgs` below;
         // every builtin-method route (string / collections / ECS access)
         // is positional-only — reject up front rather than silently
         // ignoring the labels.
-        if (mc.names_start != ast_mod.no_arg_names and raw_t != .struct_t and raw_t != .unknown) {
+        if (mc.names_start != ast_mod.no_arg_names and dispatch_t != .struct_t and dispatch_t != .unknown) {
             try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "named arguments require a declared fn or method callee (M0.8 bound)", .{});
             return ResolvedType.unknown;
         }
 
-        // `recv?.method(args)` — optional chain (part1 §6.6):
-        // the method dispatches against the payload type and the
+        // `recv?.method(args)`, or a method called after one — optional chain
+        // (part1 §6.6): the method dispatches against the payload type and the
         // result re-wraps in an optional (`none` short-circuits at runtime).
-        if (mc.opt_chain) {
+        if (chained) {
             if (raw_t == .unknown) return ResolvedType.unknown;
             if (raw_t != .optional) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "optional chain '?.' requires an optional receiver", .{});
                 return ResolvedType.unknown;
             }
-            const res = try self.dispatchMethodOnType(id, mc, .{ .builtin = raw_t.optional }, ctx_opt);
-            if (res == .builtin) return .{ .optional = res.builtin };
-            return ResolvedType.unknown;
+            // `?.` flattens (`etch-reference-part1.md` §6): an optional result
+            // stays `U?`.
+            const res = try self.dispatchMethodOnType(id, mc, raw_t.optional.*, ctx_opt);
+            if (res == .optional) return res;
+            return self.optionalOf(res);
         }
         return try self.dispatchMethodOnType(id, mc, raw_t, ctx_opt);
     }
@@ -7290,16 +9673,16 @@ pub const TypeChecker = struct {
             }
             const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
             const arg_t = try self.synthExprE(arg, ctx_opt);
-            const elem: BuiltinType = switch (arg_t) {
+            const elem: *const ResolvedType = switch (arg_t) {
                 .array_fixed => |info| info.elem,
-                .array_dyn => |bt| bt,
+                .array_dyn => |e| e,
                 .unknown => return ResolvedType.unknown,
                 else => {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "'Set.from' expects an array argument", .{});
                     return ResolvedType.unknown;
                 },
             };
-            try self.checkHashBound(elem, "set element type", "T: Hash", self.arena.exprSpan(arg));
+            try self.checkHashBound(elem.*, "set element type", "T: Hash", self.arena.exprSpan(arg));
             return .{ .set_t = elem };
         }
         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "associated function '{s}' on 'Set' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
@@ -7317,14 +9700,14 @@ pub const TypeChecker = struct {
         }
         const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
         const arg_t = try self.synthExprE(arg, ctx_opt);
-        if (arg_t == .builtin and arg_t.builtin != .string_) {
+        if (!builtinWhere(arg_t, isString)) {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "Entity method '{s}' expects a string extension name", .{method_slice});
         }
     }
 
     /// type-check a structural `spawn(...)` node (`etch-grammar.md`
     /// §3.2 / §4.5). The spawn is statement-position only (no body handle, v0.6):
-    /// `value_position` is `true` when reached through `synthExpr` (a value use:
+    /// `value_position` is `true` when reached through `synthExprE` (a value use:
     /// `let e = spawn(…)`, `spawn(…).field`, `spawn(…)` as an argument) → E0304;
     /// `checkStmt` passes `false` for the legal `expr_stmt` position. The
     /// prefab-name form is recognized but refused (E0305, gated on the prefab
@@ -7425,23 +9808,21 @@ pub const TypeChecker = struct {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "emit needs an explicit event type ('T {{ ... }}')", .{});
             return;
         }
-        const sym = self.symbols.get(sl.type_name);
-        if (sym == null or sym.?.kind != .event_) {
+        const ev = self.eventNamed(sl.type_name) orelse {
             try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(arg), "'{s}' is not a declared event", .{self.arena.strings.slice(sl.type_name)});
             return;
-        }
-        try self.checkEventFieldRun(self.arena.itemData(sym.?.item_id), sl.fields_start, sl.fields_len, ctx_opt);
+        };
+        try self.checkEventFieldRun(ev, sl.fields_start, sl.fields_len, false, ctx_opt);
     }
 
     /// validate a type name used in a structural mutation
     /// (`entity.remove(T)` and the component-literal types of `spawn` / `add`)
-    /// resolves to a declared `component`. Mirrors the `when has` component
-    /// lookup (`self.symbols.get` + `SymbolKind.component`).
+    /// resolves to a declared `component`, as the `when has` lookup does.
     fn checkStructuralComponentName(self: *TypeChecker, name: StringId, span: SourceSpan) TypeError!void {
         const tname = self.arena.strings.slice(name);
-        if (self.symbols.get(name)) |sym| {
-            if (sym.kind != .component) {
-                try self.emit(.type_mismatch, .error_, span, "structural mutation requires a component, '{s}' is a {s}", .{ tname, @tagName(sym.kind) });
+        if (self.kindNamed(name)) |k| {
+            if (k != .component) {
+                try self.emit(.type_mismatch, .error_, span, "structural mutation requires a component, '{s}' is a {s}", .{ tname, @tagName(k) });
             }
         } else {
             try self.emit(.type_mismatch, .error_, span, "unknown component '{s}' in structural mutation", .{tname});
@@ -7495,13 +9876,13 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method 'push' takes exactly one argument", .{});
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
-                    const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (arg_t == .builtin and !self.literalTypeFits(recv_t.array_dyn, arg, arg_t.builtin)) {
+                    const arg_t = try self.checkExpr(arg, declaredSlot(recv_t.array_dyn.*), ctx_opt);
+                    if (!try self.valueFits(recv_t.array_dyn.*, arg, arg_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "pushed value type does not match the array element type", .{});
                     }
                 }
                 try self.checkMutCollectionReceiver(mc, ctx_opt);
-                return ResolvedType.unknown; // void return
+                return ResolvedType.unit;
             }
             if (std.mem.eql(u8, method_slice, "len")) {
                 if (mc.args_len != 0) {
@@ -7534,12 +9915,12 @@ pub const TypeChecker = struct {
                 } else {
                     const karg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     const varg: NodeId = @bitCast(self.arena.extra.items[mc.args_start + 1]);
-                    const k_t = try self.synthExprE(karg, ctx_opt);
-                    const v_t = try self.synthExprE(varg, ctx_opt);
-                    if (k_t == .builtin and !self.literalTypeFits(recv_t.map_t.key, karg, k_t.builtin)) {
+                    const k_t = try self.checkExpr(karg, declaredSlot(recv_t.map_t.key.*), ctx_opt);
+                    const v_t = try self.checkExpr(varg, declaredSlot(recv_t.map_t.value.*), ctx_opt);
+                    if (!try self.valueFits(recv_t.map_t.key.*, karg, k_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(karg), "inserted key type does not match the map key type", .{});
                     }
-                    if (v_t == .builtin and !self.literalTypeFits(recv_t.map_t.value, varg, v_t.builtin)) {
+                    if (!try self.valueFits(recv_t.map_t.value.*, varg, v_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(varg), "inserted value type does not match the map value type", .{});
                     }
                 }
@@ -7568,8 +9949,8 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "set method 'insert' takes exactly one argument", .{});
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
-                    const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (arg_t == .builtin and !self.literalTypeFits(recv_t.set_t, arg, arg_t.builtin)) {
+                    const arg_t = try self.checkExpr(arg, declaredSlot(recv_t.set_t.*), ctx_opt);
+                    if (!try self.valueFits(recv_t.set_t.*, arg, arg_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "inserted item type does not match the set element type", .{});
                     }
                 }
@@ -7581,8 +9962,8 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "set method 'contains' takes exactly one argument", .{});
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
-                    const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (arg_t == .builtin and !self.literalTypeFits(recv_t.set_t, arg, arg_t.builtin)) {
+                    const arg_t = try self.checkExpr(arg, declaredSlot(recv_t.set_t.*), ctx_opt);
+                    if (!try self.valueFits(recv_t.set_t.*, arg, arg_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "item type does not match the set element type", .{});
                     }
                 }
@@ -7598,8 +9979,8 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
-        // builtin TaskHandle method (§9.8): `cancel()` — no args,
-        // statement-effect (`unknown` ≈ unit; idempotent at runtime). The
+        // builtin TaskHandle method (§9.8): `cancel()` — no args, unit,
+        // idempotent at runtime. The
         // handle's only other operation is `await h` (handled in the await
         // arm); anything else is an error with a pointer to both.
         if (recv_t == .builtin and recv_t.builtin == .task_handle) {
@@ -7607,21 +9988,21 @@ pub const TypeChecker = struct {
                 if (mc.args_len != 0) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "TaskHandle method 'cancel' takes no arguments", .{});
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on a TaskHandle (only 'cancel()'; join with 'await h')", .{method_slice});
             return ResolvedType.unknown;
         }
 
-        // builtin TimerHandle method (§9.10): `cancel()` — no args, statement-effect
-        // (`unknown` ≈ unit), idempotent at runtime. Its ONLY operation: a timer is not
+        // builtin TimerHandle method (§9.10): `cancel()` — no args, unit,
+        // idempotent at runtime. Its ONLY operation: a timer is not
         // a task — no `await t`, no join, nothing else.
         if (recv_t == .builtin and recv_t.builtin == .timer_handle) {
             if (std.mem.eql(u8, method_slice, "cancel")) {
                 if (mc.args_len != 0) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "TimerHandle method 'cancel' takes no arguments", .{});
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on a TimerHandle (only 'cancel()'; a timer is not awaitable)", .{method_slice});
             return ResolvedType.unknown;
@@ -7640,19 +10021,19 @@ pub const TypeChecker = struct {
             }
             if (std.mem.eql(u8, method_slice, "emit")) {
                 try self.checkWorldEmitArg(id, mc, ctx_opt);
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             if (std.mem.eql(u8, method_slice, "tick")) {
                 if (mc.args_len != 1) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "tick takes exactly one count 'tick(n)'", .{});
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
-                    const t = self.synthExpr(arg, ctx_opt);
-                    if (t == .builtin and !t.builtin.isInteger()) {
+                    const t = try self.synthExprE(arg, ctx_opt);
+                    if (!builtinWhere(t, BuiltinType.isInteger)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "tick(n) requires an integer tick count", .{});
                     }
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on the test world (spawn_with / emit / tick)", .{method_slice});
             return ResolvedType.unknown;
@@ -7661,13 +10042,13 @@ pub const TypeChecker = struct {
         // Builtin extension methods on an `Entity` receiver, checked
         // BEFORE the trait-method resolution below (these are interpreter builtins,
         // not user traits; any other method on an Entity falls through to the
-        // trait lookup). `activate_extension`/`deactivate_extension` are
-        // statement-use (`unknown` return, like `array.push`); `has_extension`
+        // trait lookup). `activate_extension`/`deactivate_extension` are unit;
+        // `has_extension`
         // → bool; `active_extensions` → `[string]`.
         if (recv_t == .builtin and recv_t.builtin == .entity) {
             if (std.mem.eql(u8, method_slice, "activate_extension") or std.mem.eql(u8, method_slice, "deactivate_extension")) {
                 try self.checkExtensionNameArg(id, mc, method_slice, ctx_opt);
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             if (std.mem.eql(u8, method_slice, "has_extension")) {
                 try self.checkExtensionNameArg(id, mc, method_slice, ctx_opt);
@@ -7675,16 +10056,15 @@ pub const TypeChecker = struct {
             }
             if (std.mem.eql(u8, method_slice, "active_extensions")) {
                 if (mc.args_len != 0) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "Entity method 'active_extensions' takes no arguments", .{});
-                return ResolvedType{ .array_dyn = .string_ };
+                return ResolvedType{ .array_dyn = builtinPayload(.string_) };
             }
             // structural mutation methods on an `Entity` receiver
-            // (`etch-grammar.md` §4.5). All three are statement-effect (`unknown`
-            // return, like `array.push` / `activate_extension`); they enqueue a
+            // (`etch-grammar.md` §4.5). All three are unit; they enqueue a
             // deferred command at run. `add` on a present component is a
             // replace (`@on_replaced`), no separate construct.
             if (std.mem.eql(u8, method_slice, "despawn")) {
                 if (mc.args_len != 0) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "Entity method 'despawn' takes no arguments", .{});
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             if (std.mem.eql(u8, method_slice, "add")) {
                 if (mc.args_len != 1) {
@@ -7693,7 +10073,7 @@ pub const TypeChecker = struct {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     try self.checkStructuralComponentLiteral(arg);
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
             if (std.mem.eql(u8, method_slice, "remove")) {
                 if (mc.args_len != 1) {
@@ -7714,117 +10094,137 @@ pub const TypeChecker = struct {
                         // note for what it was and why the number stays reserved.
                     }
                 }
-                return ResolvedType.unknown;
+                return ResolvedType.unit;
             }
         }
 
-        const type_name: StringId = typeNameOfResolved(recv_t) orelse blk: {
-            if (recv_t == .builtin and recv_t.builtin == .entity) {
-                break :blk self.arena.strings.find("Entity") orelse {
-                    // No `Entity` interned ⇒ no trait impl targets it.
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on an Entity (no trait impl in scope)", .{method_slice});
-                    return ResolvedType.unknown;
-                };
-            }
+        const target: ImplTarget = implTargetOf(recv_t) orelse {
             if (recv_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "method call '{s}' on a value with no methods (builtin / collection methods are not supported here)", .{method_slice});
             return ResolvedType.unknown;
         };
 
         // Step 1 — inherent method (§5.1).
-        if (self.lookupMethod(type_name, mc.method_name)) |method| {
-            if (method.self_kind == .none) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'{s}' is an associated function (no self) — call it as '{s}.{s}(...)'", .{ method_slice, self.arena.strings.slice(type_name), method_slice });
+        if (try self.lookupMethod(target, mc.method_name, self.arena.exprSpan(id))) |method| {
+            if (method.decl.self_kind == .none) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'{s}' is an associated function (no self) — call it as '{s}.{s}(...)'", .{ method_slice, self.localSpelling(target), method_slice });
                 return ResolvedType.unknown;
             }
-            try self.checkMutSelfReceiver(method, mc, ctx_opt);
+            try self.checkMutSelfReceiver(method.decl, mc, ctx_opt);
             return try self.checkMethodArgs(id, mc, method, ctx_opt);
         }
 
         // Step 2 — trait method (§5.2), after inherent.
-        if (try self.findTraitMethod(type_name, mc.method_name, self.arena.exprSpan(id))) |disp| {
+        if (try self.findTraitMethod(target, mc.method_name, self.arena.exprSpan(id))) |disp| {
             // Conditional impl (§7.3): the `when` conditions must be provable
             // from the calling rule's `when` (E0215 otherwise).
-            if (!self.traitImplConditionsProven(disp.when_root, ctx_opt)) {
+            if (!self.traitImplConditionsProven(disp.impl_arena, disp.when_root, ctx_opt)) {
                 try self.emit(.conditional_impl_condition_not_proven, .error_, self.arena.exprSpan(id), "conditional impl method '{s}' requires components the calling context does not guarantee — add the matching 'when ... has' to the rule", .{method_slice});
             }
-            try self.checkMutSelfReceiver(disp.method, mc, ctx_opt);
+            try self.checkMutSelfReceiver(disp.method.decl, mc, ctx_opt);
             return try self.checkMethodArgs(id, mc, disp.method, ctx_opt);
         }
 
         // Steps 3-4 (builtin / service) are §5.3-5.4 — out of the core.
-        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
+        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on type '{s}'", .{ method_slice, implTargetBytes(target) });
         return ResolvedType.unknown;
     }
 
-    /// One resolved trait-dispatch candidate: the
-    /// `FnDecl` to call (impl-provided or trait default) + the impl's `when_root`
-    /// (for the §7.3 conditional proof).
-    const TraitDispatch = struct { method: ast_mod.FnDecl, when_root: u32 };
+    /// How this file writes the impl target `t`: the name a selective import
+    /// binds it under, else its declared name.
+    fn localSpelling(self: *TypeChecker, t: ImplTarget) []const u8 {
+        const ref = switch (t) {
+            .decl => |r| r,
+            .entity => return "Entity",
+        };
+        if (ref.arena == self.arena) return declBytes(ref);
+        var it = self.imported_symbols.iterator();
+        while (it.next()) |e| {
+            if (exportRef(self.project.?, e.value_ptr.*).eql(ref) and !self.symbols.contains(e.key_ptr.*)) return self.arena.strings.slice(e.key_ptr.*);
+        }
+        return declBytes(ref);
+    }
+
+    /// One resolved trait-dispatch candidate: the method to call
+    /// (impl-provided or trait default) + the arena of its impl, whose
+    /// `when_root` it is (for the §7.3 conditional proof).
+    const TraitDispatch = struct { method: FnRef, impl_arena: *const AstArena, when_root: u32 };
 
     /// Find the trait method `method_name` on `type_name` (`etch-resolver-types.md
-    /// §5.2`). Scans `trait_impls` for the type; a candidate is an impl-provided
-    /// method or, failing that, the trait's default-bodied method. >1 distinct
-    /// candidate ⇒ E0211 AmbiguousTraitMethod (the first is returned to avoid a
-    /// cascade). Simplification: multiple conditional impls of the same
-    /// trait also surface as E0211 (the §7.3 most-specific-wins / E0216 tie-break
-    /// is a refinement — flagged for review).
-    fn findTraitMethod(self: *TypeChecker, type_name: StringId, method_name: StringId, span: SourceSpan) TypeError!?TraitDispatch {
+    /// §5.2`). Scans the visible trait impls for the type; a candidate is an
+    /// impl-provided method or, failing that, the trait's default-bodied
+    /// method. >1 distinct candidate ⇒ E0211 AmbiguousTraitMethod (the first
+    /// is returned to avoid a cascade). Simplification: multiple conditional
+    /// impls of the same trait also surface as E0211 (the §7.3
+    /// most-specific-wins / E0216 tie-break is a refinement — flagged for
+    /// review).
+    fn findTraitMethod(self: *TypeChecker, target: ImplTarget, method_name: StringId, span: SourceSpan) TypeError!?TraitDispatch {
+        const bytes = self.arena.strings.slice(method_name);
         var found: ?TraitDispatch = null;
         var count: u32 = 0;
         for (self.trait_impls.items) |entry| {
-            if (entry.type_name != type_name) continue;
-            var resolved: ?ast_mod.FnDecl = null;
-            var k: u32 = 0;
-            while (k < entry.methods_len) : (k += 1) {
-                const mth = self.arena.impl_methods.items[entry.methods_start + k];
-                if (mth.name == method_name) {
-                    resolved = mth;
-                    break;
-                }
+            const t = self.implTargetIn(entry.arena, entry.type_name) orelse continue;
+            if (!t.eql(target)) continue;
+            var resolved: ?FnRef = null;
+            if (methodIn(entry.arena, entry.methods_start, entry.methods_len, bytes)) |m| {
+                resolved = .{ .arena = entry.arena, .decl = m };
+            } else if (self.declNamedIn(entry.arena, entry.trait_name)) |trait| {
+                resolved = traitDefaultMethod(trait, bytes);
             }
-            if (resolved == null) resolved = self.traitDefaultMethod(entry.trait_name, method_name);
             if (resolved) |mth| {
                 count += 1;
-                if (found == null) found = .{ .method = mth, .when_root = entry.when_root };
+                if (found == null) found = .{ .method = mth, .impl_arena = entry.arena, .when_root = entry.when_root };
             }
         }
         if (count > 1) {
-            try self.emit(.ambiguous_trait_method, .error_, span, "ambiguous trait method '{s}' — implemented by more than one trait/impl for this type", .{self.arena.strings.slice(method_name)});
+            try self.emit(.ambiguous_trait_method, .error_, span, "ambiguous trait method '{s}' — implemented by more than one trait/impl for this type", .{bytes});
         }
         return found;
     }
 
-    /// The trait's default-bodied method `method_name`, or `null`.
-    fn traitDefaultMethod(self: *TypeChecker, trait_name: StringId, method_name: StringId) ?ast_mod.FnDecl {
-        const sym = self.symbols.get(trait_name) orelse return null;
-        if (sym.kind != .trait_) return null;
-        const tdecl = self.arena.trait_decls.items[self.arena.itemData(sym.item_id)];
+    /// The default-bodied method named `bytes` of `trait`, or `null`.
+    fn traitDefaultMethod(trait: DeclRef, bytes: []const u8) ?FnRef {
+        if (trait.arena.itemKind(trait.item) != .trait_decl) return null;
+        const tdecl = trait.arena.trait_decls.items[trait.arena.itemData(trait.item)];
         var m: u32 = 0;
         while (m < tdecl.methods_len) : (m += 1) {
-            const tm = self.arena.impl_methods.items[tdecl.methods_start + m];
-            if (tm.name == method_name and tm.has_body) return tm;
+            const tm = trait.arena.impl_methods.items[tdecl.methods_start + m];
+            if (tm.has_body and std.mem.eql(u8, trait.arena.strings.slice(tm.name), bytes)) return .{ .arena = trait.arena, .decl = tm };
         }
         return null;
     }
 
-    /// Prove a conditional trait impl's `when` (§7.3). Unconditional ⇒ always
-    /// proven; otherwise every `has C` the impl requires must be in the calling
-    /// rule's guaranteed component set (`ctx.components_in_when`). Outside a rule
-    /// context, or for an `or`/`not`/resource condition (not provable),
-    /// the proof fails (conservative).
-    fn traitImplConditionsProven(self: *TypeChecker, when_root: u32, ctx_opt: ?*RuleCtx) bool {
+    /// Prove a conditional trait impl's `when` (§7.3), a condition of arena
+    /// `a`. Unconditional ⇒ always proven; otherwise every `has C` the impl
+    /// requires must be in the calling rule's guaranteed component set
+    /// (`ctx.components_in_when`). Outside a rule context, or for an
+    /// `or`/`not`/resource condition (not provable), the proof fails
+    /// (conservative).
+    fn traitImplConditionsProven(self: *TypeChecker, a: *const AstArena, when_root: u32, ctx_opt: ?*RuleCtx) bool {
         if (when_root == ast_mod.RuleDecl.none_when) return true;
         const ctx = ctx_opt orelse return false;
-        return self.requiredComponentsProven(when_root, ctx);
+        return self.requiredComponentsProven(a, when_root, ctx);
     }
 
-    fn requiredComponentsProven(self: *TypeChecker, idx: u32, ctx: *RuleCtx) bool {
-        const node = self.arena.when_nodes.items[idx];
+    fn requiredComponentsProven(self: *TypeChecker, a: *const AstArena, idx: u32, ctx: *RuleCtx) bool {
+        const node = a.when_nodes.items[idx];
         return switch (node.kind) {
-            .has, .has_with_filter => ctx.components_in_when.contains(node.type_name),
-            .logical_and => self.requiredComponentsProven(node.lhs, ctx) and self.requiredComponentsProven(node.rhs, ctx),
+            .has, .has_with_filter => self.componentGuaranteed(a, node.type_name, ctx),
+            .logical_and => self.requiredComponentsProven(a, node.lhs, ctx) and self.requiredComponentsProven(a, node.rhs, ctx),
             else => false, // or / not / resource conditions are not provable
         };
+    }
+
+    /// Whether the calling rule's `when` guarantees the component that
+    /// `name`, a name of arena `a`, names.
+    fn componentGuaranteed(self: *TypeChecker, a: *const AstArena, name: StringId, ctx: *RuleCtx) bool {
+        if (a == self.arena) return ctx.components_in_when.contains(name);
+        const want = self.declNamedIn(a, name) orelse return false;
+        var it = ctx.components_in_when.keyIterator();
+        while (it.next()) |k| {
+            const have = self.declNamed(k.*) orelse continue;
+            if (have.eql(want)) return true;
+        }
+        return false;
     }
 
     /// E0220-shaped check for the builtin mutating collection methods: `push` /
@@ -7832,10 +10232,7 @@ pub const TypeChecker = struct {
     /// mutable binding. Same reachability rule as `checkMutSelfReceiver`, without a
     /// user `FnDecl`.
     fn checkMutCollectionReceiver(self: *TypeChecker, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) !void {
-        const ctx = ctx_opt orelse return;
-        if (!isAssignTargetReachable(self.arena, ctx, mc.receiver)) {
-            try self.emit(.immutable_receiver_for_mut_self, .error_, self.arena.exprSpan(mc.receiver), "cannot call a mutating collection method on an immutable receiver (bind it with 'let mut')", .{});
-        }
+        try self.checkMutatingReceiver(mc, ctx_opt, "cannot call a mutating collection method on an immutable receiver (bind it with 'let mut')");
     }
 
     /// E0220 (`etch-resolver-types.md §7.6`): a `mut self` method called on an
@@ -7843,16 +10240,145 @@ pub const TypeChecker = struct {
     /// `let mut` / a `get_mut` ref is mutable. Skipped without a rule context.
     fn checkMutSelfReceiver(self: *TypeChecker, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) !void {
         if (method.self_kind != .by_mut) return;
+        try self.checkMutatingReceiver(mc, ctx_opt, "cannot call a 'mut self' method on an immutable receiver (bind it with 'let mut')");
+    }
+
+    /// The receiver of a method that writes it must be a place `placeOf`
+    /// accepts, reached without `?.`.
+    fn checkMutatingReceiver(self: *TypeChecker, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx, immutable_message: []const u8) !void {
         const ctx = ctx_opt orelse return;
-        if (!isAssignTargetReachable(self.arena, ctx, mc.receiver)) {
-            try self.emit(.immutable_receiver_for_mut_self, .error_, self.arena.exprSpan(mc.receiver), "cannot call a 'mut self' method on an immutable receiver (bind it with 'let mut')", .{});
+        const span = self.arena.exprSpan(mc.receiver);
+        const place = self.placeOf(ctx, mc.receiver);
+        const verdict: PlaceVerdict = if (mc.opt_chain) .through_optional else place.verdict;
+        switch (verdict) {
+            .ok => {},
+            .immutable_binding, .not_a_place => try self.emit(.immutable_receiver_for_mut_self, .error_, span, "{s}", .{immutable_message}),
+            .read_only_ref => try self.emit(.immutable_receiver_for_mut_self, .error_, span, "cannot call a mutating method through a read-only ECS ref (get(T)); call it through get_mut(T)", .{}),
+            .through_optional => try self.emit(.immutable_receiver_for_mut_self, .error_, span, "cannot write through '?.': unwrap the optional first", .{}),
+            .through_slice => try self.emit(.immutable_receiver_for_mut_self, .error_, span, "cannot write through a slice: a slice is a copy", .{}),
+            .captured => try self.emitCapturedWrite(span, place.root),
         }
+    }
+
+    const PlaceVerdict = enum { ok, immutable_binding, read_only_ref, through_optional, through_slice, captured, not_a_place };
+
+    /// The verdict on writing through `id`, a chain of fields and elements:
+    /// its root must be a `get_mut`, a binding of one, or a mutable binding
+    /// the closure body being typed did not capture. An ECS ref reached
+    /// through a field or an element is read-only. `root` names the root
+    /// binding.
+    fn placeOf(self: *TypeChecker, ctx: *const RuleCtx, id: NodeId) struct { verdict: PlaceVerdict, root: StringId = 0 } {
+        var cur = id;
+        while (true) switch (self.arena.exprKind(cur)) {
+            .field_access => {
+                const fa = self.arena.field_accesses.items[self.arena.exprData(cur)];
+                if (fa.opt_chain) return .{ .verdict = .through_optional };
+                if (self.heldRef(ctx, fa.receiver)) return .{ .verdict = .read_only_ref };
+                cur = fa.receiver;
+            },
+            .index => {
+                const ix = self.arena.index_exprs.items[self.arena.exprData(cur)];
+                if (self.arena.exprKind(ix.index) == .range) return .{ .verdict = .through_slice };
+                cur = ix.receiver;
+            },
+            .method_get_mut => return .{ .verdict = .ok },
+            .method_get => return .{ .verdict = .read_only_ref },
+            .ident => {
+                const name = self.arena.exprData(cur);
+                const local = ctx.locals.get(name) orelse return .{ .verdict = .not_a_place };
+                return .{ .root = name, .verdict = switch (local.ref) {
+                    .mutable => .ok,
+                    .read_only => .read_only_ref,
+                    .none => if (self.isClosureCapture(ctx, name)) .captured else if (local.is_mut) .ok else .immutable_binding,
+                } };
+            },
+            else => return .{ .verdict = .not_a_place },
+        };
+    }
+
+    /// Whether `id` is an ECS ref held by a field or an element, whose mode no
+    /// binding records.
+    fn heldRef(self: *TypeChecker, ctx: *const RuleCtx, id: NodeId) bool {
+        switch (self.arena.exprKind(id)) {
+            .field_access, .index => {},
+            else => return false,
+        }
+        return switch (self.placeType(ctx, id)) {
+            .component, .resource, .builtin_resource => true,
+            else => false,
+        };
+    }
+
+    /// The type of `id`, a chain of fields and elements over a binding,
+    /// without a diagnostic; `unknown` past what the chain names.
+    fn placeType(self: *TypeChecker, ctx: *const RuleCtx, id: NodeId) ResolvedType {
+        switch (self.arena.exprKind(id)) {
+            .ident => {
+                const local = ctx.locals.get(self.arena.exprData(id)) orelse return .unknown;
+                return local.type_;
+            },
+            .field_access => {
+                const fa = self.arena.field_accesses.items[self.arena.exprData(id)];
+                return switch (self.placeType(ctx, fa.receiver)) {
+                    .component => |ref| blk: {
+                        const c = componentOf(ref);
+                        break :blk self.fieldTypeIn(c.arena, c.decl.fields_start, c.decl.fields_len, fa.field_name) orelse .unknown;
+                    },
+                    .resource => |ref| blk: {
+                        const r = resourceOf(ref);
+                        break :blk self.fieldTypeIn(r.arena, r.decl.fields_start, r.decl.fields_len, fa.field_name) orelse .unknown;
+                    },
+                    .struct_t => |ref| blk: {
+                        const target = structOf(ref);
+                        break :blk self.fieldTypeIn(target.arena, target.decl.fields_start, target.decl.fields_len, fa.field_name) orelse .unknown;
+                    },
+                    else => .unknown,
+                };
+            },
+            .index => {
+                const ix = self.arena.index_exprs.items[self.arena.exprData(id)];
+                return switch (self.placeType(ctx, ix.receiver)) {
+                    .array_fixed => |info| info.elem.*,
+                    .array_dyn => |elem| elem.*,
+                    else => .unknown,
+                };
+            },
+            else => return .unknown,
+        }
+    }
+
+    /// Whether `name` is a binding the closure body being typed captured
+    /// rather than bound itself.
+    fn isClosureCapture(self: *TypeChecker, ctx: *const RuleCtx, name: StringId) bool {
+        const caps = self.closure_captures orelse return false;
+        return caps.contains(name) and !ctx.loggedSince(0, name);
+    }
+
+    fn emitCapturedWrite(self: *TypeChecker, span: SourceSpan, name: StringId) !void {
+        try self.emit(.closure_cannot_mutate_capture, .error_, span, "closure cannot mutate captured binding '{s}' (pass it as an argument or mutate through entity.get_mut)", .{self.arena.strings.slice(name)});
+    }
+
+    /// The ref mode a binding of `value`, of type `t`, takes: a `get_mut` or a
+    /// binding of one is mutable, any other ECS ref read-only.
+    fn refModeOf(ctx: *const RuleCtx, arena: *const AstArena, value: NodeId, t: ResolvedType) RuleCtx.RefMode {
+        switch (arena.exprKind(value)) {
+            .method_get_mut => return .mutable,
+            .ident => if (ctx.locals.get(arena.exprData(value))) |local| {
+                if (local.ref != .none) return local.ref;
+            },
+            else => {},
+        }
+        return switch (t) {
+            .component, .resource, .builtin_resource => .read_only,
+            else => .none,
+        };
     }
 
     /// Check a method/associated-fn call's argument count + types against the
     /// resolved `method` and return its declared return type.
     /// `self` is not part of the argument list (it is the receiver).
-    fn checkMethodArgs(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, method: ast_mod.FnDecl, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    fn checkMethodArgs(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, m: FnRef, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const method = m.decl;
         // Function coloring (§9.3): calling an `async method` from a
         // non-async context is E0901 (a legal call is via `await` in an async
         // context, which reaches here with `current_is_async` true).
@@ -7862,20 +10388,20 @@ pub const TypeChecker = struct {
             // E0905 (mirror of the free-fn site, §9.2 revision 2).
             try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async` method '{s}' — consume the async effect with `await` (inside spawn/branch/race/sync bodies too: the constructs relocate the await into a child task, they do not replace it)", .{self.arena.strings.slice(mc.method_name)});
         }
-        const ret: ResolvedType = if (method.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(method.return_type);
+        const ret: ResolvedType = if (method.return_type.isNone()) ResolvedType.unknown else self.typeIn(m.arena, method.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
         defer pnames.deinit(self.gpa);
-        try self.fnParamNames(method.params_start, method.params_len, &pnames);
+        try self.fnParamNames(m, &pnames);
         if (!try self.checkCallBinding(id, mc.args_start, mc.args_len, mc.names_start, pnames.items, "method", mc.method_name)) {
             return ret;
         }
         var i: u32 = 0;
         while (i < method.params_len) : (i += 1) {
-            const p = self.arena.fn_params.items[method.params_start + i];
-            const ptype = self.namedTypeToResolved(p.type_node);
-            const arg = self.arena.callArgForParam(mc.args_start, mc.args_len, mc.names_start, i, p.name) orelse continue;
-            const arg_t = try self.synthExprE(arg, ctx_opt);
-            if (ptype == .builtin and arg_t == .builtin and !self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
+            const p = m.arena.fn_params.items[method.params_start + i];
+            const ptype = self.typeIn(m.arena, p.type_node);
+            const arg = self.arena.callArgForParam(mc.args_start, mc.args_len, mc.names_start, i, pnames.items[i]) orelse continue;
+            const arg_t = try self.checkExpr(arg, declaredSlot(ptype), ctx_opt);
+            if (!try self.valueFits(ptype, arg, arg_t)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of method '{s}'", .{self.arena.strings.slice(mc.method_name)});
             }
         }
@@ -7885,36 +10411,45 @@ pub const TypeChecker = struct {
     /// Type an index / slice access. A range index
     /// (`arr[0..3]`) yields a dynamic-array slice of the element type; a scalar
     /// index (`arr[i]`) yields the element type. The index must be an integer.
-    fn synthIndex(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    /// An element read, or the element an assignment writes: `m[k]` reads
+    /// `V?` and is written `V`, and a compound operator does not write it.
+    fn synthIndex(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx, mode: enum { read, write, compound }) TypeError!ResolvedType {
         const ix = self.arena.index_exprs.items[data];
         const recv_t = try self.synthExprE(ix.receiver, ctx_opt);
         if (self.arena.exprKind(ix.index) == .range) {
             _ = try self.synthExprE(ix.index, ctx_opt); // type-check the bounds
-            const elem = recv_t.elementType() orelse {
+            if (!isArray(recv_t)) {
                 if (recv_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "cannot slice a non-array value", .{});
                 return ResolvedType.unknown;
-            };
-            return .{ .array_dyn = elem };
+            }
+            return .{ .array_dyn = arrayElem(recv_t) };
         }
-        const idx_t = try self.synthExprE(ix.index, ctx_opt);
+        const idx_t = if (recv_t == .map_t) try self.checkExpr(ix.index, declaredSlot(recv_t.map_t.key.*), ctx_opt) else try self.synthExprE(ix.index, ctx_opt);
         switch (recv_t) {
             .array_fixed => |info| {
-                if (idx_t == .builtin and !idx_t.builtin.isInteger()) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
-                return .{ .builtin = info.elem };
+                if (!builtinWhere(idx_t, BuiltinType.isInteger)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
+                return info.elem.*;
             },
             .array_dyn => |elem| {
-                if (idx_t == .builtin and !idx_t.builtin.isInteger()) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
-                return .{ .builtin = elem };
+                if (!builtinWhere(idx_t, BuiltinType.isInteger)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
+                return elem.*;
             },
             .map_t => |mi| {
                 // `m[k] -> V?` (stdlib §14.2/§14.3):
                 // the optional-returning accessor unlocked by the Optional
                 // ops — lifts the earlier rejection. The key must fit the
                 // map's key type.
-                if (idx_t == .builtin and !self.literalTypeFits(mi.key, ix.index, idx_t.builtin)) {
+                if (!try self.valueFits(mi.key.*, ix.index, idx_t)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "map index key type does not match the map key type", .{});
                 }
-                return .{ .optional = mi.value };
+                return switch (mode) {
+                    .read => .{ .optional = mi.value },
+                    .write => mi.value.*,
+                    .compound => blk: {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "a map entry reads as an optional: a compound operator does not write it (write `m[k] = (m[k] ?? d) op v`)", .{});
+                        break :blk .unknown;
+                    },
+                };
             },
             .unknown => return ResolvedType.unknown,
             else => {
@@ -7928,11 +10463,12 @@ pub const TypeChecker = struct {
     /// §line 328 + §12.4). The scrutinee type gates
     /// literal-pattern compatibility; all arm bodies must unify to one
     /// result type; the arm set must be exhaustive (E1230 otherwise).
-    fn synthMatch(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    fn synthMatch(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx, expected: ResolvedType) TypeError!ResolvedType {
         const m = self.arena.match_exprs.items[data];
         const scrut_t = try self.synthExprE(m.scrutinee, ctx_opt);
 
-        var result_t: ?ResolvedType = null;
+        var arms: std.ArrayListUnmanaged(Branch) = .empty;
+        defer arms.deinit(self.gpa);
         var has_catch_all = false;
         var saw_true = false;
         var saw_false = false;
@@ -7941,35 +10477,31 @@ pub const TypeChecker = struct {
 
         // Enum scrutinee: track covered variants for exhaustiveness (E1230,
         // `etch-resolver-types.md §12.4` — all variants ⇒ exhaustive).
-        const enum_name: ?StringId = if (scrut_t == .enum_t) scrut_t.enum_t else null;
+        const enum_name: ?DeclRef = if (scrut_t == .enum_t) scrut_t.enum_t else null;
         var covered: std.ArrayListUnmanaged(bool) = .empty;
         defer covered.deinit(self.gpa);
-        if (enum_name) |en| {
-            if (self.enumDecl(en)) |d| try covered.appendNTimes(self.gpa, false, d.variants_len);
-        }
+        if (enum_name) |en| try covered.appendNTimes(self.gpa, false, enumOf(en).decl.variants_len);
 
         var i: u32 = 0;
         while (i < m.arms_len) : (i += 1) {
             const arm = self.arena.match_arms.items[m.arms_start + i];
+            // A pattern's bindings share its arm body's scope.
+            if (ctx_opt) |ctx| try ctx.enter(self.gpa);
+            defer if (ctx_opt) |ctx| ctx.leave();
             switch (arm.pattern_kind) {
                 .wildcard => has_catch_all = true,
                 .binding => {
                     has_catch_all = true;
                     // A bare binding `n => …` binds the scrutinee value for its
-                    // arm body — the SAME flat per-rule local scoping as
-                    // `some(v) =>` above. The
-                    // interpreter (interp.zig match `.binding`) and codegen
-                    // (lower.zig `emitMatch` `.binding`) already bind it; the
-                    // type-checker must too, else the body's use of `n` is
-                    // `E0102 UnknownSymbol`.
+                    // arm body.
                     if (ctx_opt) |ctx| {
-                        try ctx.locals.put(self.gpa, arm.pattern_payload, .{ .type_ = scrut_t, .is_mut = false });
+                        try self.bindLocal(ctx, arm.pattern_payload, .{ .type_ = scrut_t, .is_mut = false }, self.arena.exprSpan(arm.body));
                     }
                 },
                 .literal => {
                     const lit: NodeId = @bitCast(arm.pattern_payload);
                     const lit_t = try self.synthExprE(lit, ctx_opt);
-                    if (scrut_t == .builtin and lit_t == .builtin and !self.literalTypeFits(scrut_t.builtin, lit, lit_t.builtin)) {
+                    if (!try self.valueCompares(scrut_t, lit, lit_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(lit), "match pattern literal type does not match the scrutinee type", .{});
                     }
                     if (scrut_t == .builtin and scrut_t.builtin == .bool_ and self.arena.exprKind(lit) == .bool_lit) {
@@ -7983,12 +10515,12 @@ pub const TypeChecker = struct {
                     if (enum_name) |en| {
                         // A qualified `Type.variant` pattern must name the
                         // scrutinee's enum.
-                        if (pat.type_name != 0 and pat.type_name != en) {
-                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "enum-variant pattern names enum '{s}' but the scrutinee is '{s}'", .{ self.arena.strings.slice(pat.type_name), self.arena.strings.slice(en) });
+                        if (pat.type_name != 0 and !self.namesDecl(pat.type_name, en)) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "enum-variant pattern names enum '{s}' but the scrutinee is '{s}'", .{ self.arena.strings.slice(pat.type_name), self.localSpelling(.{ .decl = en }) });
                         } else if (self.enumVariantIndex(en, pat.variant)) |vidx| {
                             if (vidx < covered.items.len) covered.items[vidx] = true;
                         } else {
-                            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(arm.body), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(en), self.arena.strings.slice(pat.variant) });
+                            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(arm.body), "enum '{s}' has no variant '{s}'", .{ declBytes(en), self.arena.strings.slice(pat.variant) });
                         }
                     } else if (scrut_t != .unknown) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "enum-variant pattern used on a non-enum scrutinee", .{});
@@ -7996,13 +10528,12 @@ pub const TypeChecker = struct {
                 },
                 // `some(v)` / `none` optional patterns (part1
                 // §7.6): the scrutinee must be an optional; `some(v)`
-                // binds the payload for its arm body (flat per-rule locals,
-                // the scoping policy).
+                // binds the payload for its arm body.
                 .optional_some => {
                     if (scrut_t == .optional) {
                         saw_some = true;
                         if (ctx_opt) |ctx| {
-                            try ctx.locals.put(self.gpa, arm.pattern_payload, .{ .type_ = .{ .builtin = scrut_t.optional }, .is_mut = false });
+                            try self.bindLocal(ctx, arm.pattern_payload, .{ .type_ = scrut_t.optional.*, .is_mut = false }, self.arena.exprSpan(arm.body));
                         }
                     } else if (scrut_t != .unknown) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "some(...) pattern used on a non-optional scrutinee", .{});
@@ -8016,12 +10547,11 @@ pub const TypeChecker = struct {
                     }
                 },
             }
-            const body_t = try self.synthExprE(arm.body, ctx_opt);
-            if (result_t == null) {
-                result_t = body_t;
-            } else if (result_t.? == .builtin and body_t == .builtin and !ResolvedType.eql(result_t.?, body_t)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "match arms must all yield the same type", .{});
-            }
+            try arms.append(self.gpa, .{ .node = arm.body, .t = try self.synthBodyIn(arm.body, ctx_opt, expected), .span = self.arena.exprSpan(arm.body) });
+        }
+        const result_t = try self.joinBranches(arms.items);
+        for (arms.items) |b| {
+            if (!try self.branchFits(result_t, b, true)) try self.emit(.type_mismatch, .error_, b.span, "match arms must all yield the same type", .{});
         }
 
         if (!has_catch_all) {
@@ -8041,13 +10571,13 @@ pub const TypeChecker = struct {
             }
         }
 
-        return result_t orelse ResolvedType.unknown;
+        return result_t;
     }
 
     fn synthBinary(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const bin = self.arena.binary_exprs.items[data];
         const lhs_t = try self.synthExprE(bin.lhs, ctx_opt);
-        const rhs_t = try self.synthExprE(bin.rhs, ctx_opt);
+        const rhs_t = if (bin.op == .coalesce and lhs_t == .optional) try self.checkExpr(bin.rhs, declaredSlot(lhs_t.optional.*), ctx_opt) else try self.synthExprE(bin.rhs, ctx_opt);
         const span = self.arena.exprSpan(id);
 
         switch (bin.op) {
@@ -8074,20 +10604,18 @@ pub const TypeChecker = struct {
                 try self.emit(.type_mismatch, .error_, span, "arithmetic requires numeric primitive operands", .{});
                 return ResolvedType.unknown;
             },
-            .eq, .neq, .lt, .gt, .le, .ge => {
-                // String `Eq`/`Ord` (content equality, lexicographic order —
-                // stdlib §12.4) are NOT in the minimal subset: reject at
-                // type-check so neither backend sees one (fail loud here, not
-                // divergently at runtime / in generated Zig).
-                if ((lhs_t == .builtin and lhs_t.builtin == .string_) or (rhs_t == .builtin and rhs_t.builtin == .string_)) {
-                    try self.emit(.type_mismatch, .error_, span, "string comparison is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{});
-                    return ResolvedType.unknown;
-                }
-                if (lhs_t == .builtin and rhs_t == .builtin and lhs_t.builtin == rhs_t.builtin) {
+            .eq, .neq => return self.synthEquality(bin.lhs, bin.rhs, lhs_t, rhs_t, span),
+            .lt, .gt, .le, .ge => {
+                if (lhs_t == .builtin and rhs_t == .builtin and lhs_t.builtin == rhs_t.builtin and lhs_t.builtin.isOrd()) {
                     return .{ .builtin = .bool_ };
                 }
-                if (lhs_t == .unknown or rhs_t == .unknown) return ResolvedType.unknown;
-                try self.emit(.type_mismatch, .error_, span, "comparison requires matching primitive operands", .{});
+                // `none` is an optional and `.variant` an enum, neither ordered.
+                const literal = for ([_]NodeId{ bin.lhs, bin.rhs }) |operand| {
+                    const k = self.arena.exprKind(operand);
+                    if (k == .none_lit or k == .tag_path) break true;
+                } else false;
+                if (!literal and (lhs_t == .unknown or rhs_t == .unknown)) return ResolvedType.unknown;
+                try self.emit(.type_mismatch, .error_, span, "an ordering compares two values of one ordered type", .{});
                 return ResolvedType.unknown;
             },
             .logical_and, .logical_or => {
@@ -8104,16 +10632,64 @@ pub const TypeChecker = struct {
                 // the default must fit the payload type; the result is the
                 // unwrapped payload.
                 if (lhs_t == .optional) {
-                    if (rhs_t == .builtin and !self.literalTypeFits(lhs_t.optional, bin.rhs, rhs_t.builtin)) {
+                    if (!try self.valueFits(lhs_t.optional.*, bin.rhs, rhs_t)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(bin.rhs), "'??' default type does not match the optional payload type", .{});
                     }
-                    return .{ .builtin = lhs_t.optional };
+                    return lhs_t.optional.*;
                 }
                 if (lhs_t == .unknown) return rhs_t;
                 try self.emit(.type_mismatch, .error_, span, "'??' requires an optional left operand", .{});
                 return ResolvedType.unknown;
             },
         }
+    }
+
+    /// `==` and `!=` (`etch-resolver-types.md` §16.4): two values of one `Eq`
+    /// type, or `none` against an optional.
+    fn synthEquality(self: *TypeChecker, lhs: NodeId, rhs: NodeId, lhs_synth: ResolvedType, rhs_synth: ResolvedType, span: SourceSpan) TypeError!ResolvedType {
+        var lhs_t = lhs_synth;
+        var rhs_t = rhs_synth;
+        if (self.arena.isEnumShorthand(rhs) and lhs_t == .enum_t) {
+            rhs_t = try self.checkEnumShorthand(rhs, lhs_t.enum_t);
+        } else if (self.arena.isEnumShorthand(lhs) and rhs_t == .enum_t) {
+            lhs_t = try self.checkEnumShorthand(lhs, rhs_t.enum_t);
+        }
+        const lhs_none = self.arena.exprKind(lhs) == .none_lit;
+        const rhs_none = self.arena.exprKind(rhs) == .none_lit;
+        if (lhs_none and rhs_none) {
+            try self.emit(.ambiguous_type, .error_, span, "'none' against 'none' has no type to compare in", .{});
+            return ResolvedType.unknown;
+        }
+        if (lhs_none or rhs_none) {
+            const other = if (lhs_none) rhs_t else lhs_t;
+            if (other == .unknown) return ResolvedType.unknown;
+            if (other != .optional) {
+                try self.emit(.type_mismatch, .error_, span, "'none' compares only with an optional", .{});
+                return ResolvedType.unknown;
+            }
+        } else {
+            if (lhs_t == .unknown or rhs_t == .unknown) return ResolvedType.unknown;
+            if (!lhs_t.eql(rhs_t)) {
+                try self.emit(.type_mismatch, .error_, span, "an equality compares two values of one type", .{});
+                return ResolvedType.unknown;
+            }
+        }
+        if (!isEqType(if (lhs_none) rhs_t else lhs_t)) {
+            try self.emit(.type_mismatch, .error_, span, "this type has no equality", .{});
+            return ResolvedType.unknown;
+        }
+        return .{ .builtin = .bool_ };
+    }
+
+    /// Whether `t` is `Eq` (`etch-resolver-types.md` §16.4).
+    fn isEqType(t: ResolvedType) bool {
+        return switch (t) {
+            .builtin => |b| b.isEq(),
+            .optional => |p| isEqType(p.*),
+            .array_fixed => |info| isEqType(info.elem.*),
+            .enum_t => true,
+            else => false,
+        };
     }
 
     fn synthUnary(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
@@ -8137,7 +10713,7 @@ pub const TypeChecker = struct {
             },
             .force_unwrap => {
                 // `expr!` ≡ `expr.unwrap()` — panic if none (stdlib §16.2).
-                if (operand_t == .optional) return .{ .builtin = operand_t.optional };
+                if (operand_t == .optional) return operand_t.optional.*;
                 if (operand_t == .unknown) return ResolvedType.unknown;
                 try self.emit(.type_mismatch, .error_, span, "'!' force unwrap requires an optional operand", .{});
                 return ResolvedType.unknown;
@@ -8147,80 +10723,55 @@ pub const TypeChecker = struct {
 
     fn lookupFieldType(self: *TypeChecker, receiver_type: ResolvedType, field_name: StringId, span: SourceSpan) !ResolvedType {
         switch (receiver_type) {
-            .component => |name_id| {
-                const sym = self.symbols.get(name_id) orelse return ResolvedType.unknown;
-                const decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
-                var i: u32 = 0;
-                while (i < decl.fields_len) : (i += 1) {
-                    const f = self.arena.fields.items[decl.fields_start + i];
-                    if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
-                }
-                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on component '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
+            .component => |ref| {
+                const c = componentOf(ref);
+                if (self.fieldTypeIn(c.arena, c.decl.fields_start, c.decl.fields_len, field_name)) |t| return t;
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on component '{s}'", .{ self.arena.strings.slice(field_name), declBytes(ref) });
                 return ResolvedType.unknown;
             },
-            .resource => |name_id| {
-                // Builtin engine resource: fields resolve
-                // against the `builtin_resources` descriptor table (there is
-                // no AST declaration to consult).
-                if (builtinResourceByName(self.arena.strings.slice(name_id))) |br| {
-                    const fname = self.arena.strings.slice(field_name);
-                    for (br.fields) |f| {
-                        if (std.mem.eql(u8, fname, f.name)) return .{ .builtin = f.type_ };
-                    }
-                    try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on builtin resource '{s}'", .{ fname, br.name });
+            .builtin_resource => |br| {
+                const fname = self.arena.strings.slice(field_name);
+                for (br.fields) |f| {
+                    if (std.mem.eql(u8, fname, f.name)) return .{ .builtin = f.type_ };
+                }
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on builtin resource '{s}'", .{ fname, br.name });
+                return ResolvedType.unknown;
+            },
+            .resource => |ref| {
+                const r = resourceOf(ref);
+                if (self.fieldTypeIn(r.arena, r.decl.fields_start, r.decl.fields_len, field_name)) |t| return t;
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on resource '{s}'", .{ self.arena.strings.slice(field_name), declBytes(ref) });
+                return ResolvedType.unknown;
+            },
+            .struct_t => |ref| {
+                const target = structOf(ref);
+                var i: u32 = 0;
+                while (i < target.decl.fields_len) : (i += 1) {
+                    const f = target.arena.fields.items[target.decl.fields_start + i];
+                    if (self.sameName(target.arena, f.name, field_name)) return self.typeIn(target.arena, f.type_node);
+                }
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on struct '{s}'", .{ self.arena.strings.slice(field_name), declBytes(ref) });
+                return ResolvedType.unknown;
+            },
+            .event_t => |ref| {
+                const ev = eventOf(ref);
+                if (self.fieldTypeIn(ev.arena, ev.decl.fields_start, ev.decl.fields_len, field_name)) |t| return t;
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on event '{s}'", .{ self.arena.strings.slice(field_name), declBytes(ref) });
+                return ResolvedType.unknown;
+            },
+            .optional => {
+                try self.emit(.type_mismatch, .error_, span, "a field of an optional's payload is read through '?.' or after unwrapping", .{});
+                return ResolvedType.unknown;
+            },
+            // `Vec3` and `Color` carry their components, which no table lists.
+            .builtin => |b| switch (b) {
+                .vec3, .color => return ResolvedType.unknown,
+                else => {
+                    try self.emit(.type_mismatch, .error_, span, "a value of type '{t}' has no field '{s}'", .{ b, self.arena.strings.slice(field_name) });
                     return ResolvedType.unknown;
-                }
-                const sym = self.symbols.get(name_id) orelse return ResolvedType.unknown;
-                const decl = self.arena.resource_decls.items[self.arena.itemData(sym.item_id)];
-                var i: u32 = 0;
-                while (i < decl.fields_len) : (i += 1) {
-                    const f = self.arena.fields.items[decl.fields_start + i];
-                    if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
-                }
-                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on resource '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
-                return ResolvedType.unknown;
+                },
             },
-            .struct_t => |name_id| {
-                // Field of a `struct` value — e.g. `self.x`
-                // inside a method or `v.x` on a struct local.
-                const sym = self.symbols.get(name_id) orelse return ResolvedType.unknown;
-                const decl = self.arena.struct_decls.items[self.arena.itemData(sym.item_id)];
-                var i: u32 = 0;
-                while (i < decl.fields_len) : (i += 1) {
-                    const f = self.arena.fields.items[decl.fields_start + i];
-                    if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
-                }
-                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on struct '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
-                return ResolvedType.unknown;
-            },
-            .event_t => |name_id| {
-                // Field of the implicit `event` binding inside an `@on_event(T)`
-                // observer — e.g. `event.amount`. An event is a POD
-                // struct of fields, resolved against its declaration.
-                if (self.symbols.get(name_id)) |sym| {
-                    const decl = self.arena.event_decls.items[self.arena.itemData(sym.item_id)];
-                    var i: u32 = 0;
-                    while (i < decl.fields_len) : (i += 1) {
-                        const f = self.arena.fields.items[decl.fields_start + i];
-                        if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
-                    }
-                } else if (self.declaredEvent(name_id)) |fe| {
-                    // Cross-arena field lookup, BY BYTES on both the field name
-                    // and the type — the discipline that holds for
-                    // `checkComponentInstance`, and bounded the same way:
-                    // builtins resolve, a named foreign type yields `unknown`.
-                    const want = self.arena.strings.slice(field_name);
-                    var i: u32 = 0;
-                    while (i < fe.decl.fields_len) : (i += 1) {
-                        const f = fe.arena.fields.items[fe.decl.fields_start + i];
-                        if (!std.mem.eql(u8, fe.arena.strings.slice(f.name), want)) continue;
-                        return self.foreignFieldType(fe.arena, f.type_node);
-                    }
-                }
-                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on event '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
-                return ResolvedType.unknown;
-            },
-            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .optional, .test_world, .unknown => return ResolvedType.unknown,
+            .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .test_world, .unit, .unknown => return ResolvedType.unknown,
         }
     }
 
@@ -8239,6 +10790,15 @@ pub const TypeChecker = struct {
 
 // ─── Helpers reachable from tests ───────────────────────────────────────
 
+/// Whether the expression at `id` is `Set.new()`, the empty set.
+pub fn isEmptySetConstructor(arena: *const AstArena, id: NodeId) bool {
+    if (arena.exprKind(id) != .method_call) return false;
+    const mc = arena.method_calls.items[arena.exprData(id)];
+    return arena.exprKind(mc.receiver) == .path and
+        std.mem.eql(u8, arena.strings.slice(arena.exprData(mc.receiver)), "Set") and
+        std.mem.eql(u8, arena.strings.slice(mc.method_name), "new") and mc.args_len == 0;
+}
+
 /// Return `true` if the expression at `id` can be folded to a value
 /// at type-check time (literals + arithmetic/comparison/logic on
 /// const-evaluable operands). Drives the `component` default-value
@@ -8246,7 +10806,8 @@ pub const TypeChecker = struct {
 pub fn isConstEvaluable(arena: *const AstArena, id: NodeId) bool {
     const kind = arena.exprKind(id);
     return switch (kind) {
-        .int_lit, .float_lit, .bool_lit, .string_lit, .tag_path => true,
+        .int_lit, .float_lit, .bool_lit, .string_lit, .tag_path, .none_lit => true,
+        .some_lit => isConstEvaluable(arena, @bitCast(arena.exprData(id))),
         .binary => blk: {
             const bin = arena.binary_exprs.items[arena.exprData(id)];
             // Arithmetic / comparison / logic on const-evaluable args is OK.
@@ -8262,27 +10823,6 @@ pub fn isConstEvaluable(arena: *const AstArena, id: NodeId) bool {
         },
         else => false,
     };
-}
-
-fn isAssignTargetReachable(arena: *const AstArena, ctx: *TypeChecker.RuleCtx, id: NodeId) bool {
-    var cur = id;
-    while (true) {
-        const k = arena.exprKind(cur);
-        switch (k) {
-            .field_access => {
-                const fa = arena.field_accesses.items[arena.exprData(cur)];
-                cur = fa.receiver;
-            },
-            .method_get_mut => return true,
-            .method_get => return false,
-            .ident => {
-                const name_id = arena.exprData(cur);
-                if (ctx.locals.get(name_id)) |local| return local.is_mut;
-                return false;
-            },
-            else => return false,
-        }
-    }
 }
 
 const parser_mod = @import("parser.zig");
@@ -8583,6 +11123,244 @@ test "prefab E1793/E1794/E1795: component type + field-name + field-type checks"
     );
     defer r3.deinit(gpa);
     try expectAnyCode(r3.diagnostics.items, .prefab_component_field_type_invalid);
+}
+
+const hook_base =
+    \\component Health { current: float = 1.0, max: float = 1.0 }
+    \\component Weapon { damage: float = 1.0 }
+    \\component Mana { v: float = 0.0 }
+    \\prefab "Base" { entity "r" { Health {} } }
+    \\
+;
+
+/// Check `hook_base ++ src`, requiring the source to parse clean.
+fn checkHookSource(gpa: std.mem.Allocator, src: []const u8) !CheckOutcome {
+    var r = try parseAndCheck(gpa, src);
+    errdefer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    return r;
+}
+
+test "a hook reaching a component outside requires and its own is E1210" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { entity.get_mut(Mana).v += 1.0 }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .unknown_component_in_when);
+}
+
+test "a hook reaching its requires and its own components is clean" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { entity.get_mut(Health).max += entity.get(Weapon).damage }
+        \\  on_detach { entity.get_mut(Health).max -= entity.get(Weapon).damage }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+}
+
+test "a requires naming no component is E1793" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Ghost {
+        \\  entity "m" { Weapon {} }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .prefab_component_type_unknown);
+}
+
+test "a return in a hook is E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { return }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .illegal_statement_in_extension_hook);
+}
+
+test "a throw outside a try in a hook is E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { throw Error { message: "boom", code: .io_fail } }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .illegal_statement_in_extension_hook, "throw"));
+}
+
+test "a throw in a catch body of a hook is E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach {
+        \\    try { entity.get_mut(Health).max += 1.0 } catch err { throw err }
+        \\  }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .illegal_statement_in_extension_hook, "throw"));
+}
+
+test "a throw inside a try in a hook is not E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach {
+        \\    try { throw Error { message: "boom", code: .io_fail } } catch err { entity.get_mut(Health).max += 1.0 }
+        \\  }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectNoCode(r.diagnostics.items, .illegal_statement_in_extension_hook);
+}
+
+test "a timer in a hook is E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { after(1.0s) { } }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .illegal_statement_in_extension_hook, "timer"));
+}
+
+test "a bound timer in a hook is E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let t = every(1.0s) { } }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .illegal_statement_in_extension_hook, "timer"));
+}
+
+test "a hook on an of prefab is E1799" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Variant" of "Base" {
+        \\  entity "r" { Health {} }
+        \\  on_attach { entity.get_mut(Health).max += 1.0 }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .prefab_hook_not_allowed, "extends"));
+}
+
+test "a requires on a standalone prefab is E1799" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Loner" requires Health {
+        \\  entity "r" { Health {} }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .prefab_hook_not_allowed, "extends"));
+}
+
+test "an await in a hook is E0901" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { await wait(1.0s) }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .async_call_in_non_async_context);
+}
+
+test "a hook emitting an undeclared event is E0102" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { emit Undeclared {} }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .undefined_symbol);
+}
+
+test "a hook calling a throws fn outside a try is E0902" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\fn risky(n: int) throws -> int { return n }
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let v = risky(1) }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .unhandled_throws_call);
+}
+
+test "a hook reading a user resource is E1213" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\resource Settings { v: int = 0 }
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let v = get(Settings).v }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .resource_expected_in_when);
+}
+
+test "a hook reading an engine resource is clean" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let t = get(GameTime).dt }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+}
+
+test "a hook literal out of range is refused at the source" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let big = 99999999999999999999 }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .type_mismatch);
+}
+
+test "on_detach does not see a let of on_attach" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let x = 1 }
+        \\  on_detach { let y = x }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .undefined_symbol);
 }
 
 test "type-checker emits E0102 on field referencing unknown type" {
@@ -9775,8 +12553,7 @@ test "closure body cannot mutate a capture, E0221" {
     const gpa = std.testing.allocator;
 
     // Mutating a captured binding inside the body → E0221, even though the
-    // source binding is `let mut` (resolver-types §8.2: captures are value
-    // snapshots; mutation through a closure is forbidden).
+    // source binding is `let mut` (resolver-types §8.2).
     var mutate = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\rule r(entity: Entity)
@@ -10715,7 +13492,7 @@ test "type-checker rejects misused Optional ops" {
     defer partial.deinit(gpa);
     try expectAnyCode(partial.diagnostics.items, .non_exhaustive_match);
 
-    // `?.field` is out of the subset (scalar payloads have no fields).
+    // `?.field` reads a field of the payload, and a string has none.
     var chain_field = try parseAndCheck(gpa,
         \\rule r(entity: Entity) {
         \\  let s: string? = none
@@ -10869,10 +13646,6 @@ test "type-checker rejects the out-of-subset Set surface" {
 test "anonymous struct literal resolves in check mode, rejected without an expected type" {
     const gpa = std.testing.allocator;
 
-    // The two wired contexts — let annotation and typed field value (the
-    // propagation extended to the whole literal) — plus the enum
-    // shorthand composing INSIDE an anonymous literal, and a struct-typed
-    // struct field (part1 §5.5 nested POD structs) carrying a nested anon.
     var ok = try parseAndCheck(gpa,
         \\enum Grade { low, high }
         \\struct Pt { x: int y: int }
@@ -10909,7 +13682,6 @@ test "anonymous struct literal resolves in check mode, rejected without an expec
     defer nonstruct.deinit(gpa);
     try expectAnyCode(nonstruct.diagnostics.items, .ambiguous_type);
 
-    // Fn-arg position is NOT a wired context (no differential requires it).
     var fnarg = try parseAndCheck(gpa,
         \\struct Pt { x: int y: int }
         \\fn takes(p: Pt) -> int { p.x }
@@ -10918,7 +13690,7 @@ test "anonymous struct literal resolves in check mode, rejected without an expec
         \\}
     );
     defer fnarg.deinit(gpa);
-    try expectAnyCode(fnarg.diagnostics.items, .ambiguous_type);
+    try std.testing.expectEqual(@as(usize, 0), fnarg.diagnostics.items.len);
 
     // An unknown field on the supplied struct type → the explicit-literal
     // field check, through the same point.
@@ -13113,16 +15885,8 @@ test "escape_false_refusal: the conservative rule also refuses two SAFE captures
     try expectAnyCode(literal.diagnostics.items, .rule_arena_value_escapes);
 }
 
-test "an optional whose payload is not a builtin is still refused" {
+test "an optional of a struct captured across a suspension is refused" {
     const gpa = std.testing.allocator;
-
-    // `.optional` with a NON-BUILTIN payload resolves to `.unknown` — the
-    // `.optional` arm and the `.some_lit` arm both defer, with no diagnostic —
-    // so before the conservative refusal this capture type-checked ENTIRELY
-    // CLEAN, zero diagnostics of any kind, while the optional store is reset at
-    // the rule-body boundary. The cost was a SIGABRT reachable from ordinary
-    // code, which is why an unresolved type is now refused rather than named an
-    // accepted adjacent case.
     var v = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\struct Spec { hp: int }
@@ -13138,4 +15902,2975 @@ test "an optional whose payload is not a builtin is still refused" {
     );
     defer v.deinit(gpa);
     try expectAnyCode(v.diagnostics.items, .rule_arena_value_escapes);
+}
+
+/// A one-rule program whose first `race` branch is `return <body>`, with
+/// `decls` inserted before the rule.
+fn raceReturnProgram(gpa: std.mem.Allocator, decls: []const u8, body: []const u8) ![:0]u8 {
+    return std.fmt.allocPrintSentinel(
+        gpa,
+        "component C {{ out: int = 0 }}\n{s}async rule r(entity: Entity)\n  when entity has C\n{{\n  race {{ {{ return {s} }} await wait(1.0s) }}\n}}\n",
+        .{ decls, body },
+        0,
+    );
+}
+
+test "a race branch returning a rule-arena value is refused, per form" {
+    const gpa = std.testing.allocator;
+
+    const forms = [_]struct { decls: []const u8, expr: []const u8 }{
+        .{ .decls = "", .expr = "[1, 2, 3]" }, // array literal
+        .{ .decls = "", .expr = "[1: 2]" }, // map literal
+        .{ .decls = "struct S { v: int = 0 }\n", .expr = "S { v: 1 }" }, // struct literal
+        .{ .decls = "", .expr = "Set.from([1, 2])" }, // set
+        .{ .decls = "", .expr = "some(41)" }, // optional
+        .{ .decls = "", .expr = "|x: int| x * 2" }, // closure
+        .{ .decls = "", .expr = "\"x\" + \"y\"" }, // string with NO local
+    };
+    for (forms) |f| {
+        const src = try raceReturnProgram(gpa, f.decls, f.expr);
+        defer gpa.free(src);
+        var c = try parseAndCheck(gpa, src);
+        defer c.deinit(gpa);
+        expectAnyCode(c.diagnostics.items, .rule_arena_value_escapes) catch |e| {
+            std.debug.print("form not refused: return {s}\n", .{f.expr});
+            return e;
+        };
+    }
+}
+
+test "a race branch returning a NON-arena value is still accepted — the green twin" {
+    const gpa = std.testing.allocator;
+
+    const forms = [_]struct { decls: []const u8, expr: []const u8 }{
+        .{ .decls = "", .expr = "1" },
+        .{ .decls = "", .expr = "2.5" },
+        .{ .decls = "", .expr = "true" },
+        .{ .decls = "", .expr = "1 + 2" },
+        .{ .decls = "", .expr = "entity" },
+        .{ .decls = "enum K { a, b }\n", .expr = ".b" },
+    };
+    for (forms) |f| {
+        const src = try raceReturnProgram(gpa, f.decls, f.expr);
+        defer gpa.free(src);
+        var c = try parseAndCheck(gpa, src);
+        defer c.deinit(gpa);
+        expectNoCode(c.diagnostics.items, .rule_arena_value_escapes) catch |e| {
+            std.debug.print("green twin wrongly refused: return {s}\n", .{f.expr});
+            return e;
+        };
+    }
+}
+
+test "a race branch returning a bare string literal is refused — the MEASURED COST" {
+    const gpa = std.testing.allocator;
+
+    // A bare `"x"` is an AST-pool handle, safe to park, and refused anyway:
+    // `isRuleArenaType` sees only the resolved type, the same `string` as an
+    // arena-backed concatenation.
+    const src = try raceReturnProgram(gpa, "", "\"x\"");
+    defer gpa.free(src);
+    var c = try parseAndCheck(gpa, src);
+    defer c.deinit(gpa);
+    try expectAnyCode(c.diagnostics.items, .rule_arena_value_escapes);
+}
+
+test "a scalar event filter is still accepted, and only a string can reach one" {
+    const gpa = std.testing.allocator;
+
+    // `captureEventFilter` copies only strings, and captured filters are kept
+    // across ticks: sound only while a string is the only rule-arena form that
+    // can reach an event filter.
+    const scalar =
+        \\component C { out: int = 0 }
+        \\enum K { a, b }
+        \\event E { n: int = 0, k: K = .a }
+        \\async rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  await global_event(E { n: 1, k: .b })
+        \\}
+    ;
+    var ok = try parseAndCheck(gpa, scalar);
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .rule_arena_value_escapes);
+
+    // An OPTIONAL event field is refused at the field type, so `some(…)` never
+    // reaches a captured filter.
+    var opt = try parseAndCheck(gpa,
+        \\event E { n: int? }
+    );
+    defer opt.deinit(gpa);
+    try expectAnyCode(opt.diagnostics.items, .undefined_symbol);
+
+    // A COLLECTION event field likewise — collections are resource-only.
+    var arr = try parseAndCheck(gpa,
+        \\event E { xs: int[] }
+    );
+    defer arr.deinit(gpa);
+    try expectAnyCode(arr.diagnostics.items, .undefined_symbol);
+}
+
+fn expectStructEventFieldRefused(gpa: std.mem.Allocator, source: []const u8) !void {
+    var outcome = try parseAndCheck(gpa, source);
+    defer outcome.deinit(gpa);
+    var refused: usize = 0;
+    for (outcome.diagnostics.items) |d| {
+        if (d.code == .undefined_symbol and std.mem.indexOf(u8, d.primary_message, "cannot be of struct type") != null) refused += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), refused);
+}
+
+test "an event field of struct type is refused at the declaration" {
+    const gpa = std.testing.allocator;
+    try expectStructEventFieldRefused(gpa,
+        \\struct P { v: int }
+        \\event E { p: P }
+    );
+    try expectStructEventFieldRefused(gpa,
+        \\event E { p: P }
+        \\struct P { v: int }
+    );
+    try expectStructEventFieldRefused(gpa,
+        \\struct P { v: int }
+        \\type Q = P
+        \\event E { q: Q }
+    );
+    try expectStructEventFieldRefused(gpa,
+        \\event E { e: Error }
+    );
+    var nested = try parseAndCheck(gpa,
+        \\struct P { v: int }
+        \\struct S { p: P }
+    );
+    defer nested.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), nested.diagnostics.items.len);
+}
+
+test "an emit value holding a nested struct literal is checked against the event" {
+    const gpa = std.testing.allocator;
+    var emitted = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\struct Payload { v: int }
+        \\event Hit { n: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  emit Hit { n: Payload { v: 5 }.v }
+        \\}
+    );
+    defer emitted.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), emitted.diagnostics.items.len);
+    var filtered = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\struct Payload { v: int }
+        \\event Hit { n: int = 0 }
+        \\async rule r(entity: Entity) when entity has C {
+        \\  await global_event(Hit { n: Payload { v: 5 }.v })
+        \\}
+    );
+    defer filtered.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), filtered.diagnostics.items.len);
+}
+
+fn countMessage(diagnostics: []const Diagnostic, code: DiagnosticCode, needle: []const u8) usize {
+    var n: usize = 0;
+    for (diagnostics) |d| {
+        if (d.code == code and std.mem.indexOf(u8, d.primary_message, needle) != null) n += 1;
+    }
+    return n;
+}
+
+test "entity.get of a struct is refused as not a component" {
+    const gpa = std.testing.allocator;
+    var outcome = try parseAndCheck(gpa,
+        \\struct A0 { x: int }
+        \\struct A1 { x: int }
+        \\struct S { v: int }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let x = entity.get(S).v
+        \\}
+    );
+    defer outcome.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(outcome.diagnostics.items, .undefined_symbol, "'S' is not a component"));
+}
+
+test "entity.get of an undeclared name is refused in an unrestricted body" {
+    const gpa = std.testing.allocator;
+    var outcome = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\test "t" {
+        \\  let w = test_world()
+        \\  let e = w.spawn_with([C { out: 1 }])
+        \\  let v = e.get(Nope).out
+        \\}
+    );
+    defer outcome.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(outcome.diagnostics.items, .undefined_symbol, "unknown component 'Nope'"));
+}
+
+test "a component or resource may not take a name the engine registers" {
+    const gpa = std.testing.allocator;
+
+    const forms = [_][]const u8{
+        "resource GameTime { dt: float = 0.0 }",
+        "resource GameTime { zz: int = 0 }",
+        "resource UnscaledTime { zz: int = 0 }",
+        "resource RealTime { zz: int = 0 }",
+        "component GameTime { zz: int = 0 }",
+        "component UnscaledTime { zz: int = 0 }",
+        "component RealTime { zz: int = 0 }",
+        "component TagSet { zz: int = 0 }",
+        "resource TagSet { zz: int = 0 }",
+    };
+    for (forms) |src| {
+        const z = try std.fmt.allocPrintSentinel(gpa, "{s}", .{src}, 0);
+        defer gpa.free(z);
+        var c = try parseAndCheck(gpa, z);
+        defer c.deinit(gpa);
+        expectAnyCode(c.diagnostics.items, .duplicate_symbol) catch |e| {
+            std.debug.print("reserved name not refused: {s}\n", .{src});
+            return e;
+        };
+    }
+}
+
+test "an ordinary component or resource name is untouched — the green twin" {
+    const gpa = std.testing.allocator;
+
+    const forms = [_][]const u8{
+        "resource Ordinary { zz: int = 0 }",
+        "component Ordinary { zz: int = 0 }",
+        "resource GameTimer { zz: int = 0 }",
+        "component TagSetup { zz: int = 0 }",
+        "resource Time { zz: int = 0 }",
+    };
+    for (forms) |src| {
+        const z = try std.fmt.allocPrintSentinel(gpa, "{s}", .{src}, 0);
+        defer gpa.free(z);
+        var c = try parseAndCheck(gpa, z);
+        defer c.deinit(gpa);
+        expectNoCode(c.diagnostics.items, .duplicate_symbol) catch |e| {
+            std.debug.print("green twin wrongly refused: {s}\n", .{src});
+            return e;
+        };
+    }
+}
+
+test "the reservation is DERIVED from the builtin table, not a second list" {
+    for (&builtin_resources) |*br| {
+        try std.testing.expect(isReservedEngineTypeName(br.name));
+    }
+    try std.testing.expect(isReservedEngineTypeName(tagset_component_name));
+    try std.testing.expect(!isReservedEngineTypeName("GameTimer"));
+    try std.testing.expect(!isReservedEngineTypeName(""));
+}
+
+const mistyped_base =
+    \\struct P { x: int = 0 }
+    \\struct R { y: int = 0 }
+    \\struct S { p: int = 0 }
+    \\resource Out { n: int = 0 }
+    \\event E { n: int = 0 }
+    \\fn id(x: int) -> int { x }
+    \\impl P { fn add(self, k: int) -> int { self.x + k } }
+    \\
+;
+
+const MistypedCase = struct { name: []const u8, src: []const u8, code: DiagnosticCode };
+
+const mistyped_cases = [_]MistypedCase{
+    .{ .name = "let, array as int", .src = "rule r() { let v: int = [1, 2, 3] }", .code = .type_mismatch },
+    .{ .name = "let, int as struct", .src = "rule r() { let v: P = 1 }", .code = .type_mismatch },
+    .{ .name = "let, one struct as another", .src = "rule r() { let v: P = R { y: 1 } }", .code = .type_mismatch },
+    .{ .name = "if branches", .src = "rule r() {\n  let c = true\n  let v = if c { 0 } else { P { x: 1 } }\n}", .code = .type_mismatch },
+    .{ .name = "loop broken inside an if", .src = "rule r() {\n  let c = true\n  let v: int = loop {\n    if c { break P { x: 1 } }\n  }\n}", .code = .type_mismatch },
+    .{ .name = "assignment to a local", .src = "rule r() {\n  let mut v = 0\n  v = P { x: 1 }\n}", .code = .type_mismatch },
+    .{ .name = "assignment to a field", .src = "rule r() when resource Out { get_mut(Out).n = P { x: 1 } }", .code = .type_mismatch },
+    .{ .name = "fn argument", .src = "rule r() { let v = id(P { x: 1 }) }", .code = .type_mismatch },
+    .{ .name = "fn body value", .src = "fn mk() -> int { P { x: 1 } }", .code = .return_type_mismatch },
+    .{ .name = "return statement", .src = "fn mk() -> int { return P { x: 1 } }", .code = .return_type_mismatch },
+    .{ .name = "method argument", .src = "rule r() {\n  let p = P { x: 1 }\n  let v = p.add(P { x: 2 })\n}", .code = .type_mismatch },
+    .{ .name = "method body value", .src = "impl R { fn value(self) -> int { P { x: 1 } } }", .code = .return_type_mismatch },
+    .{ .name = "closure argument", .src = "rule r() {\n  let f = |k: int| k + 1\n  let v = f(P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "struct-literal field", .src = "rule r() { let s = S { p: P { x: 1 } } }", .code = .type_mismatch },
+    .{ .name = "emit field", .src = "rule r() { emit E { n: P { x: 1 } } }", .code = .type_mismatch },
+    .{ .name = "array push", .src = "rule r() {\n  let mut a: int[] = [1]\n  a.push(P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "map insert key", .src = "rule r() {\n  let mut m: [int: int] = [1: 2]\n  m.insert(P { x: 1 }, 3)\n}", .code = .type_mismatch },
+    .{ .name = "map insert value", .src = "rule r() {\n  let mut m: [int: int] = [1: 2]\n  m.insert(1, P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "set insert", .src = "rule r() {\n  let mut s = Set.from([1, 2])\n  s.insert(P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "set contains", .src = "rule r() {\n  let s = Set.from([1, 2])\n  let b = s.contains(P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "map index", .src = "rule r() {\n  let m = [1: 2]\n  let v = m[P { x: 1 }]\n}", .code = .type_mismatch },
+    .{ .name = "match literal against a struct", .src = "rule r() {\n  let p = P { x: 1 }\n  match p { 1 => { }, _ => { } }\n}", .code = .type_mismatch },
+    .{ .name = "coalesce default", .src = "rule r() {\n  let o: int? = some(1)\n  let v = o ?? P { x: 1 }\n}", .code = .type_mismatch },
+    .{ .name = "match arms", .src = "rule r() {\n  let c = 1\n  let v = match c { 0 => 1, _ => P { x: 1 } }\n}", .code = .type_mismatch },
+    .{ .name = "cast operand", .src = "rule r() {\n  let p = P { x: 1 }\n  let v = p as int\n}", .code = .type_mismatch },
+    .{ .name = "if condition", .src = "rule r() {\n  let c = P { x: 1 }\n  if c { let z = 1 }\n}", .code = .type_mismatch },
+    .{ .name = "while condition", .src = "rule r() {\n  let c = P { x: 1 }\n  while c { let z = 2 }\n}", .code = .type_mismatch },
+    .{ .name = "array index", .src = "rule r() {\n  let a = [10, 20, 30]\n  let v = a[P { x: 1 }]\n}", .code = .type_mismatch },
+    .{ .name = "map literal key", .src = "rule r() { let m = [P { x: 1 }: 2] }", .code = .bound_not_satisfied },
+    .{ .name = "concrete parameter of a generic fn", .src = "fn pick<T>(a: T, n: int) -> T { a }\nrule r() { let v = pick(1, P { x: 1 }) }", .code = .type_mismatch },
+    .{ .name = "assert_eq, int against an enum", .src = "enum Dir { up, down }\ntest \"t\" { assert_eq(1, Dir.up) }", .code = .type_mismatch },
+    .{ .name = "extension name", .src = "component C { n: int = 0 }\nrule r(entity: Entity) when entity has C { entity.activate_extension(P { x: 1 }) }", .code = .type_mismatch },
+    .{ .name = "tick count", .src = "test \"t\" {\n  let w = test_world()\n  w.tick(P { x: 1 })\n}", .code = .type_mismatch },
+    .{ .name = "let, array as optional", .src = "rule r() { let o: int? = [1, 2, 3] }", .code = .type_mismatch },
+    .{ .name = "let, map as array", .src = "rule r() { let a: int[] = [1: 2] }", .code = .type_mismatch },
+    .{ .name = "data entry field, struct as enum", .src = "enum Dir { up, down }\nstruct Item { d: Dir }\ndata Db: Item { a: { d: P { x: 1 } } }", .code = .entry_field_type_invalid },
+    .{ .name = "scene component field", .src = "component C { n: int = 0 }\nscene \"L\" { entity \"e\" { uuid: \"00000000-0000-0000-0000-000000000001\" C { n: P { x: 1 } } } }", .code = .scene_component_field_type_invalid },
+    .{ .name = "field default, int as struct", .src = "struct T { q: P = 1 }", .code = .type_mismatch },
+    .{ .name = "const, int as struct", .src = "const K: P = 1", .code = .type_mismatch },
+    .{ .name = "data entry field, int as struct", .src = "struct Item { q: P }\ndata Db: Item { a: { q: 1 } }", .code = .entry_field_type_invalid },
+};
+
+test "a composite where a builtin is declared, or the reverse, is refused at every gate" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (mistyped_cases) |c| {
+        const src = try std.mem.concat(gpa, u8, &.{ mistyped_base, c.src });
+        defer gpa.free(src);
+        var r = try parseAndCheck(gpa, src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (countMessage(r.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "well-typed values at the same gates are accepted" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa, mistyped_base ++
+        \\fn ident<T>(x: T) -> T { x }
+        \\fn mk() -> P { P { x: 1 } }
+        \\fn mk2() -> int { return 1 }
+        \\rule r() when resource Out {
+        \\  let a: int = 1
+        \\  let b: P = P { x: 1 }
+        \\  let q: P = .{ x: 2 }
+        \\  let mp = [1: P { x: 1 }]
+        \\  let c = true
+        \\  let d = if c { 0 } else { 1 }
+        \\  let mut e = 0
+        \\  e = 2
+        \\  get_mut(Out).n = 3
+        \\  let f = id(1)
+        \\  let g = b.add(1)
+        \\  let h = |k: int| k + 1
+        \\  let i = h(1)
+        \\  let s = S { p: 1 }
+        \\  emit E { n: 1 }
+        \\  let mut arr: int[] = [1, 2]
+        \\  arr.push(3)
+        \\  let mut m: [int: int] = [1: 2]
+        \\  m.insert(2, 3)
+        \\  let mv = m[1]
+        \\  let mut st = Set.from([1, 2])
+        \\  st.insert(3)
+        \\  let hit = st.contains(1)
+        \\  match b.x { 1 => { }, _ => { } }
+        \\  let o: int? = some(1)
+        \\  let o2: int? = none
+        \\  let co = o ?? 2
+        \\  let gp = ident(P { x: 1 })
+        \\  let gi: int = ident(1)
+        \\  let vc: Vec3 = [1, 2, 3]
+        \\  let vo: Vec3? = none
+        \\  let vd = vo ?? [0, 0, 0]
+        \\  let pick = |k: int| {
+        \\    if k > 3 {
+        \\      return 40
+        \\    }
+        \\    k
+        \\  }
+        \\}
+        \\struct Range<T> {
+        \\  min: T
+        \\  max: T
+        \\}
+        \\fn keep<T>(tag: T) -> T {
+        \\  let rg = Range { min: 0, max: 10 }
+        \\  let digits = [1, 2]
+        \\  let at = digits[rg.min]
+        \\  tag
+        \\}
+        \\fn pick_or_none(x: int) -> int? {
+        \\  let pick = |k: int| {
+        \\    if k > 3 {
+        \\      return 40
+        \\    }
+        \\    k
+        \\  }
+        \\  some(pick(x))
+        \\}
+        \\component T3 { pos: Vec3 }
+        \\scene "Village" { entity "npc" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" T3 { pos: [11, 0, 6] } } }
+        \\struct Spawn { at: Vec3 }
+        \\data Points: Spawn { origin: { at: [0, 0, 0] } }
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    for (r.diagnostics.items) |d| std.debug.print("{s} {s}\n", .{ d.code.code(), d.primary_message });
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+}
+
+test "a bare literal match arm must have the earlier arm's builtin type" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa,
+        \\rule r() {
+        \\  let a: i32 = 1
+        \\  let c = true
+        \\  let m = match c { true => a, false => 2 }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .type_mismatch, "match arms must all yield the same type"));
+}
+
+test "two values breaking out of one loop must have one builtin type" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa,
+        \\rule r() {
+        \\  let a: i32 = 1
+        \\  let c = true
+        \\  loop {
+        \\    if c { break a }
+        \\    break 2
+        \\  }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .type_mismatch, "break values of a loop must all have the same type"));
+}
+
+test "a value breaking out of a while, an inner loop or to a label does not type the enclosing loop" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa,
+        \\struct P { x: int = 0 }
+        \\rule r() {
+        \\  let c = true
+        \\  let v: int = loop {
+        \\    while c { break P { x: 1 } }
+        \\    let w = loop { break P { x: 1 } }
+        \\    break 1
+        \\  }
+        \\  outer: loop {
+        \\    let lv: int = loop {
+        \\      if c { break outer 2.5 }
+        \\      break 1
+        \\    }
+        \\    break 0.5
+        \\  }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+}
+
+test "a break refused at a task boundary types no loop beyond it" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa,
+        \\struct P { x: int = 0 }
+        \\async rule r() {
+        \\  let v: int = loop {
+        \\    branch {
+        \\      break P { x: 1 }
+        \\    }
+        \\    break 1
+        \\  }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.items.len);
+    try std.testing.expectEqual(DiagnosticCode.control_flow_escapes_task_branch, r.diagnostics.items[0].code);
+}
+
+const ClosureJumpCase = struct { name: []const u8, src: []const u8 };
+
+const escaping_jumps = [_]ClosureJumpCase{
+    .{ .name = "break of a struct in a closure called in an int loop", .src =
+    \\struct P { x: int = 0 }
+    \\rule r() {
+    \\  let v: int = loop {
+    \\    let f = |k: int| {
+    \\      if k > 0 {
+    \\        break P { x: 1 }
+    \\      }
+    \\      k
+    \\    }
+    \\    let z = f(1)
+    \\    break 1
+    \\  }
+    \\}
+    },
+    .{ .name = "break in a closure called in a loop", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let v = loop {
+    \\    let f = |k: int| {
+    \\      if k > 0 {
+    \\        break 7
+    \\      }
+    \\      k
+    \\    }
+    \\    let z = f(1)
+    \\    break 1
+    \\  }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "continue in a closure called in a for", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let mut total = 0
+    \\  for i in 0..3 {
+    \\    let f = |k: int| {
+    \\      if k > 0 {
+    \\        continue
+    \\      }
+    \\      k
+    \\    }
+    \\    let z = f(i)
+    \\    total = total + 1
+    \\  }
+    \\  get_mut(Out).n = total
+    \\}
+    },
+    .{ .name = "labeled break to an enclosing loop", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let mut hits = 0
+    \\  outer: loop {
+    \\    let f = |k: int| {
+    \\      if k > 0 {
+    \\        break outer
+    \\      }
+    \\      k
+    \\    }
+    \\    let z = f(1)
+    \\    hits = hits + 1
+    \\    break
+    \\  }
+    \\  get_mut(Out).n = hits
+    \\}
+    },
+    .{ .name = "break in a closure never called", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let v = loop {
+    \\    let f = |k: int| {
+    \\      if k > 0 {
+    \\        break 7
+    \\      }
+    \\      k
+    \\    }
+    \\    break 1
+    \\  }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "break in a closure with no loop anywhere", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let f = |k: int| {
+    \\    if k > 0 {
+    \\      break
+    \\    }
+    \\    k
+    \\  }
+    \\  get_mut(Out).n = f(1)
+    \\}
+    },
+    .{ .name = "break in a closure called twice", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let f = |k: int| {
+    \\    if k > 0 {
+    \\      break
+    \\    }
+    \\    k
+    \\  }
+    \\  for i in 0..3 {
+    \\    let a = f(0)
+    \\    let b = f(0)
+    \\  }
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "break in a tick_until predicate", .src =
+    \\component A { v: int = 0 }
+    \\test "pred" {
+    \\  let w = test_world()
+    \\  let e = w.spawn_with([A { v: 1 }])
+    \\  let ok = tick_until(|| {
+    \\    if true {
+    \\      break
+    \\    }
+    \\    true
+    \\  }, 1.0s)
+    \\}
+    },
+    .{ .name = "break in a closure nested in a loop of another closure", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let outer_f = |k: int| {
+    \\    let w = loop {
+    \\      let inner = |j: int| {
+    \\        if j > 0 {
+    \\          break 9
+    \\        }
+    \\        j
+    \\      }
+    \\      let q = inner(1)
+    \\      break 2
+    \\    }
+    \\    w
+    \\  }
+    \\  get_mut(Out).n = outer_f(1)
+    \\}
+    },
+};
+
+const jumps_inside_closures = [_]ClosureJumpCase{
+    .{ .name = "loop inside the closure", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let f = |k: int| {
+    \\    let w = loop {
+    \\      if k > 0 {
+    \\        break 5
+    \\      }
+    \\      break 6
+    \\    }
+    \\    w
+    \\  }
+    \\  get_mut(Out).n = f(1)
+    \\}
+    },
+    .{ .name = "continue in a for inside the closure", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let f = |k: int| {
+    \\    for i in 0..3 {
+    \\      if i > k {
+    \\        continue
+    \\      }
+    \\    }
+    \\    k
+    \\  }
+    \\  get_mut(Out).n = f(1)
+    \\}
+    },
+    .{ .name = "label shadowed inside the closure", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let mut hits = 0
+    \\  outer: loop {
+    \\    let f = |k: int| {
+    \\      outer: loop {
+    \\        if k > 0 {
+    \\          break outer
+    \\        }
+    \\        break
+    \\      }
+    \\      k
+    \\    }
+    \\    hits = f(4)
+    \\    break
+    \\  }
+    \\  get_mut(Out).n = hits
+    \\}
+    },
+    .{ .name = "return from a closure in a sync branch", .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  sync {
+    \\    { let f = |k: int| {
+    \\        if k > 0 {
+    \\          return 3
+    \\        }
+    \\        k
+    \\      }
+    \\      let z = f(1)
+    \\      get_mut(Out).n = z }
+    \\  }
+    \\}
+    },
+};
+
+test "a break or continue that leaves its closure is refused once, called or not" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (escaping_jumps) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        const n = countMessage(r.diagnostics.items, .control_flow_escapes_closure, "");
+        if (n != 1 or r.diagnostics.items.len != 1) {
+            wrong += 1;
+            std.debug.print("{s}: {d} E0911 among {d} diagnostics\n", .{ c.name, n, r.diagnostics.items.len });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a jump or return that stays in its closure is accepted" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (jumps_inside_closures) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const UnitCase = struct { name: []const u8, code: DiagnosticCode, src: []const u8 };
+
+const unit_refused = [_]UnitCase{
+    .{ .name = "if let with no else", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let o: int? = some(1)
+    \\  let v: int = if let x = o { x }
+    \\}
+    },
+    .{ .name = "assert_approx", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let v: int = assert_approx(1.0, 1.0)
+    \\}
+    },
+    .{ .name = "assert_some", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let o: int? = some(1)
+    \\  let v: int = assert_some(o)
+    \\}
+    },
+    .{ .name = "loop left by a break with no value", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = loop { break }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "loop left by a valued and a valueless break", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = loop {
+    \\    if c { break }
+    \\    break 1
+    \\  }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "if with no else", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = if c { 1 }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "if with no else, condition false", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let c = false
+    \\  let v: int = if c { 1 }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "array push", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = arr.push(2)
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "empty block", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = { }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "block ending in a statement", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = { let q = 1 }
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "await wait", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\async rule r() when resource Out {
+    \\  let v: int = await wait(1.0s)
+    \\}
+    },
+    .{ .name = "TaskHandle cancel", .code = .type_mismatch, .src =
+    \\async rule r() {
+    \\  let h = spawn { }
+    \\  let v: int = h.cancel()
+    \\}
+    },
+    .{ .name = "TimerHandle cancel", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let t = after(1.0s) { }
+    \\  let v: int = t.cancel()
+    \\}
+    },
+    .{ .name = "test world tick", .code = .type_mismatch, .src =
+    \\test "t" {
+    \\  let w = test_world()
+    \\  let v: int = w.tick(1)
+    \\}
+    },
+    .{ .name = "test world emit", .code = .type_mismatch, .src =
+    \\event E { n: int = 0 }
+    \\test "t" {
+    \\  let w = test_world()
+    \\  let v: int = w.emit(E { n: 1 })
+    \\}
+    },
+    .{ .name = "activate_extension", .code = .type_mismatch, .src =
+    \\component C { v: int = 0 }
+    \\rule r(e: Entity) when e has C {
+    \\  let v: int = e.activate_extension("X")
+    \\}
+    },
+    .{ .name = "despawn", .code = .type_mismatch, .src =
+    \\component C { v: int = 0 }
+    \\rule r(e: Entity) when e has C {
+    \\  let v: int = e.despawn()
+    \\}
+    },
+    .{ .name = "add", .code = .type_mismatch, .src =
+    \\component C { v: int = 0 }
+    \\component D { v: int = 0 }
+    \\rule r(e: Entity) when e has C {
+    \\  let v: int = e.add(D { v: 1 })
+    \\}
+    },
+    .{ .name = "remove", .code = .type_mismatch, .src =
+    \\component C { v: int = 0 }
+    \\rule r(e: Entity) when e has C {
+    \\  let v: int = e.remove(C)
+    \\}
+    },
+    .{ .name = "assert_eq", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let v: int = assert_eq(1, 1)
+    \\}
+    },
+    .{ .name = "await a TaskHandle", .code = .type_mismatch, .src =
+    \\async rule r() {
+    \\  let h = spawn { }
+    \\  let v: int = await h
+    \\}
+    },
+    .{ .name = "fn body ending in an if with no else", .code = .return_type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(x: int) -> int { if x > 0 { return 1 } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+};
+
+const unit_accepted = [_]ClosureJumpCase{
+    .{ .name = "behavior action on a unit method", .src =
+    \\component C { v: int = 0 }
+    \\behavior B {
+    \\  selector {
+    \\    action: self.despawn()
+    \\  }
+    \\}
+    },
+    .{ .name = "if and else both return", .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(x: int) -> int { if x > 0 { return 1 } else { return 2 } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "else returns", .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(x: int) -> int { if x > 0 { 1 } else { return 2 } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "loop left by return only", .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(x: int) -> int { loop { if x > 0 { return 1 } } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "if and else as statements", .src =
+    \\resource Out { n: int = 0 }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut a = 0
+    \\  let mut b = 0
+    \\  if c { a = 1 } else { b = 2 }
+    \\  get_mut(Out).n = a + b
+    \\}
+    },
+    .{ .name = "match arm that returns", .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(x: int) -> int { match x { 1 => 5, _ => { return 0 } } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "else that panics", .src =
+    \\resource Out { n: int = 0 }
+    \\fn f(c: bool) -> int { if c { 1 } else { panic("x") } }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = 1
+    \\}
+    },
+    .{ .name = "call of a fn with no return type", .src =
+    \\resource Out { n: int = 0 }
+    \\fn nothing() { }
+    \\fn nothing_ret() { return }
+    \\rule r() when resource Out {
+    \\  let c = true
+    \\  let mut arr: int[] = [1]
+    \\  let v: int = nothing()
+    \\  get_mut(Out).n = v
+    \\}
+    },
+    .{ .name = "fn with no return type and a tail value", .src =
+    \\resource Out { n: int = 0 }
+    \\fn tail() { 5 }
+    \\rule r() when resource Out {
+    \\  let v: int = tail()
+    \\  get_mut(Out).n = v
+    \\}
+    },
+};
+
+test "a unit value where a type is declared is refused" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (unit_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (countMessage(r.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "a block that never completes, and a fn call, are not unit" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (unit_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const collection_refused = [_]UnitCase{
+    .{ .name = "int[] variable into string[]", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[] = [1]
+    \\  let a: string[] = b
+    \\}
+    },
+    .{ .name = "int[2] variable into int[3]", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[2] = [1, 2]
+    \\  let a: int[3] = b
+    \\}
+    },
+    .{ .name = "int[2] variable into string[]", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[2] = [1, 2]
+    \\  let a: string[] = b
+    \\}
+    },
+    .{ .name = "map variable of another key type", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let mut m: [int: int] = [1: 2]
+    \\  let n: [string: int] = m
+    \\}
+    },
+    .{ .name = "set variable of another element type", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let mut s = Set.from([1, 2])
+    \\  let t: Set<string> = s
+    \\}
+    },
+    .{ .name = "int? variable into bool?", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let o: int? = some(1)
+    \\  let p: bool? = o
+    \\}
+    },
+    .{ .name = "int[] variable as a string[] argument", .code = .type_mismatch, .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[] = [1]
+    \\  let z = take_s(b)
+    \\}
+    },
+    .{ .name = "literal of the wrong length", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let a: int[3] = [1, 2]
+    \\}
+    },
+    .{ .name = "int literal array as a string[] argument", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0, ys: string[] }
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() when resource Out {
+    \\  let z = take_s([1, 2])
+    \\}
+    },
+    .{ .name = "int literal array assigned to a string[] local", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0, ys: string[] }
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() when resource Out {
+    \\  let mut a: string[] = ["x"]
+    \\  a = [1, 2]
+    \\}
+    },
+    .{ .name = "int literal array assigned to a string[] field", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0, ys: string[] }
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() when resource Out {
+    \\  get_mut(Out).ys = [1]
+    \\}
+    },
+    .{ .name = "Set.from of int literals into Set<string>", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0, ys: string[] }
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() when resource Out {
+    \\  let t: Set<string> = Set.from([1, 2])
+    \\}
+    },
+    .{ .name = "int literal array as a string[] fn value", .code = .return_type_mismatch, .src =
+    \\fn give() -> string[] { [1, 2] }
+    \\rule r() { }
+    },
+    .{ .name = "some(1) into bool?", .code = .type_mismatch, .src =
+    \\rule r() {
+    \\  let o: bool? = some(1)
+    \\}
+    },
+};
+
+const collection_accepted = [_]ClosureJumpCase{
+    .{ .name = "f32[] from float literals", .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let a: f32[] = [1.0, 2.0]
+    \\}
+    },
+    .{ .name = "f32? from some(float literal)", .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let o: f32? = some(1.0)
+    \\}
+    },
+    .{ .name = "int[] variable into int[]", .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[] = [1]
+    \\  let a: int[] = b
+    \\}
+    },
+    .{ .name = "int[2] variable into int[]", .src =
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() {
+    \\  let b: int[2] = [1, 2]
+    \\  let a: int[] = b
+    \\}
+    },
+    .{ .name = "int[] from int literals", .src =
+    \\rule r() {
+    \\  let a: int[] = [1, 2]
+    \\}
+    },
+    .{ .name = "string[] argument from string literals", .src =
+    \\resource Out { n: int = 0, ys: string[] }
+    \\fn take_s(a: string[]) -> int { 0 }
+    \\rule r() when resource Out {
+    \\  let z = take_s(["a"])
+    \\}
+    },
+    .{ .name = "f32? from some(1.5)", .src =
+    \\rule r() {
+    \\  let o: f32? = some(1.5)
+    \\}
+    },
+    .{ .name = "Set<i32> from Set.from(int literals)", .src =
+    \\rule r() {
+    \\  let t: Set<i32> = Set.from([1, 2])
+    \\}
+    },
+    .{ .name = "[i32: f32] from a literal", .src =
+    \\rule r() {
+    \\  let m: [i32: f32] = [1: 2.0]
+    \\}
+    },
+    .{ .name = "i32[] from negative literals", .src =
+    \\rule r() {
+    \\  let a: i32[] = [-1, 2]
+    \\}
+    },
+    .{ .name = "i32[] argument from negative literals", .src =
+    \\fn take(a: i32[]) -> int { 0 }
+    \\rule r() {
+    \\  let z = take([-1, 2])
+    \\}
+    },
+    .{ .name = "[i32: f32] argument from a literal", .src =
+    \\fn take(m: [i32: f32]) -> int { 0 }
+    \\rule r() {
+    \\  let z = take([1: 2.0])
+    \\}
+    },
+    .{ .name = "f32? argument from some(float literal)", .src =
+    \\fn take(o: f32?) -> int { 0 }
+    \\rule r() {
+    \\  let z = take(some(1.0))
+    \\}
+    },
+    .{ .name = "Set<i32> argument from Set.from(int literals)", .src =
+    \\fn take(t: Set<i32>) -> int { 0 }
+    \\rule r() {
+    \\  let z = take(Set.from([1, 2]))
+    \\}
+    },
+};
+
+test "a collection or optional of another element type is refused at every gate" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (collection_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (countMessage(r.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "collection and optional literals fit element by element under the literal rule" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (collection_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a mistyped collection literal in a let is reported once per element" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa, "rule r() {\n  let a: string[] = [1, 2]\n}");
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 2), r.diagnostics.items.len);
+    try std.testing.expectEqual(@as(usize, 2), countMessage(r.diagnostics.items, .type_mismatch, "collection element type"));
+}
+
+const scene_resource_refused = [_]UnitCase{
+    .{ .name = "bool into an int field", .code = .resource_field_type_invalid, .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { players: true } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+    .{ .name = "array into an int field", .code = .resource_field_type_invalid, .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { players: [1, 2] } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+    .{ .name = "int literal into a float field", .code = .resource_field_type_invalid, .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { rate: 2 } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+    .{ .name = "int into a string field", .code = .resource_field_type_invalid, .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { title: 3 } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+    .{ .name = "unknown variant into an enum field", .code = .enum_variant_not_found, .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { tag: .z } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+};
+
+const scene_resource_accepted = [_]ClosureJumpCase{
+    .{ .name = "each field of its type", .src =
+    \\resource Mode { players: int = 4, rate: float = 1.0, title: string = "x", tag: Tag = .a }
+    \\enum Tag { a, b }
+    \\component C { v: int = 0 }
+    \\scene "S" {
+    \\  resources { Mode { players: 8, rate: 2.5, title: "wave", tag: .b } }
+    \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+    \\}
+    },
+};
+
+test "a scene resource field of the wrong type is refused" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (scene_resource_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (countMessage(r.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "a scene resource field of its type is accepted" {
+    const gpa = std.testing.allocator;
+    for (scene_resource_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+    }
+}
+
+const service_decl =
+    \\service svc {
+    \\  fn echo(n: int) -> int
+    \\  fn half(x: float) -> float
+    \\  fn pair(a: int, b: string) -> int
+    \\}
+;
+
+const ServiceArgCase = struct { name: []const u8, call: []const u8, code: DiagnosticCode = .type_mismatch };
+
+const service_args_refused = [_]ServiceArgCase{
+    .{ .name = "bool into an int parameter", .call = "let v = svc.echo(true)", .code = .type_mismatch },
+    .{ .name = "string into an int parameter", .call = "let v = svc.echo(\"x\")", .code = .type_mismatch },
+    .{ .name = "struct into an int parameter", .call = "let v = svc.echo(P { x: 1 })", .code = .type_mismatch },
+    .{ .name = "int literal into a float parameter", .call = "let v = svc.half(2)", .code = .type_mismatch },
+    .{ .name = "int into a string parameter", .call = "let v = svc.pair(1, 2)", .code = .type_mismatch },
+    .{ .name = "reordered labels of the wrong types", .call = "let v = svc.pair(b: 1, a: \"x\")", .code = .type_mismatch },
+    .{ .name = "a label the method does not declare", .call = "let v = svc.echo(zzz: 5)", .code = .arg_count_mismatch },
+    .{ .name = "a label already bound positionally", .call = "let v = svc.pair(1, a: 2)", .code = .arg_count_mismatch },
+};
+
+const service_args_accepted = [_]ServiceArgCase{
+    .{ .name = "int into an int parameter", .call = "let v = svc.echo(5)" },
+    .{ .name = "float into a float parameter", .call = "let v = svc.half(2.5)" },
+    .{ .name = "each argument of its type", .call = "let v = svc.pair(1, \"x\")" },
+    .{ .name = "reordered labels", .call = "let v = svc.pair(b: \"x\", a: 1)" },
+    .{ .name = "a label", .call = "let v = svc.echo(n: 5)" },
+};
+
+fn serviceCaller(gpa: std.mem.Allocator, call: []const u8) ![]u8 {
+    return std.mem.concat(gpa, u8, &.{ "struct P { x: int = 0 }\nrule r() {\n  ", call, "\n}\n" });
+}
+
+test "a service argument of the wrong type or label is refused" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (service_args_refused) |c| {
+        const src = try serviceCaller(gpa, c.call);
+        defer gpa.free(src);
+        var out = try checkServiceProject(gpa, service_decl, src);
+        defer out.deinit(gpa);
+        if (countMessage(out.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "a service argument of its parameter's type and label is accepted" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (service_args_accepted) |c| {
+        const src = try serviceCaller(gpa, c.call);
+        defer gpa.free(src);
+        var out = try checkServiceProject(gpa, service_decl, src);
+        defer out.deinit(gpa);
+        if (out.diagnostics.items.len != 0) {
+            wrong += 1;
+            for (out.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const const_refused = [_]UnitCase{
+    .{ .name = "an undefined uppercase name", .code = .undefined_symbol, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = NOPE
+    \\}
+    },
+    .{ .name = "an undefined lowercase name", .code = .undefined_symbol, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = nope
+    \\}
+    },
+    .{ .name = "a string const into an int", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  let s: int = label
+    \\}
+    },
+    .{ .name = "an int const into a bool", .code = .type_mismatch, .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  let s: bool = MAX
+    \\}
+    },
+    .{ .name = "an undefined uppercase receiver", .code = .undefined_symbol, .src =
+    \\rule r() {
+    \\  let v = Nope.x
+    \\}
+    },
+};
+
+const const_accepted = [_]ClosureJumpCase{
+    .{ .name = "a lowercase const", .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = limit
+    \\}
+    },
+    .{ .name = "an uppercase const", .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = MAX
+    \\}
+    },
+    .{ .name = "an uppercase const into its type", .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  let s: int = MAX
+    \\}
+    },
+    .{ .name = "two consts in arithmetic", .src =
+    \\resource Out { n: int = 0 }
+    \\const limit: int = 7
+    \\const MAX: int = 9
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  get_mut(Out).n = limit + MAX
+    \\}
+    },
+    .{ .name = "an enum const", .src =
+    \\resource Out { n: int = 0 }
+    \\enum Tag { a, b }
+    \\const START: Tag = .b
+    \\rule r() when resource Out {
+    \\  let t: Tag = START
+    \\  get_mut(Out).n = match t { .a => 1, .b => 3 }
+    \\}
+    },
+    .{ .name = "a string const", .src =
+    \\resource Out { n: int = 0 }
+    \\const label: string = "hi"
+    \\rule r() when resource Out {
+    \\  let s = label
+    \\  get_mut(Out).n = s.len()
+    \\}
+    },
+    .{ .name = "a builtin type as a receiver", .src =
+    \\rule r() {
+    \\  let v = Vec3.x
+    \\}
+    },
+    .{ .name = "a builtin resource as a receiver", .src =
+    \\rule r() {
+    \\  let v = GameTime.dt
+    \\}
+    },
+    .{ .name = "Entity as a receiver", .src =
+    \\rule r() {
+    \\  let v = Entity.null
+    \\}
+    },
+    .{ .name = "Error as a receiver", .src =
+    \\rule r() {
+    \\  let v = Error.message
+    \\}
+    },
+    .{ .name = "Set as a receiver", .src =
+    \\rule r() {
+    \\  let v = Set.x
+    \\}
+    },
+};
+
+test "a const read of the wrong type, or a name that names nothing, is refused" {
+    const gpa = std.testing.allocator;
+    var missed: usize = 0;
+    for (const_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (countMessage(r.diagnostics.items, c.code, "") == 0) {
+            missed += 1;
+            std.debug.print("not refused: {s}\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missed);
+}
+
+test "a const read by either spelling, and a builtin type name, are accepted" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (const_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            for (r.diagnostics.items) |d| std.debug.print("{s}: {s} {s}\n", .{ c.name, d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const scope_rebound = [_]UnitCase{
+    .{ .name = "a let rebinding a let of its scope", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let x = 1
+    \\  let x = 2
+    \\  x
+    \\}
+    },
+    .{ .name = "a let rebinding a param", .code = .duplicate_symbol, .src =
+    \\fn f(x: int) -> int {
+    \\  let x = 2
+    \\  x
+    \\}
+    },
+    .{ .name = "two params of one name", .code = .duplicate_symbol, .src =
+    \\fn f(x: int, x: int) -> int { x }
+    },
+    .{ .name = "a let rebinding the for variable in its body", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let mut s = 0
+    \\  for i in 0..3 {
+    \\    let i = 1
+    \\    s += i
+    \\  }
+    \\  s
+    \\}
+    },
+    .{ .name = "a let rebinding an if-let payload in its block", .code = .duplicate_symbol, .src =
+    \\fn f(o: int?) -> int {
+    \\  if let v = o {
+    \\    let v = 2
+    \\    return v
+    \\  }
+    \\  0
+    \\}
+    },
+    .{ .name = "a let rebinding a while-let payload in its body", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let mut a: int[] = [1]
+    \\  while let v = a.pop() {
+    \\    let v = 2
+    \\  }
+    \\  0
+    \\}
+    },
+    .{ .name = "a let rebinding a match binding in its arm", .code = .duplicate_symbol, .src =
+    \\fn f(o: int?) -> int {
+    \\  match o {
+    \\    some(v) => {
+    \\      let v = 2
+    \\      v
+    \\    },
+    \\    none => 0,
+    \\  }
+    \\}
+    },
+    .{ .name = "a let rebinding the catch binding", .code = .duplicate_symbol, .src =
+    \\rule r() {
+    \\  try {
+    \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+    \\  } catch err {
+    \\    let err = 1
+    \\  }
+    \\}
+    },
+    .{ .name = "a let rebinding a closure param in its body", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let g = |x: int| {
+    \\    let x = 2
+    \\    x
+    \\  }
+    \\  g(1)
+    \\}
+    },
+    .{ .name = "two spawn handles of one name", .code = .duplicate_symbol, .src =
+    \\async rule r() {
+    \\  let h = spawn { }
+    \\  let h = spawn { }
+    \\}
+    },
+    .{ .name = "two timer handles of one name", .code = .duplicate_symbol, .src =
+    \\rule r() {
+    \\  let t = after(1.0s) { }
+    \\  let t = after(1.0s) { }
+    \\}
+    },
+    .{ .name = "two params of one name in a closure never called", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let g = |x: int, x: int| x
+    \\  0
+    \\}
+    },
+    .{ .name = "two params of one name in a closure called twice", .code = .duplicate_symbol, .src =
+    \\fn f() -> int {
+    \\  let g = |x: int, x: int| x
+    \\  let a = g(1, 2)
+    \\  let b = g(3, 4)
+    \\  a + b
+    \\}
+    },
+    .{ .name = "two lets of one name in one behavior composite", .code = .duplicate_symbol, .src =
+    \\behavior B {
+    \\  sequence {
+    \\    action: let a = 1
+    \\    action: let a = 2
+    \\  }
+    \\}
+    },
+};
+
+test "a binding naming another of its own scope is refused" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (scope_rebound) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const scope_ended = [_]UnitCase{
+    .{ .name = "a block's let read after the block", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  if true { let y = 1 }
+    \\  y
+    \\}
+    },
+    .{ .name = "a for variable read after the loop", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  for i in 0..3 { }
+    \\  i
+    \\}
+    },
+    .{ .name = "a for body's let read after the loop", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  for i in 0..3 { let t = i }
+    \\  t
+    \\}
+    },
+    .{ .name = "a match binding read after the match", .code = .undefined_symbol, .src =
+    \\fn f(o: int?) -> int {
+    \\  let r = match o { some(v) => v, none => 0 }
+    \\  v
+    \\}
+    },
+    .{ .name = "a match binding read in a later arm", .code = .undefined_symbol, .src =
+    \\fn f(o: int?) -> int {
+    \\  match o { some(v) => v, none => v }
+    \\}
+    },
+    .{ .name = "an if-let payload read in the else", .code = .undefined_symbol, .src =
+    \\fn f(o: int?) -> int {
+    \\  if let v = o { v } else { v }
+    \\}
+    },
+    .{ .name = "a catch binding read after the catch", .code = .undefined_symbol, .src =
+    \\rule r() {
+    \\  try {
+    \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+    \\  } catch err { }
+    \\  let c = err
+    \\}
+    },
+    .{ .name = "a while-let payload read after the loop", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  let mut a: int[] = [1]
+    \\  while let v = a.pop() { }
+    \\  v
+    \\}
+    },
+    .{ .name = "a timer body's let read after it", .code = .undefined_symbol, .src =
+    \\rule r() {
+    \\  after(1.0s) { let t = 1 }
+    \\  let u = t
+    \\}
+    },
+    .{ .name = "a branch body's let read after it", .code = .undefined_symbol, .src =
+    \\async rule r() {
+    \\  branch { let a = 1 }
+    \\  let b = a
+    \\}
+    },
+    .{ .name = "a race branch's let read by a later branch", .code = .undefined_symbol, .src =
+    \\async rule r() {
+    \\  race {
+    \\    { let a = 1 }
+    \\    { let b = a }
+    \\  }
+    \\}
+    },
+    .{ .name = "a try body's let read after the try", .code = .undefined_symbol, .src =
+    \\rule r() {
+    \\  try {
+    \\    let t = 1
+    \\  } catch err { }
+    \\  let u = t
+    \\}
+    },
+    .{ .name = "a bare match binding read after the match", .code = .undefined_symbol, .src =
+    \\fn f(n: int) -> int {
+    \\  let r = match n { k => k }
+    \\  k
+    \\}
+    },
+    .{ .name = "a loop body's let read after the loop", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  let v = loop {
+    \\    let t = 1
+    \\    break t
+    \\  }
+    \\  t
+    \\}
+    },
+    .{ .name = "a bare race branch's let read by a later branch", .code = .undefined_symbol, .src =
+    \\async rule r() {
+    \\  race {
+    \\    let a = 1
+    \\    { let b = a }
+    \\  }
+    \\}
+    },
+    .{ .name = "a behavior composite's let read by a sibling composite", .code = .undefined_symbol, .src =
+    \\behavior B {
+    \\  selector {
+    \\    sequence {
+    \\      action: let a = 1
+    \\    }
+    \\    sequence {
+    \\      action: let b = a
+    \\    }
+    \\  }
+    \\}
+    },
+    .{ .name = "a closure body reading a name bound after the closure", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  let g = || y
+    \\  let y = 1
+    \\  g()
+    \\}
+    },
+    .{ .name = "a closure body reading a name bound only where it is called", .code = .undefined_symbol, .src =
+    \\fn f() -> int {
+    \\  let g = || k
+    \\  if true {
+    \\    let k = 1
+    \\    let n = g()
+    \\  }
+    \\  0
+    \\}
+    },
+};
+
+test "a binding read outside its scope is refused" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (scope_ended) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const scope_nested = [_]ClosureJumpCase{
+    .{ .name = "a nested block shadows, and the outer binding returns", .src =
+    \\fn f() -> int {
+    \\  let x = 1
+    \\  if true { let x = "s" }
+    \\  x
+    \\}
+    },
+    .{ .name = "a nested block shadows a param", .src =
+    \\fn f(x: int) -> int {
+    \\  if true { let x = true }
+    \\  x
+    \\}
+    },
+    .{ .name = "sibling blocks bind one name", .src =
+    \\fn f() -> int {
+    \\  if true { let a = 1 } else { let a = "s" }
+    \\  0
+    \\}
+    },
+    .{ .name = "a match binding shadows an outer name", .src =
+    \\fn f(o: int?) -> bool {
+    \\  let v = true
+    \\  let r = match o { some(v) => v, none => 0 }
+    \\  v
+    \\}
+    },
+    .{ .name = "an if-let payload shadows an outer name", .src =
+    \\fn f(o: int?) -> bool {
+    \\  let v = true
+    \\  if let v = o { }
+    \\  v
+    \\}
+    },
+    .{ .name = "a for variable shadows an outer name", .src =
+    \\fn f() -> bool {
+    \\  let i = true
+    \\  for i in 0..3 { }
+    \\  i
+    \\}
+    },
+    .{ .name = "a closure param shadows an outer name", .src =
+    \\fn f() -> bool {
+    \\  let x = true
+    \\  let g = |x: int| x + 1
+    \\  let n = g(2)
+    \\  x
+    \\}
+    },
+    .{ .name = "a closure body sees the scope it is written in", .src =
+    \\fn f() -> int {
+    \\  let x = 1
+    \\  let g = || x
+    \\  if true {
+    \\    let x = "s"
+    \\    let n: int = g()
+    \\  }
+    \\  0
+    \\}
+    },
+    .{ .name = "a closure argument is read before the closure's params bind", .src =
+    \\fn f() -> float {
+    \\  let x = 1.5
+    \\  let g = |x: int, y: float| y
+    \\  g(2, x)
+    \\}
+    },
+    .{ .name = "a closure argument is read where the closure is called, not written", .src =
+    \\fn f() -> float {
+    \\  let k = 1
+    \\  let g = |y: float| y
+    \\  if true {
+    \\    let k = 2.5
+    \\    let n: float = g(k)
+    \\  }
+    \\  0.0
+    \\}
+    },
+    .{ .name = "one literal makes closures of different scopes", .src =
+    \\fn f() -> int {
+    \\  let mk = |v| || v
+    \\  let a = mk(1)
+    \\  let b = mk(true)
+    \\  let x: int = a()
+    \\  x
+    \\}
+    },
+    .{ .name = "a closure made from a closure of the same literal", .src =
+    \\fn f() -> int {
+    \\  let mk = |h| || h()
+    \\  let a = mk(|| 0)
+    \\  let b = mk(a)
+    \\  b()
+    \\}
+    },
+    .{ .name = "a branch in a block shadowing an arena local holds none of it", .src =
+    \\async rule r() {
+    \\  let a = [1, 2]
+    \\  if true {
+    \\    let a = 1
+    \\    branch { await wait(1.0s) }
+    \\  }
+    \\}
+    },
+    .{ .name = "a branch body shadowing an inherited arena local holds none of it", .src =
+    \\async rule r() {
+    \\  let a = [1, 2]
+    \\  branch {
+    \\    let a = 1
+    \\    await wait(1.0s)
+    \\  }
+    \\}
+    },
+    .{ .name = "a closure written in a timer body sees the timer's own binding", .src =
+    \\rule r() {
+    \\  let a = [1]
+    \\  after(1.0s) {
+    \\    let a = [2]
+    \\    let g = || a
+    \\    let n = g().len()
+    \\  }
+    \\}
+    },
+    .{ .name = "a loop body binds its let on every iteration", .src =
+    \\fn f() -> int {
+    \\  let mut s = 0
+    \\  for i in 0..3 {
+    \\    let t = i
+    \\    s += t
+    \\  }
+    \\  s
+    \\}
+    },
+    .{ .name = "a timer body shadows a local it inherits", .src =
+    \\rule r() {
+    \\  let x = 1
+    \\  after(1.0s) { let x = true }
+    \\  let y: int = x
+    \\}
+    },
+    .{ .name = "a spawn handle is bound in the enclosing scope", .src =
+    \\async rule r() {
+    \\  let h = spawn { }
+    \\  await h
+    \\}
+    },
+    .{ .name = "a timer body's own binding shadowing an arena local is no capture", .src =
+    \\rule r() {
+    \\  let a = [1, 2]
+    \\  after(1.0s) {
+    \\    let a = [3]
+    \\    let n = a.len()
+    \\  }
+    \\}
+    },
+};
+
+const scope_captured = [_]UnitCase{
+    .{ .name = "a closure assigning a capture once its own shadow has ended", .code = .closure_cannot_mutate_capture, .src =
+    \\fn f() -> int {
+    \\  let mut t = 0
+    \\  let g = || {
+    \\    if true {
+    \\      let mut t = 1
+    \\      t = 2
+    \\    }
+    \\    t = 3
+    \\  }
+    \\  g()
+    \\  t
+    \\}
+    },
+    .{ .name = "a timer in a closure body capturing the enclosing timer's local", .code = .rule_arena_value_escapes, .src =
+    \\rule r() {
+    \\  after(1.0s) {
+    \\    let b = [1]
+    \\    let g = || {
+    \\      after(2.0s) { let c = b }
+    \\    }
+    \\    g()
+    \\  }
+    \\}
+    },
+    .{ .name = "an arena local both visible and shadowed across an await, reported once", .code = .rule_arena_value_escapes, .src =
+    \\async rule r() {
+    \\  let a = [1]
+    \\  for i in 0..1 {
+    \\    let a = [2]
+    \\    await wait(1.0s)
+    \\  }
+    \\}
+    },
+    .{ .name = "an arena local shadowed across an await", .code = .rule_arena_value_escapes, .src =
+    \\async rule r() {
+    \\  let a = [1, 2]
+    \\  for i in 0..1 {
+    \\    let a = 2
+    \\    await wait(1.0s)
+    \\  }
+    \\}
+    },
+};
+
+const PlaceCase = struct { name: []const u8, code: DiagnosticCode, needle: []const u8, src: []const u8 };
+
+const write_place_refused = [_]PlaceCase{
+    .{ .name = "a read-only resource ref written", .code = .type_mismatch, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  r.n = 1\n}" },
+    .{ .name = "a read-only resource ref written by a compound operator", .code = .type_mismatch, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  r.n += 1\n}" },
+    .{ .name = "a read-only resource ref's collection field replaced", .code = .type_mismatch, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  r.xs = [3]\n}" },
+    .{ .name = "a read-only resource ref's collection pushed", .code = .immutable_receiver_for_mut_self, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  r.xs.push(3)\n}" },
+    .{ .name = "a read-only resource ref's collection popped", .code = .immutable_receiver_for_mut_self, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  let p = r.xs.pop()\n}" },
+    .{ .name = "a read-only component ref written", .code = .type_mismatch, .needle = "read-only", .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let mut h = entity.get(H)\n  h.hp = 0\n}" },
+    .{ .name = "a mut self method through a read-only component ref", .code = .immutable_receiver_for_mut_self, .needle = "read-only", .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let mut h = entity.get(H)\n  h.hit()\n}" },
+    .{ .name = "a read-only builtin resource ref written", .code = .type_mismatch, .needle = "read-only", .src = "rule r() {\n  let mut t = get(GameTime)\n  t.time_scale = 0.5\n}" },
+    .{ .name = "a copy of a read-only ref written", .code = .type_mismatch, .needle = "read-only", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let r = get(R)\n  let mut r2 = r\n  r2.n = 1\n}" },
+    .{ .name = "a get_mut binding rebound to a read-only ref", .code = .type_mismatch, .needle = "rebound only", .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let h = entity.get_mut(H)\n  h = entity.get(H)\n  h.hp = 0\n}" },
+    .{ .name = "a mutable get_mut binding rebound to a read-only ref", .code = .type_mismatch, .needle = "rebound only", .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let mut h = entity.get_mut(H)\n  h = entity.get(H)\n}" },
+    .{ .name = "a field written through '?.'", .code = .type_mismatch, .needle = "'?.'", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut o: P? = some(P { x: 1 })\n  o?.x = 2\n}" },
+    .{ .name = "a field written through '?.' by a compound operator", .code = .type_mismatch, .needle = "'?.'", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut o: P? = some(P { x: 1 })\n  o?.x += 1\n}" },
+    .{ .name = "a nested field written through '?.'", .code = .type_mismatch, .needle = "'?.'", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut o: Q? = some(Q { p: P { x: 1 } })\n  o?.p.x = 2\n}" },
+    .{ .name = "a collection pushed through '?.'", .code = .immutable_receiver_for_mut_self, .needle = "'?.'", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut o: int[]? = some([1])\n  o?.push(2)\n}" },
+    .{ .name = "a mut self method through '?.'", .code = .immutable_receiver_for_mut_self, .needle = "'?.'", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut o: P? = some(P { x: 1 })\n  o?.bump()\n}" },
+    .{ .name = "a closure writing a captured struct's field", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = |v: int| { p.x = v }\n  f(2)\n}" },
+    .{ .name = "a closure pushing onto a captured collection", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut xs: int[] = [1]\n  let f = |v: int| { xs.push(v) }\n  f(2)\n}" },
+    .{ .name = "a closure calling a mut self method on a capture", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = || { p.bump() }\n  f()\n}" },
+    .{ .name = "a compound operator on a struct's string field", .code = .type_mismatch, .needle = "compound assignment on strings", .src = "struct S { name: string = \"a\" }\nrule r() {\n  let mut s = S { name: \"a\" }\n  s.name += \"b\"\n}" },
+    .{ .name = "a compound operator on a resource's string field", .code = .type_mismatch, .needle = "compound assignment on strings", .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  get_mut(R).name += \"x\"\n}" },
+};
+
+const write_place_accepted = [_]UnitCase{
+    .{ .name = "a copy of a resource collection field, pushed", .code = .type_mismatch, .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut xs = get(R).xs\n  xs.push(3)\n}" },
+    .{ .name = "a resource written through a get_mut binding", .code = .type_mismatch, .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let r = get_mut(R)\n  r.n = 1\n  r.xs.push(3)\n}" },
+    .{ .name = "a component written through a get_mut binding", .code = .type_mismatch, .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let h = entity.get_mut(H)\n  h.hp = 0\n  h.hit()\n}" },
+    .{ .name = "a read-only ref rebound to a read-only ref and read", .code = .type_mismatch, .src = "resource R { n: int = 0, xs: int[] = [1, 2], name: string = \"a\" }\nrule r() when resource R {\n  let mut r = get(R)\n  r = get(R)\n  let k = r.n\n}" },
+    .{ .name = "an unwrapped optional's copy written", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let o: P? = some(P { x: 1 })\n  let mut p = o!\n  p.x = 2\n}" },
+    .{ .name = "a closure writing through a captured get_mut ref", .code = .type_mismatch, .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let h = entity.get_mut(H)\n  let f = |v: int| { h.hp = v }\n  f(2)\n}" },
+    .{ .name = "a get_mut binding rebound to a get_mut", .code = .type_mismatch, .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let mut h = entity.get_mut(H)\n  h = entity.get_mut(H)\n  h.hp = 1\n}" },
+    .{ .name = "a copy of a get_mut binding written", .code = .type_mismatch, .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let h = entity.get_mut(H)\n  let h2 = h\n  h2.hp = 1\n}" },
+    .{ .name = "a get_mut binding without mut rebound to a get_mut", .code = .type_mismatch, .src = "component H { hp: int = 10 }\nimpl H {\n  fn hit(mut self) { self.hp -= 1 }\n}\nrule r(entity: Entity) when entity has H {\n  let h = entity.get_mut(H)\n  h = entity.get_mut(H)\n  h.hp = 1\n}" },
+    .{ .name = "a closure writing a copy it binds itself", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nstruct Q { p: P }\nrule r() {\n  let p = P { x: 1 }\n  let f = || {\n    let mut q = p\n    q.x = 2\n  }\n  f()\n}" },
+};
+
+test "a write is refused through a read-only ref, through '?.' and to a capture" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (write_place_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or countMessage(r.diagnostics.items, c.code, c.needle) != 1) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a write through a get_mut, a copy or a binding of the body is accepted" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (write_place_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const index_write_refused = [_]PlaceCase{
+    .{ .name = "an element of an immutable binding written", .code = .type_mismatch, .needle = "mutable binding", .src = "rule r() {\n  let a: int[] = [1]\n  a[0] = 2\n}" },
+    .{ .name = "an element of a set written", .code = .type_mismatch, .needle = "cannot index", .src = "rule r() {\n  let mut s = Set.from([1, 2])\n  s[0] = 3\n}" },
+    .{ .name = "a slice written", .code = .type_mismatch, .needle = "slice", .src = "rule r() {\n  let mut a: int[] = [1, 2]\n  a[0..1] = [5]\n}" },
+    .{ .name = "an element of a slice written", .code = .type_mismatch, .needle = "slice", .src = "rule r() {\n  let mut a: int[] = [1, 2]\n  a[0..1][0] = 5\n}" },
+    .{ .name = "a mut self method on an element of a slice", .code = .immutable_receiver_for_mut_self, .needle = "slice", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nrule r() {\n  let mut ps: P[] = [P { x: 1 }]\n  ps[0..1][0].bump()\n}" },
+    .{ .name = "a map entry written by a compound operator", .code = .type_mismatch, .needle = "map entry", .src = "rule r() {\n  let mut m: [int: int] = [1: 10]\n  m[1] += 5\n}" },
+    .{ .name = "a field of a map entry written", .code = .type_mismatch, .needle = "optional", .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nrule r() {\n  let mut m: [int: P] = [1: P { x: 1 }]\n  m[1].x = 5\n}" },
+    .{ .name = "a ref held in a collection written", .code = .type_mismatch, .needle = "read-only", .src = "component H { v: int = 0 }\nrule r(entity: Entity) when entity has H {\n  let mut hs = [entity.get_mut(H)]\n  hs[0].v = 5\n}" },
+    .{ .name = "a ref held in a collection written by a compound operator", .code = .type_mismatch, .needle = "read-only", .src = "component H { v: int = 0 }\nrule r(entity: Entity) when entity has H {\n  let mut hs = [entity.get_mut(H)]\n  hs[0].v += 1\n}" },
+    .{ .name = "a closure writing an element of a capture", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "rule r() {\n  let mut a: int[] = [1]\n  let f = |v: int| { a[0] = v }\n  f(2)\n}" },
+    .{ .name = "an element written through a read-only resource ref", .code = .type_mismatch, .needle = "read-only", .src = "resource R { xs: int[] = [1, 2] }\nrule r() when resource R {\n  let r = get(R)\n  r.xs[0] = 5\n}" },
+};
+
+const index_write_accepted = [_]UnitCase{
+    .{ .name = "an element of a fixed array written", .code = .type_mismatch, .src = "rule r() {\n  let mut f: int[3] = [1, 2, 3]\n  f[2] = 0\n  f[1] += 2\n}" },
+    .{ .name = "an element of a nested array written", .code = .type_mismatch, .src = "rule r() {\n  let mut g = [[1, 2], [3, 4]]\n  g[1][0] = 7\n}" },
+    .{ .name = "a map entry inserted by index", .code = .type_mismatch, .src = "rule r() {\n  let mut m: [int: int] = [1: 10]\n  m[1] = 11\n  m[2] = 20\n}" },
+    .{ .name = "an element of a resource collection written through get_mut", .code = .type_mismatch, .src = "resource R { xs: int[] = [1, 2] }\nrule r() when resource R {\n  get_mut(R).xs[0] = 5\n  let r = get_mut(R)\n  r.xs[1] += 6\n}" },
+    .{ .name = "a field and a mut self method of an element", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nimpl P {\n  fn bump(mut self) { self.x += 1 }\n}\nrule r() {\n  let mut ps: P[] = [P { x: 1 }]\n  ps[0].x = 2\n  ps[0].bump()\n}" },
+};
+
+test "an index write is refused through an immutable binding, a slice, a map entry or a held ref" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (index_write_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or countMessage(r.diagnostics.items, c.code, c.needle) != 1) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "an index write through a mutable place is accepted" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (index_write_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const fixed_key_accepted = [_]UnitCase{
+    .{ .name = "a map literal keyed by a fixed array", .code = .type_mismatch, .src = "rule r() {\n  let m = [[1, 2]: 10]\n}" },
+    .{ .name = "a map annotation keyed by a fixed array", .code = .type_mismatch, .src = "rule r() {\n  let m: [int[2]: int] = [:]\n}" },
+    .{ .name = "a set annotation of fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  let s: Set<bool[3]> = Set.new()\n}" },
+    .{ .name = "Set.from of fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  let s = Set.from([[1, 2], [3, 4]])\n}" },
+    .{ .name = "a fixed-array key inserted, indexed and contained", .code = .type_mismatch, .src = "rule r() {\n  let mut m: [int[2]: int] = [:]\n  m.insert([1, 2], 5)\n  m[[3, 4]] = 6\n  let v = m[[1, 2]] ?? 0\n  let mut s: Set<int[2]> = Set.new()\n  s.insert([1, 2])\n  let b = s.contains([1, 2])\n}" },
+    .{ .name = "a for over a map keyed by fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  for k, v in [[1, 2]: 10] {\n    let t = k[0] + v\n  }\n}" },
+    .{ .name = "a fn taking a map keyed by fixed arrays", .code = .type_mismatch, .src = "fn f(m: [int[2]: int]) -> Set<string[2]> {\n  Set.new()\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "a key of nested fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  let m = [[[1, 2], [3, 4]]: 1]\n}" },
+    .{ .name = "an optional fixed-array key", .code = .type_mismatch, .src = "rule r() {\n  let m: [int[2]?: int] = [:]\n}" },
+    .{ .name = "string and enum fixed-array keys", .code = .type_mismatch, .src = "enum Dir { north, south }\nrule r() {\n  let m = [[\"a\", \"b\"]: 1]\n  let n = [[Dir.north, Dir.south]: 1]\n}" },
+    .{ .name = "two fixed arrays compared", .code = .type_mismatch, .src = "rule r() {\n  let a = [1, 2]\n  let e = a == [1, 2]\n  let d = a != [2, 1]\n}" },
+    .{ .name = "two float arrays compared", .code = .type_mismatch, .src = "rule r() {\n  let e = [1.5] == [1.5]\n}" },
+    .{ .name = "an optional fixed array compared", .code = .type_mismatch, .src = "rule r() {\n  let o: int[2]? = some([1, 2])\n  let e = o == none\n  let f = o == some([1, 2])\n}" },
+    .{ .name = "assert_eq on fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  assert_eq([1, 2], [1, 2])\n  assert_neq([1, 2], [2, 1])\n}" },
+    .{ .name = "nested fixed arrays compared", .code = .type_mismatch, .src = "rule r() {\n  let e = [[1], [2]] == [[1], [2]]\n}" },
+    .{ .name = "a struct field of an optional fixed array compared", .code = .type_mismatch, .src = "struct S { o: int[2]? = none }\nrule r() {\n  let s = S { o: some([1, 2]) }\n  let e = s.o == some([1, 2])\n}" },
+    .{ .name = "a struct field of an optional map keyed by fixed arrays", .code = .type_mismatch, .src = "struct S { m: [int[2]: int]? = none }\nrule r() {\n  let x = 1\n}" },
+};
+
+const fixed_key_refused = [_]PlaceCase{
+    .{ .name = "a float fixed-array key", .code = .bound_not_satisfied, .needle = "Hash", .src = "rule r() {\n  let m: [float[2]: int] = [:]\n}" },
+    .{ .name = "Set.from of float arrays", .code = .bound_not_satisfied, .needle = "Hash", .src = "rule r() {\n  let s = Set.from([[1.5, 2.5]])\n}" },
+    .{ .name = "a struct fixed-array key", .code = .bound_not_satisfied, .needle = "Hash", .src = "struct P { x: int = 0 }\nrule r() {\n  let m = [[P { x: 1 }]: 1]\n}" },
+    .{ .name = "a dynamic-array key", .code = .bound_not_satisfied, .needle = "Hash", .src = "rule r() {\n  let m: [int[]: int] = [:]\n}" },
+    .{ .name = "keys of two lengths", .code = .bound_not_satisfied, .needle = "Hash", .src = "rule r() {\n  let m = [[1, 2]: 1, [1, 2, 3]: 2]\n}" },
+    .{ .name = "a key of another length inserted", .code = .type_mismatch, .needle = "", .src = "rule r() {\n  let mut m: [int[2]: int] = [:]\n  m.insert([1, 2, 3], 1)\n}" },
+    .{ .name = "a resource map keyed by a fixed array", .code = .collection_field_element_invalid, .needle = "", .src = "resource R { m: [int[2]: int] = [:] }\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "two dynamic arrays compared", .code = .type_mismatch, .needle = "equality", .src = "rule r() {\n  let a: int[] = [1]\n  let e = a == a\n}" },
+    .{ .name = "fixed arrays of two lengths compared", .code = .type_mismatch, .needle = "equality", .src = "rule r() {\n  let e = [1, 2] == [1, 2, 3]\n}" },
+    .{ .name = "struct arrays compared", .code = .type_mismatch, .needle = "equality", .src = "struct P { x: int = 0 }\nrule r() {\n  let e = [P { x: 1 }] == [P { x: 1 }]\n}" },
+    .{ .name = "fixed arrays ordered", .code = .type_mismatch, .needle = "", .src = "rule r() {\n  let e = [1] < [2]\n}" },
+};
+
+test "a fixed array of a hashable element is a key, and of an Eq element is Eq" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (fixed_key_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (fixed_key_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or countMessage(r.diagnostics.items, c.code, c.needle) != 1) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const fixed_length_refused = [_]UnitCase{
+    .{ .name = "a dynamic array into a let of a fixed length", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let a: int[3] = d\n}" },
+    .{ .name = "a slice into a let of a fixed length", .code = .type_mismatch, .src = "rule r() {\n  let xs = [1, 2, 3, 4]\n  let a: int[3] = xs[0..3]\n}" },
+    .{ .name = "a dynamic array assigned to a fixed array", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let mut a: int[3] = [1, 2, 3]\n  a = d\n}" },
+    .{ .name = "a dynamic array written to a fixed element", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let mut g = [[1, 2, 3], [4, 5, 6]]\n  g[0] = d\n}" },
+    .{ .name = "a dynamic array passed for a fixed parameter", .code = .type_mismatch, .src = "fn f(a: int[3]) -> int {\n  a.len()\n}\nrule r() {\n  let d: int[] = [1]\n  let k = f(d)\n}" },
+    .{ .name = "a dynamic array returned for a fixed return", .code = .return_type_mismatch, .src = "fn g() -> int[3] {\n  let d: int[] = [1]\n  return d\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "a dynamic array as the tail of a fixed return", .code = .return_type_mismatch, .src = "fn g() -> int[3] {\n  let d: int[] = [1]\n  d\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "a dynamic array passed to a method's fixed parameter", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nimpl P {\n  fn take(self, a: int[3]) -> int {\n    a.len()\n  }\n}\nrule r() {\n  let d: int[] = [1]\n  let p = P { x: 1 }\n  let k = p.take(d)\n}" },
+    .{ .name = "a dynamic array passed to a closure's fixed parameter", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let f = |a: int[3]| a.len()\n  let k = f(d)\n}" },
+    .{ .name = "a dynamic array returned through a generic into a fixed let", .code = .type_mismatch, .src = "fn id<T>(x: T) -> T {\n  x\n}\nrule r() {\n  let d: int[] = [1]\n  let a: int[3] = id(d)\n}" },
+    .{ .name = "a dynamic array wrapped into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let o: int[3]? = d\n}" },
+    .{ .name = "some of a dynamic array into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let o: int[3]? = some(d)\n}" },
+    .{ .name = "a dynamic array pushed onto fixed elements", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let mut g: int[3][] = []\n  g.push(d)\n}" },
+    .{ .name = "a dynamic array inserted as a fixed value", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let mut m: [int: int[3]] = [:]\n  m.insert(1, d)\n}" },
+    .{ .name = "a dynamic array written as a fixed map entry", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let mut m: [int: int[3]] = [:]\n  m[1] = d\n}" },
+    .{ .name = "a dynamic array as a fixed map literal value", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let m: [int: int[3]] = [1: d]\n}" },
+    .{ .name = "a dynamic array as a fixed literal element", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let a: int[3][1] = [d]\n}" },
+    .{ .name = "a short literal element", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = [[1, 2, 3], [4, 5]]\n}" },
+    .{ .name = "an empty literal element beside a full one", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = [[1, 2, 3], []]\n}" },
+    .{ .name = "branches of two lengths into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[2] = if c { [1, 2] } else { [1, 2, 3] }\n}" },
+    .{ .name = "an empty else branch into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = if c { [1, 2, 3] } else { [] }\n}" },
+    .{ .name = "an empty then branch into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = if c { [] } else { [1, 2, 3] }\n}" },
+    .{ .name = "a resource's dynamic array into a fixed let", .code = .type_mismatch, .src = "resource R { xs: int[] = [1, 2, 3] }\nrule r() when resource R {\n  let a: int[3] = get(R).xs\n}" },
+    .{ .name = "an empty literal into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = []\n}" },
+    .{ .name = "an empty literal passed for a fixed parameter", .code = .type_mismatch, .src = "fn f(a: int[3]) -> int {\n  a.len()\n}\nrule r() {\n  let k = f([])\n}" },
+    .{ .name = "an empty literal as the tail of a fixed return", .code = .return_type_mismatch, .src = "fn g() -> int[3] {\n  []\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "an empty block value into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = {\n    []\n  }\n}" },
+    .{ .name = "empty branches into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = if c { [] } else { [] }\n}" },
+    .{ .name = "an empty literal into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let o: int[3]? = []\n}" },
+    .{ .name = "an empty literal pushed onto fixed elements", .code = .type_mismatch, .src = "rule r() {\n  let mut g: int[3][] = []\n  g.push([])\n}" },
+    .{ .name = "empty elements of a fixed length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = [[], []]\n}" },
+    .{ .name = "empty elements of the wrong count", .code = .type_mismatch, .src = "rule r() {\n  let a: int[0][3] = [[], []]\n}" },
+    .{ .name = "a fill of empty elements of a fixed length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = [[]; 2]\n}" },
+    .{ .name = "a dynamic array as a struct literal's fixed field", .code = .type_mismatch, .src = "struct S { a: int[3]? = none }\nrule r() {\n  let d: int[] = [1]\n  let s = S { a: d }\n}" },
+    .{ .name = "an empty literal as a struct literal's fixed field", .code = .type_mismatch, .src = "struct S { a: int[3]? = none }\nrule r() {\n  let s = S { a: [] }\n}" },
+    .{ .name = "a dynamic array as the tail of a method's fixed return", .code = .return_type_mismatch, .src = "struct Q { y: int = 0 }\nimpl Q {\n  fn three(self) -> int[3] {\n    let d: int[] = [1]\n    d\n  }\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "dynamic elements into fixed elements", .code = .type_mismatch, .src = "rule r() {\n  let h: int[][] = [[1]]\n  let g: int[3][] = h\n}" },
+    .{ .name = "an optional dynamic array into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let d: int[] = [1]\n  let p: int[]? = some(d)\n  let o: int[3]? = p\n}" },
+    .{ .name = "a generic dynamic array as the tail of a fixed return", .code = .return_type_mismatch, .src = "fn h<T>(xs: T[]) -> T[3] {\n  xs\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "an empty element of dynamic fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  let g: int[3][] = [[]]\n}" },
+    .{ .name = "an empty map value of a fixed type", .code = .type_mismatch, .src = "rule r() {\n  let m: [int: int[3]] = [1: []]\n}" },
+    .{ .name = "some of an empty literal into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let o: int[3]? = some([])\n}" },
+    .{ .name = "an empty map value of an optional fixed type", .code = .type_mismatch, .src = "rule r() {\n  let m: [int: int[3]?] = [1: []]\n}" },
+    .{ .name = "empty elements in both branches", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3][1] = if c { [[]] } else { [[]] }\n}" },
+    .{ .name = "a dynamic array passed for a generic fixed parameter", .code = .type_mismatch, .src = "fn f<T>(xs: T[3]) -> int {\n  xs.len()\n}\nrule r() {\n  let d: int[] = [1]\n  let k = f(d)\n}" },
+    .{ .name = "an else branch of another length, every branch untyped", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[0][1] = if c { [[]] } else { [[], []] }\n}" },
+    .{ .name = "a later arm of another length, every arm untyped", .code = .type_mismatch, .src = "rule r() {\n  let k = 0\n  let a: int[0][1] = match k {\n    0 => [[]],\n    _ => [[], []],\n  }\n}" },
+    .{ .name = "an empty literal as a data entry's fixed field", .code = .entry_field_type_invalid, .src = "struct Item { a: int[3]? = none }\ndata Db: Item {\n  e: { a: [] },\n}" },
+};
+
+const fixed_length_accepted = [_]UnitCase{
+    .{ .name = "a literal of the length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = [1, 2, 3]\n}" },
+    .{ .name = "a fill of the length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = [0; 3]\n}" },
+    .{ .name = "a fixed array of the length", .code = .type_mismatch, .src = "rule r() {\n  let b: int[3] = [1, 2, 3]\n  let a: int[3] = b\n}" },
+    .{ .name = "nested literals of the lengths", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = [[1, 2, 3], [4, 5, 6]]\n}" },
+    .{ .name = "branches of the length", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = if c { [1, 2, 3] } else { [4, 5, 6] }\n}" },
+    .{ .name = "an empty literal of length zero", .code = .type_mismatch, .src = "rule r() {\n  let a: int[0] = []\n}" },
+    .{ .name = "a length-zero array beside an empty literal", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let e: int[0] = []\n  let z: int[0] = if c { e } else { [] }\n}" },
+    .{ .name = "a literal and a fill passed for a fixed parameter", .code = .type_mismatch, .src = "fn f(a: int[3]) -> int {\n  a.len()\n}\nrule r() {\n  let k = f([1, 2, 3])\n  let j = f([0; 3])\n}" },
+    .{ .name = "a literal and some of one into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let o: int[3]? = [1, 2, 3]\n  let p: int[3]? = some([1, 2, 3])\n}" },
+    .{ .name = "a literal as a fixed map value", .code = .type_mismatch, .src = "rule r() {\n  let m: [int: int[3]] = [1: [1, 2, 3]]\n}" },
+    .{ .name = "a literal returned through a generic", .code = .type_mismatch, .src = "fn id<T>(x: T) -> T {\n  x\n}\nrule r() {\n  let a: int[3] = id([1, 2, 3])\n}" },
+    .{ .name = "a fixed binding beside a literal element", .code = .type_mismatch, .src = "rule r() {\n  let b: int[3] = [1, 2, 3]\n  let a: int[3][2] = [b, [4, 5, 6]]\n}" },
+    .{ .name = "a literal assigned to a fixed binding", .code = .type_mismatch, .src = "rule r() {\n  let mut a: int[3] = [1, 2, 3]\n  a = [4, 5, 6]\n}" },
+    .{ .name = "a fill of empty elements of length zero", .code = .type_mismatch, .src = "rule r() {\n  let a: int[0][2] = [[]; 2]\n}" },
+    .{ .name = "a fixed array into a dynamic let", .code = .type_mismatch, .src = "rule r() {\n  let a = [1, 2, 3]\n  let d: int[] = a\n}" },
+};
+
+test "a fixed array's slot takes only a value of its length" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (fixed_length_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("refused {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (fixed_length_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("accepted {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const anon_refused = [_]UnitCase{
+    .{ .name = "an anonymous element of a non-struct array", .code = .ambiguous_type, .src = "rule r() {\n  let xs: int[] = [.{ a: 1 }]\n}" },
+    .{ .name = "an anonymous element of an array of another length", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let ps: P[3] = [.{ x: 1 }]\n}" },
+    .{ .name = "an anonymous element beside another struct", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Q { y: int = 0 }\nrule r() {\n  let q = Q { y: 1 }\n  let ps: P[] = [.{ x: 1 }, q]\n}" },
+    .{ .name = "an anonymous literal of a wrong field type into an optional", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let o: P? = .{ x: true }\n}" },
+    .{ .name = "an anonymous argument naming no field of the parameter", .code = .invalid_field_filter, .src = "struct P { x: int = 0 }\nfn f(p: P) -> int {\n  1\n}\nrule r() {\n  let k = f(.{ y: 1 })\n}" },
+    .{ .name = "an anonymous literal pushed without a required field", .code = .struct_field_missing, .src = "struct In { v: int = 0 }\nstruct O { inner: In }\nrule r() {\n  let mut os: O[] = []\n  os.push(.{ })\n}" },
+    .{ .name = "an anonymous literal into a non-struct", .code = .ambiguous_type, .src = "rule r() {\n  let n: int = .{ x: 1 }\n}" },
+    .{ .name = "an anonymous literal with no expected type", .code = .ambiguous_type, .src = "rule r() {\n  let x = .{ a: 1 }\n}" },
+};
+
+test "an anonymous struct literal is refused where its slot names no struct" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (anon_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const loop_break_refused = [_]UnitCase{
+    .{ .name = "an empty break value into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    break []\n  }\n}" },
+    .{ .name = "empty elements of a break value into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = loop {\n    break [[], []]\n  }\n}" },
+    .{ .name = "an empty break value returned for a fixed return", .code = .return_type_mismatch, .src = "fn g() -> int[3] {\n  return loop {\n    break []\n  }\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "an empty break value as the tail of a fixed return", .code = .return_type_mismatch, .src = "fn g() -> int[3] {\n  loop {\n    break []\n  }\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "an empty break value into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let o: int[3]? = loop {\n    break []\n  }\n}" },
+    .{ .name = "empty break values under an if", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = loop {\n    if c {\n      break []\n    }\n    break []\n  }\n}" },
+    .{ .name = "an empty break value of a loop breaking a loop", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    break loop {\n      break []\n    }\n  }\n}" },
+    .{ .name = "an empty break value twelve loops deep", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break []\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n}" },
+    .{ .name = "an empty break value after an inner loop", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    loop {\n      break\n    }\n    break []\n  }\n}" },
+    .{ .name = "an empty break value passed for a fixed parameter", .code = .type_mismatch, .src = "fn f(a: int[3]) -> int {\n  a.len()\n}\nrule r() {\n  let k = f(loop {\n    break []\n  })\n}" },
+    .{ .name = "an empty break value as a fixed map value", .code = .type_mismatch, .src = "rule r() {\n  let m: [int: int[3]] = [1: loop {\n    break []\n  }]\n}" },
+    .{ .name = "a later break value of another length, every break untyped", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[0][1] = loop {\n    if c {\n      break [[]]\n    }\n    break [[], []]\n  }\n}" },
+    .{ .name = "an anonymous break value of a wrong field type", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let p: P = loop {\n    break .{ x: true }\n  }\n}" },
+    .{ .name = "an anonymous break value into a non-struct", .code = .ambiguous_type, .src = "rule r() {\n  let n: int = loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous value breaking to a label past a struct loop", .code = .ambiguous_type, .src = "struct P { x: int = 0 }\nrule r() {\n  outer: loop {\n    let p: P = loop {\n      break outer .{ x: 1 }\n    }\n  }\n}" },
+    .{ .name = "a full and an empty break value into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = loop {\n    if c {\n      break [1, 2, 3]\n    }\n    break []\n  }\n}" },
+    .{ .name = "a loop breaking none on every path makes its branch optional", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let x = if c {\n    loop {\n      break none\n    }\n  } else {\n    5\n  }\n  let y: int = x\n}" },
+};
+
+const loop_break_accepted = [_]UnitCase{
+    .{ .name = "an anonymous break value into a let", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let p: P = loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "anonymous break values under an if", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let c = true\n  let p: P = loop {\n    if c {\n      break .{ x: 1 }\n    }\n    break .{ x: 2 }\n  }\n}" },
+    .{ .name = "anonymous arms of a match break value", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let k = 0\n  let p: P = loop {\n    break match k {\n      0 => .{ x: 1 },\n      _ => .{ x: 2 },\n    }\n  }\n}" },
+    .{ .name = "anonymous break values inside match arm blocks", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let k = 0\n  let p: P = loop {\n    match k {\n      0 => {\n        break .{ x: 1 }\n      },\n      _ => {\n        break .{ x: 2 }\n      },\n    }\n  }\n}" },
+    .{ .name = "an anonymous break value after an inner loop", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let p: P = loop {\n    loop {\n      break\n    }\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous break value of a loop breaking a loop", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let p: P = loop {\n    break loop {\n      break .{ x: 1 }\n    }\n  }\n}" },
+    .{ .name = "an anonymous break value returned", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn mk() -> P {\n  return loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous break value as a fn's tail", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn mk() -> P {\n  loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous break value passed to a fn", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn px(p: P) -> int {\n  p.x\n}\nrule r() {\n  let k = px(loop {\n    break .{ x: 1 }\n  })\n}" },
+    .{ .name = "an anonymous break value into an optional", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let o: P? = loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "anonymous elements of a break value", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let ps: P[2] = loop {\n    break [.{ x: 1 }, P { x: 2 }]\n  }\n}" },
+    .{ .name = "an anonymous break value assigned to a binding", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let mut p = P { x: 0 }\n  p = loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous break value as a struct field", .code = .type_mismatch, .src = "struct In { v: int = 0 }\nstruct O { inner: In }\nrule r() {\n  let h = O { inner: loop {\n    break .{ v: 1 }\n  } }\n}" },
+    .{ .name = "an anonymous break value as the default of ??", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let o: P? = none\n  let p = o ?? loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous break value beside none", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let c = true\n  let o: P? = loop {\n    if c {\n      break .{ x: 1 }\n    }\n    break none\n  }\n}" },
+    .{ .name = "an anonymous break value past a labeled break", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let c = true\n  outer: loop {\n    let p: P = loop {\n      if c {\n        break outer\n      }\n      break .{ x: 1 }\n    }\n  }\n}" },
+    .{ .name = "an empty break value into a dynamic let", .code = .type_mismatch, .src = "rule r() {\n  let a: int[] = loop {\n    break []\n  }\n}" },
+    .{ .name = "an empty break value of length zero", .code = .type_mismatch, .src = "rule r() {\n  let a: int[0] = loop {\n    break []\n  }\n}" },
+    .{ .name = "a break value of the length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    break [1, 2, 3]\n  }\n}" },
+    .{ .name = "a value breaking to a label past a fixed loop", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  outer: loop {\n    let a: int[3] = loop {\n      if c {\n        break outer [1]\n      }\n      break [1, 2, 3]\n    }\n  }\n}" },
+    .{ .name = "a break of a while inside a fixed loop", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = loop {\n    while c {\n      break\n    }\n    break [1, 2, 3]\n  }\n}" },
+    .{ .name = "a loop breaking a loop inside a for", .code = .type_mismatch, .src = "rule r() {\n  for i in 0..1 {\n    let a: int[3] = loop {\n      break loop {\n        break [1, 2, 3]\n      }\n    }\n  }\n}" },
+    .{ .name = "a value of an inner loop bound to a let is not the outer loop's", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    let w = loop {\n      break [1]\n    }\n    break [1, 2, 3]\n  }\n}" },
+    .{ .name = "a loop that never breaks adds no none to a join", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let x = if c {\n    loop {\n    }\n  } else {\n    5\n  }\n  let y: int = x\n}" },
+};
+
+test "a value breaking out of a loop is checked against the type its slot expects" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (loop_break_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("refused {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (loop_break_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("accepted {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const params_default_refused = [_]UnitCase{
+    .{ .name = "an int for an audio_graph's enum param", .code = .type_mismatch, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    d: Dir = 5\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "another enum's variant for an audio_graph's enum param", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nenum Wind { west }\naudio_graph G {\n  params {\n    d: Dir = .west\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "a short literal for an audio_graph's fixed-array param", .code = .type_mismatch, .src = "audio_graph G {\n  params {\n    a: int[3] = [1, 2]\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an anonymous literal for an audio_graph's enum param", .code = .ambiguous_type, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    d: Dir = .{ x: 1 }\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an int for an audio_graph's struct param", .code = .type_mismatch, .src = "struct P { x: int = 0 }\naudio_graph G {\n  params {\n    p: P = 5\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an anonymous literal of a mistyped field for an audio_graph's struct param", .code = .type_mismatch, .src = "struct P { x: int = 0 }\naudio_graph G {\n  params {\n    p: P = .{ x: true }\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "another enum's variant for an audio_graph's optional enum param", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nenum Wind { west }\naudio_graph G {\n  params {\n    d: Dir? = .west\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an int for an audio_graph's enum param declared after it", .code = .type_mismatch, .src = "audio_graph G {\n  params {\n    d: Dir = 5\n  }\n  output(wave_player(\"a.wav\"))\n}\nenum Dir { north, south }" },
+    .{ .name = "a variant for an audio_graph's int param", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    n: int = .south\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an int for an effect's Color param", .code = .type_mismatch, .src = "effect E {\n  params {\n    c: Color = 5\n  }\n  emitter S {\n    burst: 1\n  }\n}" },
+    .{ .name = "a bool for an effect's float param", .code = .type_mismatch, .src = "effect E {\n  params {\n    f: float = true\n  }\n  emitter S {\n    burst: 1\n  }\n}" },
+    .{ .name = "an int literal for an effect's float param", .code = .type_mismatch, .src = "effect E {\n  params {\n    f: float = 1\n  }\n  emitter S {\n    burst: 1\n  }\n}" },
+    .{ .name = "a two-element literal for an anim_graph's Vec3 param", .code = .type_mismatch, .src = "anim_graph G {\n  params {\n    v: Vec3 = [0, 0]\n  }\n  state A { clip: \"a\" transition -> A }\n}" },
+    .{ .name = "an int for an anim_graph's bool param", .code = .type_mismatch, .src = "anim_graph G {\n  params {\n    b: bool = 1\n  }\n  state A { clip: \"a\" transition -> A }\n}" },
+    .{ .name = "an int literal above i32 for an anim_graph's i32 param", .code = .type_mismatch, .src = "anim_graph G {\n  params {\n    n: i32 = 3000000000\n  }\n  state A { clip: \"a\" transition -> A }\n}" },
+};
+
+const params_default_accepted = [_]UnitCase{
+    .{ .name = "a variant for an audio_graph's enum param", .code = .type_mismatch, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    d: Dir = .south\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "a variant two enums name, for an audio_graph's enum params", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\naudio_graph G {\n  params {\n    d: Dir = .north\n    o: Dir? = .north\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "none and a qualified variant for an audio_graph's enum params", .code = .type_mismatch, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    n: Dir? = none\n    q: Dir = Dir.south\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "anonymous literals for an audio_graph's struct params", .code = .type_mismatch, .src = "struct P { x: int = 0 }\naudio_graph G {\n  params {\n    p: P = .{ x: 1 }\n    q: P? = .{ x: 2 }\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "array literals for an audio_graph's array params", .code = .type_mismatch, .src = "audio_graph G {\n  params {\n    a: int[3] = [1, 2, 3]\n    xs: int[] = []\n    ys: int[] = [1, 2]\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "a variant for an audio_graph's enum param declared after it", .code = .type_mismatch, .src = "audio_graph G {\n  params {\n    d: Dir = .south\n  }\n  output(wave_player(\"a.wav\"))\n}\nenum Dir { north, south }" },
+    .{ .name = "params without defaults", .code = .type_mismatch, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    d: Dir\n    s: float\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an effect's builtin params", .code = .type_mismatch, .src = "effect E {\n  params {\n    c: Color = #FFFFFF\n    f: float = 0.5\n  }\n  emitter S {\n    burst: 1\n  }\n}" },
+    .{ .name = "an anim_graph's builtin params", .code = .type_mismatch, .src = "anim_graph G {\n  params {\n    v: Vec3 = [0, 0, 1]\n    b: bool = true\n    n: i32 = 7\n    s: float = 0.5\n  }\n  state A { clip: \"a\" transition -> A }\n}" },
+    .{ .name = "an engine type's anonymous literal and variant", .code = .type_mismatch, .src = "anim_graph G {\n  params {\n    t: Trajectory = .{ samples: 4 }\n  }\n  state A { clip: \"a\" transition -> A }\n}\neffect E {\n  params {\n    m: BlendMode = .additive\n  }\n  emitter S {\n    burst: 1\n  }\n}" },
+};
+
+test "a params default is typed against its declared type" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (params_default_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("refused {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (params_default_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("accepted {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const data_entry_value_accepted = [_]UnitCase{
+    .{ .name = "an anonymous literal in an optional field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P? = none }\ndata Db: Item {\n  e: { p: .{ x: 1 } },\n}" },
+    .{ .name = "an anonymous literal under some in an optional field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P? = none }\ndata Db: Item {\n  e: { p: some(.{ x: 1 }) },\n}" },
+    .{ .name = "an anonymous literal nested in an optional field's literal", .code = .type_mismatch, .src = "struct In { v: int = 0 }\nstruct O { inner: In }\nstruct Item { o: O? = none }\ndata Db: Item {\n  e: { o: .{ inner: .{ v: 2 } } },\n}" },
+    .{ .name = "anonymous elements of an optional array field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { ps: P[]? = none }\ndata Db: Item {\n  e: { ps: [.{ x: 1 }, .{ x: 2 }] },\n}" },
+    .{ .name = "an anonymous fill of an optional fixed field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { ps: P[3]? = none }\ndata Db: Item {\n  e: { ps: [.{ x: 1 }; 3] },\n}" },
+    .{ .name = "an anonymous value of an optional map field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { m: [int: P]? = none }\ndata Db: Item {\n  e: { m: [1: .{ x: 1 }] },\n}" },
+    .{ .name = "an anonymous literal beside a spread", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P? = none }\ndata Db: Item {\n  a: { p: .{ x: 1 } },\n  b: { ..Db.a, p: .{ x: 2 } },\n}" },
+    .{ .name = "an anonymous literal in a struct field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P }\ndata Db: Item {\n  e: { p: .{ x: 1 } },\n}" },
+    .{ .name = "a variant two enums name, in an enum field", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nstruct Item { d: Dir = .south }\ndata Db: Item {\n  e: { d: .north },\n}" },
+    .{ .name = "an anonymous value breaking out of a loop", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P }\ndata Db: Item {\n  e: { p: loop {\n    break .{ x: 1 }\n  } },\n}" },
+};
+
+const data_entry_value_refused = [_]UnitCase{
+    .{ .name = "an anonymous literal of a wrong field type, in an optional field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P? = none }\ndata Db: Item {\n  e: { p: .{ x: true } },\n}" },
+    .{ .name = "an anonymous literal without its struct field, in an optional field", .code = .struct_field_missing, .src = "struct In { v: int = 0 }\nstruct O { inner: In }\nstruct Item { o: O? = none }\ndata Db: Item {\n  e: { o: .{ } },\n}" },
+    .{ .name = "anonymous elements of another length, in an optional fixed field", .code = .entry_field_type_invalid, .src = "struct P { x: int = 0 }\nstruct Item { ps: P[3]? = none }\ndata Db: Item {\n  e: { ps: [.{ x: 1 }] },\n}" },
+    .{ .name = "an empty value breaking out of a loop, in an optional fixed field", .code = .entry_field_type_invalid, .src = "struct Item { xs: int[3]? = none }\ndata Db: Item {\n  e: { xs: loop {\n    break []\n  } },\n}" },
+};
+
+test "a data entry's value is checked against its field's type" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (data_entry_value_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("refused {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (data_entry_value_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("accepted {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const empty_literal_refused = [_]UnitCase{
+    .{ .name = "an empty literal bound with no annotation", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let e = []\n}" },
+    .{ .name = "an empty literal bound, then read into a fixed let", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let e = []\n  let a: int[3] = e\n}" },
+    .{ .name = "branches of a length and empty, nothing expected", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let c = true\n  let x = if c { [1, 2, 3] } else { [] }\n  let d: int[] = x\n}" },
+    .{ .name = "elements of a length and empty, nothing expected", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let g = [[1, 2, 3], []]\n}" },
+    .{ .name = "arms of a length and empty, nothing expected", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let k = 0\n  let x = match k {\n    0 => [1, 2, 3],\n    _ => [],\n  }\n}" },
+    .{ .name = "an empty branch beside an int, nothing expected", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let c = true\n  let x = if c { 5 } else { [] }\n}" },
+    .{ .name = "a fill of empty literals, nothing expected", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let a = [[]; 2]\n}" },
+    .{ .name = "some of an empty literal, nothing expected", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let o = some([])\n}" },
+    .{ .name = "an empty map value, nothing expected", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let m = [\"a\": []]\n}" },
+    .{ .name = "an empty literal iterated", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  for x in [] {\n  }\n}" },
+    .{ .name = "an empty literal compared", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let z: int[0] = []\n  let b = z == []\n}" },
+    .{ .name = "an empty literal as a receiver", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let n = [].len()\n}" },
+    .{ .name = "an empty literal for an unannotated closure parameter", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let f = |xs| 1\n  let k = f([])\n}" },
+    .{ .name = "an empty literal as a closure's value, called twice", .code = .empty_array_type_annotation_required, .src = "rule r() {\n  let f = |v: int| []\n  let a = f(1)\n  let b = f(2)\n}" },
+    .{ .name = "an empty literal as a void fn's tail", .code = .empty_array_type_annotation_required, .src = "fn f() {\n  []\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "an empty literal into an int let", .code = .type_mismatch, .src = "rule r() {\n  let x: int = []\n}" },
+    .{ .name = "an empty literal into a Vec3 let", .code = .type_mismatch, .src = "rule r() {\n  let v: Vec3 = []\n}" },
+    .{ .name = "an empty literal into an optional int", .code = .type_mismatch, .src = "rule r() {\n  let o: int? = []\n}" },
+    .{ .name = "an empty literal into a map", .code = .type_mismatch, .src = "rule r() {\n  let m: [string: int] = []\n}" },
+    .{ .name = "an empty literal into a set", .code = .type_mismatch, .src = "rule r() {\n  let s: Set<int> = []\n}" },
+    .{ .name = "an empty literal as the tail of a Vec3 return", .code = .return_type_mismatch, .src = "fn g() -> Vec3 {\n  []\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "an empty literal passed for a Vec3 parameter", .code = .type_mismatch, .src = "fn f(v: Vec3) -> int {\n  1\n}\nrule r() {\n  let k = f([])\n}" },
+    .{ .name = "an empty branch into an int let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let x: int = if c { 5 } else { [] }\n}" },
+    .{ .name = "an empty element beside an int", .code = .type_mismatch, .src = "rule r() {\n  let a: int[] = [5, []]\n}" },
+    .{ .name = "an empty literal as a struct literal's int field", .code = .type_mismatch, .src = "struct S { n: int? = none }\nrule r() {\n  let s = S { n: [] }\n}" },
+    .{ .name = "an empty literal as an event field", .code = .type_mismatch, .src = "event Ev { n: int = 0 }\nrule r() {\n  emit Ev { n: [] }\n}" },
+    .{ .name = "an empty key of a fixed key type", .code = .type_mismatch, .src = "rule r() {\n  let m: [int[2]: int] = [[]: 1]\n}" },
+    .{ .name = "an empty literal as a data entry's int field", .code = .entry_field_type_invalid, .src = "struct Item { n: int = 0 }\ndata Db: Item {\n  e: { n: [] },\n}" },
+    .{ .name = "an empty literal as a scene resource's int field", .code = .resource_field_type_invalid, .src = "resource Mode { players: int = 4 }\ncomponent C { v: int = 0 }\nscene \"S\" {\n  resources { Mode { players: [] } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
+    .{ .name = "an empty literal as a scene component's Vec3 field", .code = .scene_component_field_type_invalid, .src = "component Spin { axis: Vec3 }\nscene \"S\" {\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" Spin { axis: [] } }\n}" },
+    .{ .name = "an empty literal as an added component's Vec3 field", .code = .structural_component_field_type_invalid, .src = "component Marker { x: i32 = 0 }\ncomponent Spin { axis: Vec3 }\nrule r(entity: Entity) when entity has Marker {\n  entity.add(Spin { axis: [] })\n}" },
+    .{ .name = "an empty literal into an anim_graph's Vec3 param", .code = .type_mismatch, .src = "anim_graph G {\n  params {\n    v: Vec3 = []\n  }\n  state A { clip: \"a\" transition -> A }\n}" },
+    .{ .name = "an empty value breaking out of a loop into an int let", .code = .type_mismatch, .src = "rule r() {\n  let x: int = loop {\n    break []\n  }\n}" },
+    .{ .name = "an empty key inserted into fixed keys", .code = .type_mismatch, .src = "rule r() {\n  let mut m: [int[2]: int] = [:]\n  m.insert([], 1)\n}" },
+    .{ .name = "an empty key read from fixed keys", .code = .type_mismatch, .src = "rule r() {\n  let m: [int[2]: int] = [:]\n  let v = m[[]]\n}" },
+    .{ .name = "an empty element inserted into a set of fixed arrays", .code = .type_mismatch, .src = "rule r() {\n  let mut s: Set<int[2]> = Set.new()\n  s.insert([])\n}" },
+    .{ .name = "an empty literal for a type parameter", .code = .generic_type_annotation_required, .src = "fn id<T>(x: T) -> T {\n  x\n}\nrule r() {\n  let a: int[] = id([])\n}" },
+    .{ .name = "an empty literal for a generic array parameter", .code = .generic_type_annotation_required, .src = "fn n<T>(xs: T[]) -> int {\n  xs.len()\n}\nrule r() {\n  let k = n([])\n}" },
+};
+
+const empty_literal_accepted = [_]UnitCase{
+    .{ .name = "branches of a length and empty into a dynamic let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let x: int[] = if c { [1, 2, 3] } else { [] }\n}" },
+    .{ .name = "elements of a length and empty into dynamic elements", .code = .type_mismatch, .src = "rule r() {\n  let g: int[][] = [[1, 2, 3], []]\n}" },
+    .{ .name = "arms of a length and empty into a dynamic let", .code = .type_mismatch, .src = "rule r() {\n  let k = 0\n  let x: int[] = match k {\n    0 => [1, 2, 3],\n    _ => [],\n  }\n}" },
+    .{ .name = "an empty literal as the tail of a dynamic return", .code = .type_mismatch, .src = "fn g() -> int[] {\n  []\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "an empty literal passed for a dynamic parameter", .code = .type_mismatch, .src = "fn f(xs: int[]) -> int {\n  xs.len()\n}\nrule r() {\n  let k = f([])\n}" },
+    .{ .name = "an empty literal passed for an annotated closure parameter", .code = .type_mismatch, .src = "rule r() {\n  let f = |xs: int[]| xs.len()\n  let k = f([])\n}" },
+    .{ .name = "an empty literal pushed onto dynamic elements", .code = .type_mismatch, .src = "rule r() {\n  let mut g: int[][] = []\n  g.push([])\n}" },
+    .{ .name = "an empty literal assigned to a dynamic binding", .code = .type_mismatch, .src = "rule r() {\n  let mut xs: int[] = [1]\n  xs = []\n}" },
+    .{ .name = "some of an empty literal into an optional array", .code = .type_mismatch, .src = "rule r() {\n  let o: int[]? = some([])\n}" },
+    .{ .name = "an empty literal as a ?? default", .code = .type_mismatch, .src = "rule r() {\n  let o: int[]? = none\n  let xs = o ?? []\n}" },
+    .{ .name = "an empty literal as a dynamic map value", .code = .type_mismatch, .src = "rule r() {\n  let m: [string: int[]] = [\"a\": []]\n}" },
+    .{ .name = "an empty literal inserted as a dynamic map value", .code = .type_mismatch, .src = "rule r() {\n  let mut m: [int: int[]] = [:]\n  m.insert(1, [])\n}" },
+    .{ .name = "an empty key of length zero", .code = .type_mismatch, .src = "rule r() {\n  let m: [int[0]: int] = [[]: 1]\n}" },
+    .{ .name = "an empty key inserted into keys of length zero", .code = .type_mismatch, .src = "rule r() {\n  let mut m: [int[0]: int] = [:]\n  m.insert([], 1)\n}" },
+    .{ .name = "an empty key read from keys of length zero", .code = .type_mismatch, .src = "rule r() {\n  let m: [int[0]: int] = [:]\n  let v = m[[]]\n}" },
+    .{ .name = "an empty element inserted into a set of empty arrays", .code = .type_mismatch, .src = "rule r() {\n  let mut s: Set<int[0]> = Set.new()\n  s.insert([])\n}" },
+    .{ .name = "an empty element looked up in a set of empty arrays", .code = .type_mismatch, .src = "rule r() {\n  let s: Set<int[0]> = Set.new()\n  let b = s.contains([])\n}" },
+    .{ .name = "an empty literal as a struct literal's optional array field", .code = .type_mismatch, .src = "struct S { a: int[]? = none }\nrule r() {\n  let s = S { a: [] }\n}" },
+    .{ .name = "an empty literal as a data entry's optional array field", .code = .type_mismatch, .src = "struct Item { a: int[]? = none }\ndata Db: Item {\n  e: { a: [] },\n}" },
+    .{ .name = "an empty literal as a scene resource's array field", .code = .type_mismatch, .src = "resource Bag { xs: int[] = [1] }\ncomponent C { v: int = 0 }\nscene \"S\" {\n  resources { Bag { xs: [] } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
+    .{ .name = "an empty value breaking out of a loop into a dynamic let", .code = .type_mismatch, .src = "rule r() {\n  let xs: int[] = loop {\n    break []\n  }\n}" },
+    .{ .name = "an empty literal for a method parameter of an impl's type parameter", .code = .type_mismatch, .src = "struct Box<T> { v: T }\nimpl<T> Box<T> {\n  fn put(self, xs: T[]) -> int {\n    xs.len()\n  }\n}\nrule r() {\n  let b = Box { v: 1 }\n  let k = b.put([])\n}" },
+    .{ .name = "an empty literal under an annotation the checker does not model", .code = .type_mismatch, .src = "rule r() {\n  let b: u8[] = []\n}" },
+};
+
+test "an empty array literal takes the array its slot expects, else is E0207" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (empty_literal_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("refused {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (empty_literal_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("accepted {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const optional_element_accepted = [_]UnitCase{
+    .{ .name = "anonymous elements and none in an array of optionals", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let os: P?[] = [.{ x: 1 }, none]\n}" },
+    .{ .name = "anonymous elements and none pushed onto optionals", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let mut os: P?[] = []\n  os.push(.{ x: 1 })\n  os.push(none)\n}" },
+    .{ .name = "a fixed array of optionals", .code = .type_mismatch, .src = "rule r() {\n  let a: int?[3] = [1, none, 3]\n  let v: int = a[1] ?? 0\n}" },
+    .{ .name = "an optional of an array of optionals", .code = .type_mismatch, .src = "rule r() {\n  let a: int?[]? = some([1, none])\n  let b: int?[]? = none\n}" },
+    .{ .name = "fixed arrays of optionals compared and keyed", .code = .type_mismatch, .src = "rule r() {\n  let a: int?[2] = [1, none]\n  let b: int?[2] = [1, none]\n  let e = a == b\n  let m: [int?[2]: int] = [:]\n}" },
+    .{ .name = "a map of arrays of optionals and an array of maps", .code = .type_mismatch, .src = "rule r() {\n  let m: [int: int?[]] = [1: [none]]\n  let g: [int: int][] = [[1: 2]]\n}" },
+    .{ .name = "a generic fn over an array of optionals", .code = .type_mismatch, .src = "fn first<T>(xs: T?[]) -> T? {\n  xs[0]\n}\nrule r() {\n  let a: int?[] = [1, none]\n  let v: int? = first(a)\n}" },
+    .{ .name = "optional fixed elements of their length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[2]?[] = [[1, 2], none]\n}" },
+    .{ .name = "an empty literal under an array of optionals", .code = .type_mismatch, .src = "rule r() {\n  let e: int?[] = []\n}" },
+    .{ .name = "empty and none elements under optional arrays", .code = .type_mismatch, .src = "rule r() {\n  let a: int[]?[] = [[], none]\n}" },
+};
+
+const optional_element_refused = [_]PlaceCase{
+    .{ .name = "an array of optionals into an array of its payload", .code = .type_mismatch, .needle = "initializer", .src = "rule r() {\n  let a: int?[] = [1, none]\n  let b: int[] = a\n}" },
+    .{ .name = "a dynamic array of optionals compared", .code = .type_mismatch, .needle = "equality", .src = "rule r() {\n  let a: int?[] = [1]\n  let e = a == a\n}" },
+    .{ .name = "a dynamic array of optionals as a key", .code = .bound_not_satisfied, .needle = "Hash", .src = "rule r() {\n  let m: [int?[]: int] = [:]\n}" },
+    .{ .name = "a literal of another length into optional fixed elements", .code = .type_mismatch, .needle = "initializer", .src = "rule r() {\n  let a: int[2]?[] = [[1, 2, 3]]\n}" },
+    .{ .name = "a value of another payload pushed onto optionals", .code = .type_mismatch, .needle = "pushed", .src = "rule r() {\n  let mut xs: int?[] = []\n  xs.push(1.5)\n}" },
+};
+
+test "an optional composes with an array" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (optional_element_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("accepted {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (optional_element_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or countMessage(r.diagnostics.items, c.code, c.needle) != 1) {
+            wrong += 1;
+            std.debug.print("refused {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const closure_body_refused = [_]PlaceCase{
+    .{ .name = "an uncalled closure writing a captured struct's field", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = |v: int| { p.x = v }\n}" },
+    .{ .name = "an uncalled closure binding an int as a string", .code = .type_mismatch, .needle = "let initializer", .src = "rule r() {\n  let f = |v: int| {\n    let s: string = v\n  }\n}" },
+    .{ .name = "an uncalled closure pushing onto a captured collection", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "rule r() {\n  let mut xs: int[] = [1]\n  let f = |v: int| { xs.push(v) }\n}" },
+    .{ .name = "a closure stored and never called", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = |v: int| { p.x = v }\n  let g = f\n}" },
+    .{ .name = "a closure called twice, its write reported once", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = |v: int| { p.x = v }\n  f(1)\n  f(2)\n}" },
+};
+
+const closure_body_accepted = [_]UnitCase{
+    .{ .name = "an uncalled closure reading its captures", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let p = P { x: 1 }\n  let f = |v: int| p.x + v\n}" },
+    .{ .name = "an uncalled closure writing its own binding", .code = .type_mismatch, .src = "rule r() {\n  let f = |v: int| {\n    let mut q = v\n    q = q + 1\n    q\n  }\n}" },
+};
+
+test "a closure body is checked where it is written, called or not" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (closure_body_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or countMessage(r.diagnostics.items, c.code, c.needle) != 1) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (closure_body_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a capture the body did not bind is judged as a capture" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (scope_captured) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "a binding shadowing one of an enclosing scope is accepted, and ends with its scope" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (scope_nested) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const equality_refused = [_]UnitCase{
+    .{ .name = "bool is not ordered", .code = .type_mismatch, .src = "rule r() {\n  let b = true < false\n}" },
+    .{ .name = "an enum is not ordered", .code = .type_mismatch, .src = "enum Dir { north, south }\nrule r() {\n  let b = Dir.north < Dir.south\n}" },
+    .{ .name = "an optional is not ordered", .code = .type_mismatch, .src = "rule r() {\n  let o = some(1)\n  let b = o < none\n}" },
+    .{ .name = "a struct is not Eq", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let a = P { x: 1 }\n  let b = a == a\n}" },
+    .{ .name = "an int against a string", .code = .type_mismatch, .src = "rule r() {\n  let b = 1 == \"a\"\n}" },
+    .{ .name = "none against an int", .code = .type_mismatch, .src = "rule r() {\n  let b = none == 1\n}" },
+    .{ .name = "optionals of two payload types", .code = .type_mismatch, .src = "rule r() {\n  let b = some(1) == some(true)\n}" },
+    .{ .name = "an optional against its payload type", .code = .type_mismatch, .src = "rule r() {\n  let o = some(1)\n  let b = o == 1\n}" },
+    .{ .name = "none against none", .code = .ambiguous_type, .src = "rule r() {\n  let b = none == none\n}" },
+    .{ .name = "a task handle is not Eq", .code = .type_mismatch, .src = "resource Out { n: int = 0 }\nasync rule r()\n  when resource Out\n{\n  let h = spawn { }\n  let b = h == h\n}" },
+};
+
+test "== refuses a type that is not Eq, and an ordering a type that is not Ord" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (equality_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const shorthand_refused = [_]UnitCase{
+    .{ .name = "an element naming no variant of its enum, two others naming it", .code = .enum_variant_not_found, .src = "enum Dir { north }\nenum Pole { up }\nenum Axis { up }\nrule r() {\n  let ds: Dir[] = [.up]\n}" },
+    .{ .name = "an element of an int array", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let xs: int[] = [.north]\n}" },
+    .{ .name = "an element naming no variant, beside one that does", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let ds: Dir[] = [.north, .west]\n}" },
+    .{ .name = "a branch naming no variant", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let c = true\n  let d: Dir = if c { .north } else { .west }\n}" },
+    .{ .name = "a struct literal's enum field", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nstruct T { d: Dir = .north }\nrule r() {\n  let t = T { d: .west }\n}" },
+    .{ .name = "a key naming no variant of its enum, two others naming it", .code = .enum_variant_not_found, .src = "enum Dir { north }\nenum Pole { up }\nenum Axis { up }\nrule r() {\n  let m: [Dir: int] = [.up: 1]\n}" },
+    .{ .name = "a closure's element read at a call where no enum is expected", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let f = |x| {\n    let mut y = [x]\n    y = [.north]\n    0\n  }\n  let k = f(1)\n}" },
+    .{ .name = "some of a variant where the enum itself is expected", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let d: Dir = some(.north)\n}" },
+    .{ .name = "a scene resource's enum field", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nresource Nav { d: Dir = .north }\ncomponent C { v: int = 0 }\nscene \"S\" {\n  resources { Nav { d: .west } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
+    .{ .name = "a closure reading the variant of two enums, nothing expected", .code = .ambiguous_enum_variant, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let f = |x| {\n    let mut y = x\n    y = .north\n    y\n  }\n  let a = f(Dir.south)\n  let b = f(Pole.south)\n}" },
+    .{ .name = "a data entry's enum field", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nstruct Item { d: Dir = .north }\ndata Db: Item {\n  e: { d: .west },\n}" },
+    .{ .name = "a let annotation's enum has no such variant", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let e: Dir = .west\n}" },
+    .{ .name = "a let annotation is not an enum", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let x: int = .south\n}" },
+    .{ .name = "no enum has the variant", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let d = .west\n}" },
+    .{ .name = "a fn argument", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nfn f(d: Dir) -> int { 1 }\nrule r() {\n  let n = f(.west)\n}" },
+    .{ .name = "a return value", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nfn g() -> Dir {\n  return .west\n}" },
+    .{ .name = "a reassignment", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let mut e: Dir = Dir.north\n  e = .west\n}" },
+    .{ .name = "a struct field write", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nstruct T { d: Dir = .north }\nrule r() {\n  let mut t = T { d: Dir.north }\n  t.d = .west\n}" },
+    .{ .name = "an equality", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let e = Dir.north\n  let b = e == .west\n}" },
+    .{ .name = "two enums share the variant and nothing expects one", .code = .ambiguous_enum_variant, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let v = .north\n}" },
+};
+
+test "a .variant shorthand resolves against the expected type, else against the one enum naming it" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (shorthand_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const shorthand_accepted = [_]UnitCase{
+    .{ .name = "elements of a dynamic array", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let ds: Dir[] = [.north, .south]\n}" },
+    .{ .name = "elements of a fixed array", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let ds: Dir[2] = [.south, .north]\n}" },
+    .{ .name = "a fill", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let ds: Dir[3] = [.south; 3]\n}" },
+    .{ .name = "elements of an optional array", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let os: Dir[]? = [.north]\n}" },
+    .{ .name = "elements under some", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let os: Dir[]? = some([.north])\n}" },
+    .{ .name = "a map value", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let m: [int: Dir] = [1: .south]\n}" },
+    .{ .name = "a map key", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let m: [Dir: int] = [.south: 1]\n}" },
+    .{ .name = "elements of nested arrays", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let dss: Dir[][] = [[.south]]\n}" },
+    .{ .name = "elements of a block's value", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let ds: Dir[] = { [.south] }\n}" },
+    .{ .name = "elements of an if's branches", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let c = true\n  let ds: Dir[] = if c { [.south] } else { [.north, .north] }\n}" },
+    .{ .name = "elements of a match's arms", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let k = 0\n  let ds: Dir[] = match k {\n    0 => [.south],\n    _ => [.north],\n  }\n}" },
+    .{ .name = "elements passed to a fn", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nfn count(ds: Dir[]) -> int {\n  ds.len()\n}\nrule r() {\n  let k = count([.south])\n}" },
+    .{ .name = "elements passed to a generic fn", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nfn count_g<T>(ds: Dir[], t: T) -> int {\n  ds.len()\n}\nrule r() {\n  let k = count_g([.south], 1)\n}" },
+    .{ .name = "elements passed to a method", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nstruct Q { n: int = 0 }\nimpl Q {\n  fn count(self, ds: Dir[]) -> int {\n    ds.len()\n  }\n}\nrule r() {\n  let q = Q { n: 1 }\n  let k = q.count([.south])\n}" },
+    .{ .name = "elements passed to an annotated closure", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let f = |ds: Dir[]| ds.len()\n  let k = f([.south])\n}" },
+    .{ .name = "elements returned", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nfn mk() -> Dir[] {\n  return [.south]\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "elements as a fn's tail", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nfn mk2() -> Dir[2] {\n  [.north, .south]\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "elements as a method's tail", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nstruct Q2 { n: int = 0 }\nimpl Q2 {\n  fn dirs(self) -> Dir[] {\n    [.south]\n  }\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "elements pushed", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut dss: Dir[][] = []\n  dss.push([.south])\n}" },
+    .{ .name = "elements inserted as a map value", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut m: [int: Dir[]] = [:]\n  m.insert(1, [.south])\n}" },
+    .{ .name = "elements assigned", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut ds: Dir[] = [Dir.north]\n  ds = [.south]\n}" },
+    .{ .name = "elements written to an element", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut dss: Dir[][] = [[Dir.north]]\n  dss[0] = [.south]\n}" },
+    .{ .name = "elements as a ?? default", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let o: Dir[]? = none\n  let ds = o ?? [.south]\n}" },
+    .{ .name = "elements as a struct literal's field", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nstruct H { ds: Dir[]? = none }\nrule r() {\n  let h = H { ds: [.south] }\n}" },
+    .{ .name = "elements of a key inserted", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut m: [Dir[2]: int] = [:]\n  m.insert([.north, .south], 5)\n}" },
+    .{ .name = "elements of a key read", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let m: [Dir[2]: int] = [:]\n  let v = m[[.south, .north]] ?? 0\n}" },
+    .{ .name = "elements of an element inserted into a set", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut s: Set<Dir[2]> = Set.new()\n  s.insert([.north, .south])\n}" },
+    .{ .name = "elements of an element looked up in a set", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let s: Set<Dir[2]> = Set.new()\n  let b = s.contains([.north, .south])\n}" },
+    .{ .name = "the one enum naming the variant, passed for a type parameter", .code = .type_mismatch, .src = "enum Dir { north, south }\nfn id<T>(t: T) -> int {\n  0\n}\nrule r() {\n  let k = id(.north)\n}" },
+    .{ .name = "elements of a scene resource's array field", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nresource Nav { dirs: Dir[] }\ncomponent C { v: int = 0 }\nscene \"S\" {\n  resources { Nav { dirs: [.north] } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
+};
+
+test "a .variant takes the enum its slot's element, key or value names" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (shorthand_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const option_refused = [_]UnitCase{
+    .{ .name = "an int is no optional struct", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let o: P? = 5\n}" },
+    .{ .name = "an int is no optional array", .code = .type_mismatch, .src = "rule r() {\n  let o: int[]? = 5\n}" },
+    .{ .name = "a ?? default of another type than the payload", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let v = some(P { x: 1 }) ?? 0\n}" },
+    .{ .name = "a field of an optional read without unwrapping", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let o = some(P { x: 1 })\n  let v = o.x\n}" },
+    .{ .name = "a missing field reached through ?.", .code = .invalid_field_filter, .src = "struct P { x: int = 0 }\nrule r() {\n  let o = some(P { x: 1 })\n  let v = o?.nope\n}" },
+    .{ .name = "an optional struct has no equality", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let o = some(P { x: 1 })\n  let b = o == none\n}" },
+    .{ .name = "an int passed for an optional struct", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn f(o: P?) -> int { 1 }\nrule r() {\n  let n = f(1)\n}" },
+    .{ .name = "some of a bool is no optional int", .code = .type_mismatch, .src = "rule r() {\n  let o: int? = some(true)\n}" },
+    .{ .name = "a literal pattern against an optional", .code = .type_mismatch, .src = "rule r() {\n  let o: int? = some(1)\n  let v = match o { 1 => 1, _ => 0 }\n}" },
+    .{ .name = "a compound assignment to an optional", .code = .type_mismatch, .src = "rule r() {\n  let mut o: int? = none\n  o += 1\n}" },
+    .{ .name = "a compound assignment to an optional field", .code = .type_mismatch, .src = "struct S { o: int? = none }\nrule r() {\n  let mut s = S { }\n  s.o += 1\n}" },
+    .{ .name = "an if joining none and a value is no bare value", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let n: int = if c { 5 } else { none }\n}" },
+    .{ .name = "a match joining none and a value is no bare value", .code = .type_mismatch, .src = "rule r() {\n  let n: int = match 1 { 1 => 5, _ => none }\n}" },
+    .{ .name = "a closure wrapping a value at one call only", .code = .type_mismatch, .src = "rule r() {\n  let f = |x| {\n    let y: int? = x\n    y\n  }\n  let a = f(1)\n  let o: int? = some(2)\n  let b = f(o)\n}" },
+    .{ .name = "a closure's shorthand naming another enum at each call", .code = .ambiguous_enum_variant, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let f = |x| x == .north\n  let a = f(Dir.south)\n  let b = f(Pole.south)\n}" },
+    .{ .name = "a loop breaking none and a value is no bare value", .code = .type_mismatch, .src = "rule r() {\n  let mut i = 0\n  let n: int = loop {\n    if i > 0 {\n      break none\n    }\n    i += 1\n    break 5\n  }\n}" },
+};
+
+test "an allocation failure while typing an optional is an error, never an accepted program" {
+    var backing = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer backing.deinit();
+    const src = "struct P { x: int = 0 }\nrule r() {\n  let n: int = some(P { x: 1 })\n}";
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        var pr = try parser_mod.parse(backing.allocator(), src);
+        var failing: @import("weld_core").testing.alloc_counting.OneShotFailing = .{ .backing = backing.allocator(), .fail_at = index };
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        if (TypeChecker.check(failing.allocator(), &pr.ast, &diags)) {
+            try std.testing.expect(!failing.failed);
+            try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+            try std.testing.expectEqual(DiagnosticCode.type_mismatch, diags.items[0].code);
+            break;
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+}
+
+test "a scene's scope resolves an optional of a declared type" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa, "enum Dir { north, south }\naudio_graph G {\n  params {\n    d: Dir? = none\n  }\n  output(wave_player(\"a.wav\"))\n}");
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var prefabs: std.StringHashMapUnmanaged(void) = .empty;
+    var uuids: std.StringHashMapUnmanaged(void) = .empty;
+    var module_index: std.StringHashMapUnmanaged(usize) = .empty;
+    const project: TypeChecker.ProjectContext = .{
+        .prefabs = &prefabs,
+        .uuids = &uuids,
+        .module_index = &module_index,
+        .exports = &.{},
+        .arenas = &.{},
+    };
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    var scope = try TypeChecker.cookScope(gpa, &pr.ast, &project, &diags);
+    defer scope.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+const declared_collection_refused = [_]UnitCase{
+    .{ .name = "an int is no array of structs", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let a: P[] = 5\n}" },
+    .{ .name = "an int is no fixed array of enums", .code = .type_mismatch, .src = "enum Dir { north, south }\nrule r() {\n  let ds: Dir[2] = 5\n}" },
+    .{ .name = "an int is no map of structs", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let m: [int: P] = 5\n}" },
+    .{ .name = "an int is no set of enums", .code = .type_mismatch, .src = "enum Dir { north, south }\nrule r() {\n  let s: Set<Dir> = 5\n}" },
+    .{ .name = "an array of structs holds no int", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let a: P[] = [1, 2]\n}" },
+    .{ .name = "a pushed int is no struct", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let mut a: P[] = []\n  a.push(1)\n}" },
+    .{ .name = "an int array passed for an array of structs", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn f(xs: P[]) -> int {\n  xs.len()\n}\nrule r() {\n  let n = f([1])\n}" },
+    .{ .name = "a struct is no set element", .code = .bound_not_satisfied, .src = "struct P { x: int = 0 }\nrule r() {\n  let s: Set<P> = Set.new()\n}" },
+    .{ .name = "a struct is no map key", .code = .bound_not_satisfied, .src = "struct P { x: int = 0 }\nrule r() {\n  let m: [P: int] = [:]\n}" },
+    .{ .name = "an array is no set element", .code = .bound_not_satisfied, .src = "rule r() {\n  let s: Set<int[]> = Set.new()\n}" },
+    .{ .name = "a resource array of enums holds no int", .code = .type_mismatch, .src = "enum Dir { north, south }\nresource Nav { dirs: Dir[] }\nrule r() when resource Nav {\n  get_mut(Nav).dirs = 5\n}" },
+    .{ .name = "array elements of two types", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let a = [P { x: 1 }, 2]\n}" },
+    .{ .name = "a set is not sliced", .code = .type_mismatch, .src = "rule r() {\n  let s = Set.from([1, 2])\n  let t = s[0..1]\n}" },
+    .{ .name = "a float is no set element of a parameter", .code = .bound_not_satisfied, .src = "fn f(s: Set<float>) -> int {\n  0\n}" },
+    .{ .name = "a struct is no map key of a return type", .code = .bound_not_satisfied, .src = "struct P { x: int = 0 }\nfn f() -> [P: int] {\n  [:]\n}" },
+    .{ .name = "a generic map return keeps its element type", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn wrap<T>(x: T) -> [string: T] {\n  [\"a\": x]\n}\nrule r() {\n  let w: [string: int] = wrap(P { x: 1 })\n}" },
+    .{ .name = "an array of arrays holds no array of strings", .code = .type_mismatch, .src = "rule r() {\n  let a: int[][] = [[\"s\"]]\n}" },
+};
+
+test "a collection of a declared type refuses what does not fit it" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (declared_collection_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "an interned optional holds the payload it is given" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa, "struct P { x: int = 0 }\nfn f<P>(v: P) -> P? {\n  none\n}");
+    defer pr.deinit(gpa);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer diags.deinit(gpa);
+    var tc: TypeChecker = .{ .gpa = gpa, .arena = &pr.ast, .diagnostics = &diags };
+    defer tc.deinit();
+    try tc.reservePayloadSlots();
+    const kinds = pr.ast.type_nodes.items(.kind);
+    const index = std.mem.indexOfScalar(ast_mod.TypeNodeKind, kinds, .optional).?;
+    const node: NodeId = .{ .category = .type_node, .index = @intCast(index) };
+    const p = pr.ast.strings.find("P").?;
+    const item = std.mem.indexOfScalar(ast_mod.ItemKind, pr.ast.items.items(.kind), .struct_decl).?;
+    const struct_p: ResolvedType = .{ .struct_t = .{ .arena = &pr.ast, .item = .{ .category = .item, .index = @intCast(item) } } };
+    const declared = tc.internedOptional(&pr.ast, node, struct_p);
+    const generic = tc.internedOptional(&pr.ast, node, .{ .generic = p });
+    try std.testing.expect(declared.optional.eql(struct_p));
+    try std.testing.expect(generic.optional.eql(.{ .generic = p }));
+    try std.testing.expectEqual(declared.optional, tc.internedOptional(&pr.ast, node, struct_p).optional);
+}
+
+test "an optional type node keeps one payload per generic scope reading it" {
+    const gpa = std.testing.allocator;
+    const decls = "struct P { x: int = 0 }\nstruct S { p: P? = none }\n";
+    const shadowing = "fn f<P>(v: P) {\n  let s = S { p: none }\n}\n";
+    const plain = "fn g<T>(v: T) {\n  let s = S { p: 5 }\n}\n";
+    const orders = [_][]const u8{ decls ++ shadowing ++ plain, decls ++ plain ++ shadowing };
+    for (orders) |src| {
+        var r = try parseAndCheck(gpa, src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        try std.testing.expectEqual(@as(usize, 1), r.diagnostics.items.len);
+        try std.testing.expectEqual(DiagnosticCode.type_mismatch, r.diagnostics.items[0].code);
+    }
+}
+
+test "an optional of any payload refuses what does not fit it" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (option_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
 }

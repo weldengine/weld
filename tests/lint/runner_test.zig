@@ -145,6 +145,11 @@ test "rule no_float_reduce flags bad fixtures" {
     try forEachZigFile(ctx.gpa, ctx.io, "tests/lint/bad/float_reduce", &ctx, &assertBadFixture);
 }
 
+test "rule no_raw_named_type_read flags bad fixtures" {
+    var ctx: Context = .{ .gpa = std.testing.allocator, .io = std.testing.io };
+    try forEachZigFile(ctx.gpa, ctx.io, "tests/lint/bad/raw_named_type_read", &ctx, &assertBadFixture);
+}
+
 test "good fixtures pass clean" {
     var ctx: Context = .{ .gpa = std.testing.allocator, .io = std.testing.io };
     try forEachZigFile(ctx.gpa, ctx.io, "tests/lint/good", &ctx, &assertGoodFile);

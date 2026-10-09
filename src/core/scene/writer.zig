@@ -10,7 +10,7 @@
 //!   [Schema Registry]              §10 — one SchemaEntry per distinct type
 //!   [Resources Block]              per resource: schema-index + data + string refs
 //!   [Archetype Blocks]             per archetype: schema mask + entity meta + SoA columns
-//!   [Entity Extensions Table]
+//!   [Extensions region]            extensions, prefab ids, hooks, requires
 //!   [Cross-references Table]
 //! ```
 //! `hash` covers everything after the header. Component identity on disk is the
@@ -229,16 +229,13 @@ const Writer = struct {
         }
     }
 
-    /// Cross-references Table @ `crossrefs_offset`: `count: u32` then `count`
-    /// `CrossRefEntry` (16 B). The model carries `component_id`; here it is
-    /// converted to the file-local Schema Registry index (`id_to_index`) — the
-    /// on-disk entry never stores a runtime `ComponentId`.
-    /// Entity Extensions region @ `extensions_offset` (SHAPE A) — three
+    /// Entity Extensions region @ `extensions_offset` (SHAPE A) — four
     /// self-delimiting sub-tables: the Entity Extensions Table (per-entity active
     /// extensions), the Prefab ID Table (dedup'd extension names → string-table
-    /// offsets), and the hooks (`extends` prefab `on_attach`/`on_detach` text refs;
+    /// offsets), the hooks (`extends` prefab `on_attach`/`on_detach` text refs;
     /// `0` = absent — safe because a prefab's entity name is interned before its
-    /// hooks, so no hook text lands at string-table offset 0).
+    /// hooks, so no hook text lands at string-table offset 0), and the requires
+    /// (the `extends` prefab's required component names, string-table offsets).
     fn writeExtensionsRegion(self: *Writer) WriteError!void {
         // Entity Extensions Table.
         try self.appendU32(try u32From(self.model.ext_entries.len));
@@ -256,8 +253,14 @@ const Writer = struct {
             try self.appendU32(if (h.on_attach) |idx| self.model_str_ref[idx] else 0);
             try self.appendU32(if (h.on_detach) |idx| self.model_str_ref[idx] else 0);
         }
+        try self.appendU32(try u32From(self.model.requires.len));
+        for (self.model.requires) |str_idx| try self.appendU32(self.model_str_ref[str_idx]);
     }
 
+    /// Cross-references Table @ `crossrefs_offset`: `count: u32` then `count`
+    /// `CrossRefEntry` (16 B). The model carries `component_id`; here it is
+    /// converted to the file-local Schema Registry index (`id_to_index`) — the
+    /// on-disk entry never stores a runtime `ComponentId`.
     fn writeCrossRefs(self: *Writer) WriteError!void {
         try self.appendU32(try u32From(self.model.cross_refs.len));
         for (self.model.cross_refs) |cr| {

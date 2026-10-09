@@ -1,0 +1,23 @@
+component OptElems {
+  some_head: int = 0
+  none_tail: int = 0
+  fill_pick: int = 0
+  wrote: int = 0
+}
+
+rule read(entity: Entity)
+  when entity has OptElems
+{
+  let acc = entity.get_mut(OptElems)
+  let s: int? = some(3)
+  let n: int? = none
+  let a: int?[2] = [s, n]
+  acc.some_head = a[0] ?? 7
+  acc.none_tail = a[1] ?? 9
+  let f: int?[3] = [n; 3]
+  acc.fill_pick = f[2] ?? 4
+  let mut w: int?[2] = [n, n]
+  w[0] = 5
+  w[1] = s
+  acc.wrote = (w[0] ?? 0) * 10 + (w[1] ?? 0)
+}

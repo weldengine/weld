@@ -106,8 +106,8 @@ const EntityIdentityStore = entity_mod.EntityIdentityStore;
 /// pointer the Etch bridge registers; the scene loader fires it after adding an
 /// extension's components, passing the entity, the extension name, and the cooked
 /// `on_attach` Etch source text (`null` if absent). The
-/// Etch bridge registers the callback, which re-parses + runs the
-/// text — the seam itself still only fires whatever callback is registered.
+/// Etch bridge registers the callback, which parses the text once and runs it
+/// — the seam itself only fires whatever callback is registered.
 pub const ExtensionAttachFn = *const fn (
     ctx: ?*anyopaque,
     world: *World,
@@ -134,6 +134,29 @@ pub const ExtensionDetachFn = *const fn (
 
 /// A registered `on_detach` callback + its opaque context.
 const DetachHook = struct { ctx: ?*anyopaque, func: ExtensionDetachFn };
+
+/// An extension's hook texts and the component names its hooks may reach: its
+/// own components and its `requires`.
+pub const ExtensionHooks = struct {
+    on_attach: ?[]const u8,
+    on_detach: ?[]const u8,
+    scope: []const []const u8,
+};
+
+/// The extension hook check seam. The Etch bridge registers a callback that
+/// refuses a hook its type checker refuses against the loaded program; the
+/// loader fires it before any mutation, at activation, at deactivation, and for
+/// every activation of a load before the load runs a hook.
+pub const ExtensionCheckFn = *const fn (
+    ctx: ?*anyopaque,
+    world: *World,
+    entity: EntityId,
+    extension_name: []const u8,
+    hooks: ExtensionHooks,
+) anyerror!void;
+
+/// A registered hook check + its opaque context.
+const CheckHook = struct { ctx: ?*anyopaque, func: ExtensionCheckFn };
 
 /// Top-level ECS world — single archetype list, shared identity, shared
 /// registry, shared resources.
@@ -215,6 +238,10 @@ pub const World = struct {
     /// removing an extension's components. `null` until registered (last wins).
     detach_hook: ?DetachHook = null,
 
+    /// The extension hook check seam. `null` until the Etch bridge registers it
+    /// (last wins); unregistered, no hook is checked.
+    check_hook: ?CheckHook = null,
+
     /// Per-entity active-extension set: an entity → the OWNED copies of
     /// the names of the extensions currently active on it, in activation order.
     /// Populated by `addEntityExtension` inside the shared activate path (so load
@@ -274,9 +301,6 @@ pub const World = struct {
         self.archetype_by_signature.deinit(gpa);
         self.sparse_stores.deinit(gpa);
         self.entity_locations.deinit(gpa);
-        // Reclaim resource-owned persistent payloads (strings, collections)
-        // BEFORE freeing the byte buffers. Idempotent — a no-op
-        // when an interpreter already ran this in its own deinit.
         self.releaseResourcePayloads(gpa);
         self.resources.deinit(gpa);
         self.singleton_resources.deinit(gpa);
@@ -389,8 +413,8 @@ pub const World = struct {
     /// extension `extension_name`, passing the cooked `on_attach_text` (the Etch
     /// hook source; `null` if the extension has no `on_attach`). No-op if no hook
     /// is registered. The loader calls this after adding the extension's
-    /// components. The registered callback (the Etch bridge) re-parses +
-    /// executes the text; here the seam just fires it.
+    /// components. The registered callback (the Etch bridge) runs the text; here
+    /// the seam just fires it.
     pub fn dispatchOnAttach(self: *World, entity: EntityId, extension_name: []const u8, on_attach_text: ?[]const u8) anyerror!void {
         if (self.attach_hook) |h| try h.func(h.ctx, self, entity, extension_name, on_attach_text);
     }
@@ -407,6 +431,31 @@ pub const World = struct {
     /// components, so the hook still sees them. No-op if no hook is registered.
     pub fn dispatchOnDetach(self: *World, entity: EntityId, extension_name: []const u8, on_detach_text: ?[]const u8) anyerror!void {
         if (self.detach_hook) |h| try h.func(h.ctx, self, entity, extension_name, on_detach_text);
+    }
+
+    /// Clear each extension seam registered with `ctx`.
+    pub fn unregisterExtensionHooks(self: *World, ctx: *anyopaque) void {
+        const own = @as(?*anyopaque, ctx);
+        if (self.attach_hook) |h| {
+            if (h.ctx == own) self.attach_hook = null;
+        }
+        if (self.detach_hook) |h| {
+            if (h.ctx == own) self.detach_hook = null;
+        }
+        if (self.check_hook) |h| {
+            if (h.ctx == own) self.check_hook = null;
+        }
+    }
+
+    /// Register the extension hook check (one per world, last registration wins).
+    pub fn registerExtensionCheck(self: *World, ctx: ?*anyopaque, callback: ExtensionCheckFn) void {
+        self.check_hook = .{ .ctx = ctx, .func = callback };
+    }
+
+    /// Fire the extension hook check for `entity`'s extension `extension_name`.
+    /// No-op if no check is registered.
+    pub fn dispatchExtensionCheck(self: *World, entity: EntityId, extension_name: []const u8, hooks: ExtensionHooks) anyerror!void {
+        if (self.check_hook) |h| try h.func(h.ctx, self, entity, extension_name, hooks);
     }
 
     /// Record `name` as an active extension on `entity` (storing an
@@ -2398,7 +2447,9 @@ pub const World = struct {
 
     /// Add a resource. `init_bytes` is duplicated by the store.
     pub fn addResource(self: *World, gpa: std.mem.Allocator, id: ComponentId, init_bytes: []const u8) !void {
+        try self.registry.checkResource(id);
         try self.resources.addResource(gpa, id, init_bytes);
+        self.registry.markResource(id);
     }
 
     /// Tick boundary — reset resource dirty bits. Called once per tick
@@ -2420,27 +2471,12 @@ pub const World = struct {
     }
 
     /// Decref and zero every resource's persistent-heap payload slot
-    /// (`.string_` / `.array_` / `.map_` / `.set_`) — the uniform teardown of
-    /// resource-owned heap blocks. Tier-0 `World` owns this
-    /// walk so a world with no interpreter (e.g. the scene loader over a bare
-    /// world) and any resource outside the interpreter's `bridge.resources`
-    /// still reclaim their blocks. `ResourceStore` stays string-agnostic in
-    /// write — `resources.deinit` only frees the byte buffers — but `World`
-    /// owns this decref pass over them.
-    ///
-    /// Idempotent: each slot is zeroed (`ptr = 0`) after its decref, so a
-    /// second call no-ops. This is load-bearing for the interpreter teardown
-    /// order — `Interpreter.deinit` calls this BEFORE destroying its immortal
-    /// `persistent_literals`, and the subsequent `World.deinit` call then sees
-    /// zeroed slots and never re-reads a slot pointing at a freed immortal
-    /// block (which would be a use-after-free). `persistent.decref` no-ops on a
-    /// sentinel-refcount immortal default and frees a refcounted user block.
-    ///
-    /// Allocation-free (decrefs + in-place slot zeroing only); never fails.
-    /// Reaches into `resources.entries` directly rather than through a store
-    /// method: the enumeration is a `World`-level teardown concern, and
-    /// `ResourceStore` (FROZEN) exposes no all-resources iterator.
-    pub fn releaseResourcePayloads(self: *World, gpa: std.mem.Allocator) void {
+    /// (`.string_` / `.array_` / `.map_` / `.set_`), whoever wrote it. Run by
+    /// `deinit`, before the store frees the buffers holding the slots and
+    /// before the registry destroys the immortal blocks a string slot may point
+    /// at, which `decref` leaves alone. Idempotent: each slot is zeroed after its
+    /// decref.
+    fn releaseResourcePayloads(self: *World, gpa: std.mem.Allocator) void {
         var it = self.resources.entries.iterator();
         while (it.next()) |kv| {
             const rid = kv.key_ptr.*;
@@ -2837,16 +2873,6 @@ test "grouped ops reject duplicate / absent components (R11c) without panicking"
     try std.testing.expect(world.componentBytes(e, c) != null);
 }
 
-//
-// `allocateSlot` fills only the TRAILING chunk, so a chunk drained by churn is
-// never refilled, and without reclamation the chunk count follows the cumulative
-// number of appends rather than the live population — until `dispatchBatch`
-// refuses the archetype at its chunk ceiling.
-//
-// Every assertion below is on `chunks_released` or on a survivor's bytes, never
-// on the absence of a crash: an implementation that reclaims nothing passes
-// every OTHER test in this file.
-
 /// A four-byte probe, so one chunk holds many entities and the capacity is the
 /// test's own parameter rather than a literal that a layout change would rot.
 fn reclaimProbe(name: []const u8) ComponentDesc {
@@ -2938,4 +2964,94 @@ test "sustained churn keeps the chunk count on the live population" {
     try std.testing.expectEqual(@as(usize, 2 * cap), live.items.len);
     try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
     try std.testing.expect(arch.chunks_released >= 4);
+}
+
+test "a chunk left partial by churn is refilled, and nothing is reclaimed" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("PA"));
+    const first = try world.spawnDynamic(gpa, &.{cid});
+    const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
+    const cap = arch.layout.capacity;
+
+    var ids: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer ids.deinit(gpa);
+    try ids.append(gpa, first);
+    while (ids.items.len < 3 * cap) try ids.append(gpa, try world.spawnDynamic(gpa, &.{cid}));
+    try std.testing.expectEqual(@as(usize, 3), arch.chunks.items.len);
+
+    const holes = cap / 4;
+    try std.testing.expect(holes > 0);
+    for (0..holes) |i| try world.despawn(gpa, ids.items[i]);
+    try std.testing.expectEqual(@as(u64, 0), arch.chunks_released);
+    try std.testing.expectEqual(@as(usize, 3), arch.chunks.items.len);
+
+    // The trailing chunk must be FULL here, or the count below passes without reuse.
+    for (0..holes) |_| _ = try world.spawnDynamic(gpa, &.{cid});
+
+    try std.testing.expectEqual(@as(usize, 3), arch.chunks.items.len);
+    try std.testing.expectEqual(@as(u64, 0), arch.chunks_released);
+}
+
+test "a reused slot is reported at the chunk it actually landed in" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("PB"));
+    const first = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{&[_]u8{ 7, 0, 0, 0 }});
+    const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
+    const cap = arch.layout.capacity;
+
+    var ids: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer ids.deinit(gpa);
+    try ids.append(gpa, first);
+    while (ids.items.len < 2 * cap) {
+        try ids.append(gpa, try world.spawnDynamicWithValues(gpa, &.{cid}, &.{&[_]u8{ 7, 0, 0, 0 }}));
+    }
+    try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
+
+    try world.despawn(gpa, ids.items[0]);
+
+    const reused = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{&[_]u8{ 9, 0, 0, 0 }});
+    const loc = world.entity_locations.get(reused).?;
+    try std.testing.expectEqual(@as(u32, 0), loc.chunk_idx);
+    try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
+
+    const bytes = world.componentBytes(reused, cid).?;
+    try std.testing.expectEqual(@as(u8, 9), bytes[0]);
+
+    for (ids.items[1..]) |e| {
+        const b = world.componentBytes(e, cid) orelse return error.SurvivorLost;
+        try std.testing.expectEqual(@as(u8, 7), b[0]);
+    }
+}
+
+test "first_partial is a lower bound: every chunk below it is full" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("PC"));
+    const first = try world.spawnDynamic(gpa, &.{cid});
+    const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
+    const cap = arch.layout.capacity;
+
+    var ids: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer ids.deinit(gpa);
+    try ids.append(gpa, first);
+    while (ids.items.len < 3 * cap) try ids.append(gpa, try world.spawnDynamic(gpa, &.{cid}));
+
+    var round: usize = 0;
+    while (round < 3) : (round += 1) {
+        for (0..cap / 8) |i| try world.despawn(gpa, ids.items[round * cap + i]);
+        for (0..cap / 8) |_| _ = try world.spawnDynamic(gpa, &.{cid});
+
+        for (arch.chunks.items[0..arch.first_partial]) |c| {
+            try std.testing.expectEqual(arch.layout.capacity, c.header().entity_count);
+        }
+        try std.testing.expect(arch.first_partial <= arch.chunks.items.len);
+    }
 }

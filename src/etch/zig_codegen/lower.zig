@@ -33,7 +33,9 @@
 
 const std = @import("std");
 const ast_mod = @import("../ast.zig");
+const const_eval = @import("../const_eval.zig");
 const types_mod = @import("../types.zig");
+const tagset_name = types_mod.tagset_component_name;
 const tags_mod = @import("../tags.zig");
 const diag_mod = @import("../diagnostics.zig");
 const descriptor_mod = @import("../descriptor.zig");
@@ -76,6 +78,7 @@ pub fn generateFile(
 
     try emitHeader(&w, source_path);
     try emitImports(&w);
+    try emitArithmeticPrelude(&w);
 
     var stats: GenerateStats = .{};
 
@@ -114,6 +117,9 @@ pub fn generateFile(
                 if (types_mod.storageModeOf(ast, ast.component_decls.items[data]) != .table) {
                     return CodegenError.SparseStorageUnsupported;
                 }
+                const requisites = types_mod.requiresNamesOf(gpa, ast, ast.component_decls.items[data]) catch return CodegenError.OutOfMemory;
+                defer gpa.free(requisites);
+                if (requisites.len != 0) return CodegenError.RequiresUnsupported;
                 try emitComponentLikeStruct(&w, ast, data, .component);
                 stats.components += 1;
             },
@@ -159,6 +165,7 @@ pub fn generateFile(
     // program that only inserts (or only reads) is harmless; map-free
     // programs stay byte-identical.
     if (ast.map_lits.items.len > 0) {
+        try emitCollectionTypesPrelude(&w, map_types_table);
         try emitMapInsertPrelude(&w);
         try emitMapGetPrelude(&w);
     }
@@ -169,14 +176,11 @@ pub fn generateFile(
     // Same over-emission tolerance as the map helpers; set-free programs
     // stay byte-identical.
     if (programUsesSet(ast)) {
+        try emitCollectionTypesPrelude(&w, set_types_table);
         try emitSetInsertPrelude(&w);
         try emitSetContainsPrelude(&w);
     }
 
-    // The builtin `TagSet` component: a fixed `[words]u64` bitfield,
-    // one slot per entity carrying tags. Emitted as an `extern struct` so its
-    // layout matches the registry's raw `words*8`-byte / align-8 component
-    // (`etch-abi-zig.md` §3) — byte-exact with the interpreter's `registerComponentRaw`.
     if (tag_table.leaf_count > 0) {
         try emitTagSetStruct(&w, tag_table.words());
     }
@@ -305,7 +309,7 @@ fn emitImports(w: *Writer) CodegenError!void {
 /// command buffer. Layout matches the registry's raw component
 /// (size `words*8`, align 8, no named fields).
 fn emitTagSetStruct(w: *Writer, words: u32) CodegenError!void {
-    try w.printLine("pub const TagSet = extern struct {{ bits: [{d}]u64 = [_]u64{{0}} ** {d} }};", .{ words, words });
+    try w.printLine("pub const " ++ tagset_name ++ " = extern struct {{ bits: [{d}]u64 = [_]u64{{0}} ** {d} }};", .{ words, words });
     try w.blankLine();
 }
 
@@ -338,11 +342,12 @@ fn emitComponentLikeStruct(w: *Writer, ast: *const AstArena, data: u32, kind: De
     var f_i: u32 = 0;
     while (f_i < fields_len) : (f_i += 1) {
         const f = ast.fields.items[fields_start + f_i];
-        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
+        // A resource collection field has no lowering here.
+        const declared = ast.namedTypeName(f.type_node) orelse return CodegenError.UnsupportedConstruct;
         // Resolve through any `type` alias chain: `x: Meters` where
         // `type Meters = float` emits as `x: f64`, identical to the layout
         // the interpreter computes, keeping the differential byte-exact.
-        const etch_type = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+        const etch_type = ast.strings.slice(ast.resolveTypeAliasName(declared));
         const zig_type = type_map.mapBuiltin(etch_type) orelse return CodegenError.NonPodComponent;
         const fname = ast.strings.slice(f.name);
         if (f.default_value.isNone()) {
@@ -399,6 +404,13 @@ fn emitErrorPrelude(w: *Writer) CodegenError!void {
     try w.blankLine();
 }
 
+/// Name each map or set type of `table` once: a type spelled at each `let`
+/// would be a distinct anonymous struct, and a copy would not type-check.
+fn emitCollectionTypesPrelude(w: *Writer, comptime table: anytype) CodegenError!void {
+    inline for (table) |p| try w.printLine("const {s} = {s};", .{ p[p.len - 2], p[p.len - 1] });
+    try w.blankLine();
+}
+
 /// Emit the map-insert helper (stdlib §14.2): one
 /// duck-typed fn shared by `m.insert(k, v)`, the map-literal seeding, and
 /// nothing else. Last-write-wins through the same scan-replace-or-append as
@@ -442,6 +454,73 @@ fn emitMapGetPrelude(w: *Writer) CodegenError!void {
     w.indentBy(-1);
     try w.line("}");
     try w.blankLine();
+}
+
+/// Emit the integer arithmetic helpers: overflow wraps in `ReleaseFast` and
+/// `ReleaseSmall` and panics in `Debug` and `ReleaseSafe`, and an integer
+/// division by zero panics in every mode (`etch-reference-part1.md` §12.4).
+/// Plain functions, so a literal operand is still checked when the program runs.
+fn emitArithmeticPrelude(w: *Writer) CodegenError!void {
+    const lines = [_][]const u8{
+        "const __etch_wraps = switch (@import(\"builtin\").mode) {",
+        "    .Debug, .ReleaseSafe => false,",
+        "    .ReleaseFast, .ReleaseSmall => true,",
+        "};",
+        "fn __etchAdd(comptime T: type, a: T, b: T) T {",
+        "    return if (__etch_wraps) a +% b else a + b;",
+        "}",
+        "fn __etchSub(comptime T: type, a: T, b: T) T {",
+        "    return if (__etch_wraps) a -% b else a - b;",
+        "}",
+        "fn __etchMul(comptime T: type, a: T, b: T) T {",
+        "    return if (__etch_wraps) a *% b else a * b;",
+        "}",
+        "fn __etchNeg(comptime T: type, x: T) T {",
+        "    return if (__etch_wraps) 0 -% x else -x;",
+        "}",
+        "fn __etchDiv(comptime T: type, a: T, b: T) T {",
+        "    if (b == 0) @panic(\"division by zero\");",
+        "    if (@typeInfo(T).int.signedness == .signed and a == std.math.minInt(T) and b == -1) {",
+        "        if (__etch_wraps) return a;",
+        "        @panic(\"integer overflow\");",
+        "    }",
+        "    return @divTrunc(a, b);",
+        "}",
+        "fn __etchRem(comptime T: type, a: T, b: T) T {",
+        "    if (b == 0) @panic(\"division by zero\");",
+        "    if (@typeInfo(T).int.signedness == .signed and b == -1) return 0;",
+        "    return @rem(a, b);",
+        "}",
+        "fn __etchNarrow(comptime T: type, x: anytype) T {",
+        "    if (std.math.cast(T, x)) |n| return n;",
+        "    if (!__etch_wraps) @panic(\"integer overflow\");",
+        "    const Src = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(x)));",
+        "    const Dst = std.meta.Int(.unsigned, @bitSizeOf(T));",
+        "    return @bitCast(@as(Dst, @truncate(@as(Src, @bitCast(x)))));",
+        "}",
+        "fn __etchIntFromFloat(comptime T: type, x: anytype) T {",
+        "    const F = @TypeOf(x);",
+        "    if (!std.math.isFinite(x)) @panic(\"integer overflow\");",
+        "    const t = @trunc(x);",
+        "    if (t < @as(F, @floatFromInt(std.math.minInt(T))) or t >= @as(F, @floatFromInt(@as(i128, std.math.maxInt(T)) + 1))) @panic(\"integer overflow\");",
+        "    return @intFromFloat(t);",
+        "}",
+    };
+    for (lines) |l| try w.line(l);
+    try w.blankLine();
+}
+
+/// The prelude helper that lowers integer operator `op`, or null for an operator
+/// Zig's own spelling serves.
+fn intArithHelper(op: ast_mod.BinaryOp) ?[]const u8 {
+    return switch (op) {
+        .add => "__etchAdd",
+        .sub => "__etchSub",
+        .mul => "__etchMul",
+        .div => "__etchDiv",
+        .rem => "__etchRem",
+        else => null,
+    };
 }
 
 /// Emit the set-insert helper (stdlib §15.2): one
@@ -536,10 +615,7 @@ fn isErrorName(name: StringId, err_id: ?StringId, code_id: ?StringId) bool {
 /// optional payload (`Error?`).
 fn typeNodeNamesError(ast: *const AstArena, type_node: NodeId, err_id: ?StringId, code_id: ?StringId) bool {
     switch (ast.typeNodeKind(type_node)) {
-        .named => {
-            const named = ast.named_types.items[ast.typeNodeData(type_node)];
-            return isErrorName(ast.resolveTypeAliasName(named.name), err_id, code_id);
-        },
+        .named => return isErrorName(ast.resolveTypeAliasName(ast.namedTypeName(type_node).?), err_id, code_id),
         .optional => {
             const payload: NodeId = @bitCast(ast.typeNodeData(type_node));
             return typeNodeNamesError(ast, payload, err_id, code_id);
@@ -781,11 +857,10 @@ fn exprCanThrow(ast: *const AstArena, expr: NodeId) bool {
     }
 }
 
-/// Whether a statement run references identifier `name` — drives the `_ = <name>;`
-/// discard for an unused catch binding (Zig rejects unused captures). An inner
-/// rebinding of the same name counts as a use (over-approximation): the discard is then
-/// skipped and Zig fails loud on the unused outer capture — an exotic shadowing shape,
-/// never a silent divergence.
+/// Whether a statement run names `name` where its emitted Zig does: drives the
+/// discard of a binding nothing names — a `let`, a catch binding, a map loop's
+/// key or value. An inner binding of the same name counts as a use of the outer
+/// one.
 fn stmtRunUsesIdent(ast: *const AstArena, name: StringId, start: u32, len: u32) bool {
     var s: u32 = 0;
     while (s < len) : (s += 1) {
@@ -800,8 +875,9 @@ fn stmtUsesIdent(ast: *const AstArena, name: StringId, stmt_id: NodeId) bool {
         .throw_stmt => return exprUsesIdent(ast, name, ast.throw_stmts.items[data].value),
         .try_catch_stmt => {
             const tc = ast.try_catch_stmts.items[data];
+            // A try body that cannot throw is emitted without its catch body.
             return stmtRunUsesIdent(ast, name, tc.try_start, tc.try_len) or
-                stmtRunUsesIdent(ast, name, tc.catch_start, tc.catch_len);
+                (stmtRunCanThrow(ast, tc.try_start, tc.try_len) and stmtRunUsesIdent(ast, name, tc.catch_start, tc.catch_len));
         },
         .let_stmt => return exprUsesIdent(ast, name, ast.let_stmts.items[data].value),
         .assign_stmt => {
@@ -842,6 +918,16 @@ fn exprUsesIdent(ast: *const AstArena, name: StringId, expr: NodeId) bool {
     const data = ast.exprData(expr);
     switch (ast.exprKind(expr)) {
         .ident => return data == name,
+        .some_lit => return exprUsesIdent(ast, name, @bitCast(data)),
+        .map_lit => {
+            const ml = ast.map_lits.items[data];
+            var i: u32 = 0;
+            while (i < ml.entries_len) : (i += 1) {
+                const entry = ast.map_entries.items[ml.entries_start + i];
+                if (exprUsesIdent(ast, name, entry.key) or exprUsesIdent(ast, name, entry.value)) return true;
+            }
+            return false;
+        },
         .fn_call => {
             const call = ast.call_exprs.items[data];
             if (exprUsesIdent(ast, name, call.callee)) return true;
@@ -979,9 +1065,8 @@ fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void
     var f_i: u32 = 0;
     while (f_i < decl.fields_len) : (f_i += 1) {
         const f = ast.fields.items[decl.fields_start + f_i];
-        if (ast.typeNodeKind(f.type_node) != .named) continue;
-        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-        if (std.mem.eql(u8, ast.strings.slice(ast.resolveTypeAliasName(tnode.name)), "string")) has_string = true;
+        const declared = ast.namedTypeName(f.type_node) orelse continue;
+        if (std.mem.eql(u8, ast.strings.slice(ast.resolveTypeAliasName(declared)), "string")) has_string = true;
     }
     try w.printLine("pub const {s} = {s}struct {{", .{ name, if (has_string) "" else "extern " });
     w.indentBy(1);
@@ -989,11 +1074,9 @@ fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void
     while (f_i < decl.fields_len) : (f_i += 1) {
         const f = ast.fields.items[decl.fields_start + f_i];
         // Optional fields (`Error?`) have no codegen lowering yet — deferred
-        // to the Optional-ops tranche (interpreter reference). The guard also
-        // protects the `named_types` index below.
-        if (ast.typeNodeKind(f.type_node) != .named) return CodegenError.UnsupportedConstruct;
-        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-        const resolved = ast.resolveTypeAliasName(tnode.name);
+        // to the Optional-ops tranche (interpreter reference).
+        const declared = ast.namedTypeName(f.type_node) orelse return CodegenError.UnsupportedConstruct;
+        const resolved = ast.resolveTypeAliasName(declared);
         const etch_type = ast.strings.slice(resolved);
         const fname = ast.strings.slice(f.name);
         // `string` field: `[]const u8`, empty default;
@@ -1125,26 +1208,26 @@ fn emitMethod(w: *Writer, ast: *const AstArena, struct_name: []const u8, method:
         try w.print("self: {s}{s}", .{ if (method.self_kind == .by_mut) "*" else "", struct_name });
         wrote_param = true;
         if (ast.strings.find("self")) |sid| {
-            try ctx.records.append(w.gpa, .{ .key = .{ .name = sid }, .info = .{ .kind = .value, .zig_type = struct_name, .is_mut = method.self_kind == .by_mut } });
+            try ctx.records.append(w.gpa, .{ .key = .{ .name = sid }, .info = .{ .kind = .value, .zig_type = struct_name, .is_mut = method.self_kind == .by_mut, .deref = method.self_kind == .by_mut } });
         }
     }
     var p_i: u32 = 0;
     while (p_i < method.params_len) : (p_i += 1) {
         if (wrote_param) try w.write(", ");
         const p = ast.fn_params.items[method.params_start + p_i];
-        const zig_t = fnTypeZig(ast, p.type_node);
+        const zig_t = try fnTypeZig(ast, p.type_node);
         try w.ident(ast.strings.slice(p.name));
         try w.print(": {s}", .{zig_t});
         wrote_param = true;
         try ctx.records.append(w.gpa, .{ .key = .{ .name = p.name }, .info = .{ .kind = .value, .zig_type = zig_t, .is_mut = false } });
     }
     try w.write(") ");
-    try w.write(if (method.return_type.isNone()) "void" else fnTypeZig(ast, method.return_type));
+    try w.write(if (method.return_type.isNone()) "void" else try fnTypeZig(ast, method.return_type));
     try w.write(" {\n");
     w.indentBy(1);
     var s: u32 = 0;
     while (s < method.body_len) : (s += 1) {
-        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[method.body_start + s]));
+        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[method.body_start + s]), restAfter(method.body_start, method.body_len, s, method.value));
     }
     if (!method.value.isNone()) {
         try w.writeIndent();
@@ -1211,23 +1294,22 @@ fn emitRegister(w: *Writer, ast: *const AstArena, tag_table: *const tags_mod.Tag
         }
     }
 
-    // Register the builtin `TagSet` component when the program
-    // declares any tag. The raw descriptor mirrors the interpreter's
-    // `compileProgram` registration exactly (name "TagSet", size `@sizeOf`,
-    // align `@alignOf`, zeroed default, no named fields) so the runtime
-    // component id and layout are byte-identical across backends. The id is
-    // discarded — the rules look it up by name via `idOf("TagSet")`.
+    // The emitted descriptor sets exactly what the interpreter's `tagSetDesc`
+    // sets, so the component's layout and schema digest match across backends.
+    // The id is discarded — the rules look it up by name via `idOf("TagSet")`.
     if (tag_table.leaf_count > 0) {
+        const content_digest = try tag_table.contentDigest(w.gpa);
         try w.line("{");
         w.indentBy(1);
-        try w.line("var __tagset_default: TagSet = .{};");
+        try w.line("var __tagset_default: " ++ tagset_name ++ " = .{};");
         try w.line("_ = try world.registry.registerComponentRaw(gpa, .{");
         w.indentBy(1);
-        try w.line(".name = \"TagSet\",");
-        try w.line(".size = @sizeOf(TagSet),");
-        try w.line(".alignment = @alignOf(TagSet),");
+        try w.line(".name = \"" ++ tagset_name ++ "\",");
+        try w.line(".size = @sizeOf(" ++ tagset_name ++ "),");
+        try w.line(".alignment = @alignOf(" ++ tagset_name ++ "),");
         try w.line(".default_bytes = std.mem.asBytes(&__tagset_default),");
         try w.line(".fields = &.{},");
+        try w.printLine(".content_digest = {d},", .{content_digest});
         w.indentBy(-1);
         try w.line("});");
         w.indentBy(-1);
@@ -1257,10 +1339,10 @@ fn emitRegisterCall(
     var f_i: u32 = 0;
     while (f_i < fields_len) : (f_i += 1) {
         const f = ast.fields.items[fields_start + f_i];
-        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
+        const declared = ast.namedTypeName(f.type_node) orelse return CodegenError.UnsupportedConstruct;
         // Resolve through any `type` alias chain, matching the struct
         // emission and the interpreter's FieldKind resolution.
-        const etch_t = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+        const etch_t = ast.strings.slice(ast.resolveTypeAliasName(declared));
         const zig_t = type_map.mapBuiltin(etch_t) orelse return CodegenError.NonPodComponent;
         const fname = ast.strings.slice(f.name);
         const fkind = fieldKindLiteral(zig_t);
@@ -1416,14 +1498,14 @@ fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenErr
     if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation is not emitted
     if (decl.is_async) return CodegenError.UnsupportedConstruct; // async is not emitted
 
-    const ret_zig: []const u8 = if (decl.return_type.isNone()) "" else fnTypeZig(ast, decl.return_type);
+    const ret_zig: []const u8 = if (decl.return_type.isNone()) "" else try fnTypeZig(ast, decl.return_type);
     if (decl.throws and !decl.return_type.isNone()) {
         // The throwing path returns `zeroDefault(ret)` — only meaningful for
         // builtin-mapped scalars (checked on the ETCH type name; `fnTypeZig`
         // passes user names through 1:1). A `throws` fn returning a user
         // type is deferred (interpreter reference).
-        const tnode = ast.named_types.items[ast.typeNodeData(decl.return_type)];
-        const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+        const declared = ast.namedTypeName(decl.return_type) orelse return CodegenError.UnsupportedConstruct;
+        const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
         if (type_map.mapBuiltin(tname) == null) return CodegenError.UnsupportedConstruct;
     }
 
@@ -1440,7 +1522,7 @@ fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenErr
     while (p_i < decl.params_len) : (p_i += 1) {
         if (p_i > 0) try w.write(", ");
         const p = ast.fn_params.items[decl.params_start + p_i];
-        const zig_t = fnTypeZig(ast, p.type_node);
+        const zig_t = try fnTypeZig(ast, p.type_node);
         try w.ident(ast.strings.slice(p.name));
         try w.print(": {s}", .{zig_t});
         try ctx.records.append(w.gpa, .{ .key = .{ .name = p.name }, .info = .{ .kind = .value, .zig_type = zig_t, .is_mut = false } });
@@ -1474,7 +1556,7 @@ fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenErr
     body_w.arena_used = w.arena_used;
     var s: u32 = 0;
     while (s < decl.body_len) : (s += 1) {
-        try emitStmt(&body_w, ast, &ctx, @bitCast(ast.extra.items[decl.body_start + s]));
+        try emitStmt(&body_w, ast, &ctx, @bitCast(ast.extra.items[decl.body_start + s]), restAfter(decl.body_start, decl.body_len, s, decl.value));
     }
     // Trailing block value = implicit return.
     if (!decl.value.isNone()) {
@@ -1533,9 +1615,9 @@ fn fnBodyCanThrow(ast: *const AstArena, decl: ast_mod.FnDecl) bool {
 /// Map a `fn` parameter / return type node to its Zig type name.
 /// Block-2 fns use named scalar types (alias-resolved); a builtin maps through
 /// `type_map`, a user type passes through 1:1 (same as rule params).
-fn fnTypeZig(ast: *const AstArena, type_node: NodeId) []const u8 {
-    const tnode = ast.named_types.items[ast.typeNodeData(type_node)];
-    const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+fn fnTypeZig(ast: *const AstArena, type_node: NodeId) CodegenError![]const u8 {
+    const declared = ast.namedTypeName(type_node) orelse return CodegenError.UnsupportedConstruct;
+    const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
     // `string` params/returns lower to `[]const u8` — the same mapping the struct-field
     // emitter delivers. A raw-name fallback here would emit invalid Zig
     // (`name: string`), which is the no-silently-wrong-output doctrine breached. The
@@ -1649,7 +1731,7 @@ fn emitObserverRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDec
     }
     var s: u32 = 0;
     while (s < rule.body_len) : (s += 1) {
-        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[rule.body_start + s]));
+        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[rule.body_start + s]), restAfter(rule.body_start, rule.body_len, s, NodeId.none));
     }
 
     w.indentBy(-1);
@@ -1767,7 +1849,7 @@ fn emitRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_t
     // already added "TagSet" to `info.components` for the id + `has TagSet`
     // archetype predicate.
     if (info.tag_filters.len > 0) {
-        _ = try body_used.getOrPut(w.gpa, "TagSet");
+        _ = try body_used.getOrPut(w.gpa, tagset_name);
     }
 
     if (info.has_or_or_not or info.tag_filters.len > 0 or tag_mutating or program_has_changed) {
@@ -2193,7 +2275,7 @@ fn emitArchPredicate(w: *Writer, ast: *const AstArena, when_idx: u32) CodegenErr
         .tag_filter => {
             const tf = ast.tag_filters.items[node.aux];
             switch (tf.op) {
-                .has_tag, .has_any_tag, .has_all_tags => try w.write("arch.hasComponent(TagSet_id)"),
+                .has_tag, .has_any_tag, .has_all_tags => try w.write("arch.hasComponent(" ++ tagset_name ++ "_id)"),
                 .has_no_tag, .has_no_tags => return CodegenError.UnsupportedConstruct,
             }
         },
@@ -2214,7 +2296,7 @@ fn emitRuleBodyOnce(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, in
     while (s < rule.body_len) : (s += 1) {
         const stmt_raw = ast.extra.items[rule.body_start + s];
         const stmt_id: NodeId = @bitCast(stmt_raw);
-        try emitStmt(w, ast, &ctx, stmt_id);
+        try emitStmt(w, ast, &ctx, stmt_id, restAfter(rule.body_start, rule.body_len, s, NodeId.none));
     }
 }
 
@@ -2241,7 +2323,7 @@ fn emitRuleBody(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: 
     while (s < rule.body_len) : (s += 1) {
         const stmt_raw = ast.extra.items[rule.body_start + s];
         const stmt_id: NodeId = @bitCast(stmt_raw);
-        try emitStmt(w, ast, &ctx, stmt_id);
+        try emitStmt(w, ast, &ctx, stmt_id, restAfter(rule.body_start, rule.body_len, s, NodeId.none));
     }
 }
 
@@ -2270,7 +2352,7 @@ fn emitRuleBodyQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, i
     while (s < rule.body_len) : (s += 1) {
         const stmt_raw = ast.extra.items[rule.body_start + s];
         const stmt_id: NodeId = @bitCast(stmt_raw);
-        try emitStmt(w, ast, &ctx, stmt_id);
+        try emitStmt(w, ast, &ctx, stmt_id, restAfter(rule.body_start, rule.body_len, s, NodeId.none));
     }
 }
 
@@ -2426,6 +2508,14 @@ const LocalInfo = struct {
     /// node — lets the call site see the body (a
     /// throwing body rides the hidden `__err` out-param). `none` otherwise.
     closure_node: NodeId = NodeId.none,
+    /// An un-annotated aggregate — an array literal, a closure, an optional —
+    /// whose type Zig infers: a copy of it is left to Zig as well, where a copy
+    /// of any other un-annotated binding is annotated `i64`.
+    aggregate: bool = false,
+    /// `self` of a `mut self` method, a pointer read as the value it points to.
+    deref: bool = false,
+    /// The element type of a fixed array bound by `let`.
+    fixed_elem: []const u8 = "",
 };
 
 const LocalKey = union(enum) {
@@ -2488,6 +2578,9 @@ const LocalCtx = struct {
     /// fn returns after storing the error (never read by the caller, which
     /// checks `__terr_*` before using the result).
     fn_ret_zig: []const u8 = "",
+    /// The method call whose arguments are bound to `__mc<seq>_<j>`, while
+    /// its call is emitted over them.
+    call_temps: ?struct { args_start: u32, seq: u32 } = null,
 
     pub fn deinit(self: *LocalCtx, gpa: std.mem.Allocator) void {
         self.records.deinit(gpa);
@@ -2520,8 +2613,8 @@ const LocalCtx = struct {
         var p_i: u32 = 0;
         while (p_i < rule.params_len) : (p_i += 1) {
             const p = ast.rule_params.items[rule.params_start + p_i];
-            const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
-            const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+            const declared = ast.namedTypeName(p.type_node) orelse return CodegenError.UnsupportedConstruct;
+            const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
             if (std.mem.eql(u8, tname, "Entity")) {
                 // Entity params are handled by the iteration machinery; the
                 // ident never reaches `emitExpr` in a compliant program.
@@ -2536,18 +2629,28 @@ const LocalCtx = struct {
     }
 };
 
-fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) CodegenError!void {
+/// The statements after a statement in its run, and the value the run ends
+/// with: where a binding the statement declares can be named.
+const RunRest = struct { start: u32, len: u32, tail: NodeId };
+
+fn restAfter(start: u32, len: u32, s: u32, tail: NodeId) RunRest {
+    return .{ .start = start + s + 1, .len = len - s - 1, .tail = tail };
+}
+
+fn restUsesIdent(ast: *const AstArena, name: StringId, rest: RunRest) bool {
+    return stmtRunUsesIdent(ast, name, rest.start, rest.len) or
+        (!rest.tail.isNone() and exprUsesIdent(ast, name, rest.tail));
+}
+
+fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId, rest: RunRest) CodegenError!void {
     const kind = ast.stmtKind(stmt_id);
     const data = ast.stmtData(stmt_id);
     switch (kind) {
         .let_stmt => {
             const let = ast.let_stmts.items[data];
-            try emitLet(w, ast, ctx, let);
+            try emitLet(w, ast, ctx, let, rest);
         },
-        .assign_stmt => {
-            const assign = ast.assign_stmts.items[data];
-            try emitAssign(w, ast, ctx, assign);
-        },
+        .assign_stmt => try emitAssign(w, ast, ctx, data),
         .expr_stmt => {
             const eid: NodeId = @bitCast(data);
             const ek = ast.exprKind(eid);
@@ -2648,7 +2751,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try ctx.records.append(w.gpa, .{ .key = .{ .name = f.var_name }, .info = .{ .kind = .value, .zig_type = "i64", .is_mut = false } });
                 var s: u32 = 0;
                 while (s < f.body_len) : (s += 1) {
-                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]));
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]), restAfter(f.body_start, f.body_len, s, NodeId.none));
                 }
                 ctx.records.items.len = saved;
                 w.indentBy(-1);
@@ -2693,7 +2796,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try ctx.records.append(w.gpa, .{ .key = .{ .name = f.index_name }, .info = .{ .kind = .value, .zig_type = kv.value, .is_mut = false } });
                 var s: u32 = 0;
                 while (s < f.body_len) : (s += 1) {
-                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]));
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]), restAfter(f.body_start, f.body_len, s, NodeId.none));
                 }
                 ctx.records.items.len = saved;
                 w.indentBy(-1);
@@ -2719,7 +2822,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try ctx.records.append(w.gpa, .{ .key = .{ .name = f.var_name }, .info = .{ .kind = .value, .zig_type = dyn_elem orelse "", .is_mut = false } });
                 var s: u32 = 0;
                 while (s < f.body_len) : (s += 1) {
-                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]));
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]), restAfter(f.body_start, f.body_len, s, NodeId.none));
                 }
                 ctx.records.items.len = saved;
                 w.indentBy(-1);
@@ -2748,7 +2851,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             w.indentBy(1);
             var s: u32 = 0;
             while (s < wh.body_len) : (s += 1) {
-                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[wh.body_start + s]));
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[wh.body_start + s]), restAfter(wh.body_start, wh.body_len, s, NodeId.none));
             }
             ctx.records.items.len = saved;
             w.indentBy(-1);
@@ -2821,7 +2924,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             const bit = tagPathLeafBitCodegen(ast, table, tm.path) orelse return CodegenError.UnsupportedConstruct;
             const method = if (tm.kind == .add) "setTag" else "clearTag";
             try w.writeIndent();
-            try w.print("cmd.{s}(__entity, world.registry.idOf(\"TagSet\").?, {d}) catch {{}};\n", .{ method, bit });
+            try w.print("cmd.{s}(__entity, world.registry.idOf(\"" ++ tagset_name ++ "\").?, {d}) catch {{}};\n", .{ method, bit });
         },
         .throw_stmt => {
             // `throw expression` — the flag+branch
@@ -2868,7 +2971,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             var s: u32 = 0;
             if (!stmtRunCanThrow(ast, tc.try_start, tc.try_len)) {
                 while (s < tc.try_len) : (s += 1) {
-                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.try_start + s]));
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.try_start + s]), restAfter(tc.try_start, tc.try_len, s, NodeId.none));
                 }
                 return;
             }
@@ -2878,7 +2981,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             const saved_label = ctx.try_label;
             ctx.try_label = data;
             while (s < tc.try_len) : (s += 1) {
-                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.try_start + s]));
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.try_start + s]), restAfter(tc.try_start, tc.try_len, s, NodeId.none));
             }
             ctx.try_label = saved_label;
             w.indentBy(-1);
@@ -2898,7 +3001,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             try ctx.records.append(w.gpa, .{ .key = .{ .name = tc.catch_name }, .info = .{ .kind = .value, .zig_type = "Error", .is_mut = false } });
             s = 0;
             while (s < tc.catch_len) : (s += 1) {
-                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.catch_start + s]));
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.catch_start + s]), restAfter(tc.catch_start, tc.catch_len, s, NodeId.none));
             }
             ctx.records.items.len = saved_records;
             w.indentBy(-1);
@@ -2959,8 +3062,17 @@ fn emitThrowsCallExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, call: as
     try w.print("&__terr_{d})", .{call_idx});
 }
 
-fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStmt) CodegenError!void {
+fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStmt, rest: RunRest) CodegenError!void {
+    // An optional whose payload is no named type (`int[2]?`) has no Zig
+    // spelling here.
+    if (!let.type_annotation.isNone() and ast.typeNodeKind(let.type_annotation) == .optional and
+        ast.namedTypeName(@bitCast(ast.typeNodeData(let.type_annotation))) == null)
+        return CodegenError.UnsupportedConstruct;
     const value_kind = ast.exprKind(let.value);
+    // A binding the rest of its scope never names is not declared: its value
+    // is evaluated and discarded, or not emitted when it is an empty
+    // collection.
+    const named = restUsesIdent(ast, let.name, rest);
     if (value_kind == .method_get or value_kind == .method_get_mut) {
         // `let h = entity.get(T)` / `let h = entity.get_mut(T)` — bind the
         // ident to the component alias. The emitted code is a comment to
@@ -3006,6 +3118,12 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             if (value_kind == .method_get_mut) "get_mut" else "get",
             cname,
         });
+        if (!named) {
+            try w.writeIndent();
+            try w.write("_ = ");
+            try emitComponentSlot(w, ctx, cname);
+            try w.write(";\n");
+        }
         return;
     }
 
@@ -3020,13 +3138,10 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         const call = ast.call_exprs.items[call_idx];
         if (throwsCalleeDecl(ast, ctx, call)) |callee| {
             try w.printLine("var __terr_{d}: ?Error = null;", .{call_idx});
-            try w.writeIndent();
-            try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
-            try w.ident(ast.strings.slice(let.name));
-            try w.write(" = ");
+            try emitLetHead(w, ast, let.name, named, let.is_mut);
             try emitThrowsCallExpr(w, ast, ctx, call, call_idx);
             try w.write(";\n");
-            const ret_zig = if (callee.return_type.isNone()) "" else fnTypeZig(ast, callee.return_type);
+            const ret_zig = if (callee.return_type.isNone()) "" else try fnTypeZig(ast, callee.return_type);
             try ctx.records.append(w.gpa, .{
                 .key = .{ .name = let.name },
                 .info = .{ .kind = .value, .zig_type = ret_zig, .is_mut = let.is_mut },
@@ -3044,10 +3159,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             // default (the interpreter binds unit) and control transfers
             // before any use — observably identical.
             try w.printLine("var __terr_{d}: ?Error = null;", .{call_idx});
-            try w.writeIndent();
-            try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
-            try w.ident(ast.strings.slice(let.name));
-            try w.write(" = ");
+            try emitLetHead(w, ast, let.name, named, let.is_mut);
             try emitExpr(w, ast, ctx, call.callee);
             try w.write(".call(");
             var i: u32 = 0;
@@ -3077,8 +3189,9 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         if (ast.exprKind(let.value) != .array_lit) return CodegenError.UnsupportedConstruct;
         const al = ast.array_lits.items[ast.exprData(let.value)];
         if (al.is_fill) return CodegenError.UnsupportedConstruct;
+        if (!named and al.elements_len == 0) return;
         try w.writeIndent();
-        try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+        try w.print("{s} ", .{if (let.is_mut or al.elements_len > 0) "var" else "const"});
         try w.ident(ast.strings.slice(let.name));
         try w.print(": {s} = .empty;\n", .{list_t});
         if (al.elements_len > 0) {
@@ -3122,8 +3235,9 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
     if (map_list_t) |list_t| {
         if (ast.exprKind(let.value) != .map_lit) return CodegenError.UnsupportedConstruct;
         const ml = ast.map_lits.items[ast.exprData(let.value)];
+        if (!named and ml.entries_len == 0) return;
         try w.writeIndent();
-        try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+        try w.print("{s} ", .{if (let.is_mut or ml.entries_len > 0) "var" else "const"});
         try w.ident(ast.strings.slice(let.name));
         try w.print(": {s} = .empty;\n", .{list_t});
         if (ml.entries_len > 0) {
@@ -3177,14 +3291,15 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
     };
     if (set_list_t) |list_t| {
         const call = setCallOf(ast, let.value) orelse return CodegenError.UnsupportedConstruct;
+        if (call == .from and (ast.exprKind(call.from) != .array_lit or ast.array_lits.items[ast.exprData(call.from)].is_fill)) return CodegenError.UnsupportedConstruct;
+        const seeded = call == .from and ast.array_lits.items[ast.exprData(call.from)].elements_len > 0;
+        if (!named and !seeded) return;
         try w.writeIndent();
-        try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+        try w.print("{s} ", .{if (let.is_mut or seeded) "var" else "const"});
         try w.ident(ast.strings.slice(let.name));
         try w.print(": {s} = .empty;\n", .{list_t});
         if (call == .from) {
-            if (ast.exprKind(call.from) != .array_lit) return CodegenError.UnsupportedConstruct;
             const al = ast.array_lits.items[ast.exprData(call.from)];
-            if (al.is_fill) return CodegenError.UnsupportedConstruct;
             if (al.elements_len > 0) {
                 const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
                 w.arena_used = true;
@@ -3206,27 +3321,21 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         return;
     }
 
-    // Anonymous `.{ … }` initializer: the let
-    // annotation supplies the struct type — emitted as the qualified
-    // `TypeName{ … }`, byte-identical to the explicit form's emission (the
-    // binding stays un-annotated, like every struct-literal let). The
-    // resolver guarantees a named struct annotation (E0210 otherwise).
+    // An anonymous `.{ … }` under an optional annotation fails loud: the
+    // codegen has no optional of a struct.
     if (ast.exprKind(let.value) == .struct_lit) {
         const sl = ast.struct_lits.items[ast.exprData(let.value)];
         if (sl.type_name == 0) {
-            if (let.type_annotation.isNone() or ast.typeNodeKind(let.type_annotation) != .named) return CodegenError.UnsupportedConstruct;
-            const named = ast.named_types.items[ast.typeNodeData(let.type_annotation)];
-            const sname = ast.resolveTypeAliasName(named.name);
+            if (let.type_annotation.isNone()) return CodegenError.UnsupportedConstruct;
+            const annotated = ast.namedTypeName(let.type_annotation) orelse return CodegenError.UnsupportedConstruct;
+            const sname = ast.resolveTypeAliasName(annotated);
             if (!isStructName(ast, sname)) return CodegenError.UnsupportedConstruct;
-            try w.writeIndent();
-            try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
-            try w.ident(ast.strings.slice(let.name));
-            try w.write(" = ");
+            try emitLetHead(w, ast, let.name, named, let.is_mut);
             try emitStructLitAs(w, ast, ctx, sl, sname);
             try w.write(";\n");
             try ctx.records.append(w.gpa, .{
                 .key = .{ .name = let.name },
-                .info = .{ .kind = .value, .zig_type = "", .is_mut = let.is_mut },
+                .info = .{ .kind = .value, .zig_type = ast.strings.slice(sname), .is_mut = let.is_mut },
             });
             return;
         }
@@ -3235,6 +3344,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
     // Plain-value let. Try to infer the Zig type so the binding is annotated
     // when possible (helps Zig's int-literal coercion).
     const zig_t = inferZigType(ast, ctx, let.value, let.type_annotation);
+    if (!named) return emitLetDiscard(w, ast, ctx, let.value, zig_t);
 
     const keyword = if (let.is_mut) "var" else "const";
     try w.writeIndent();
@@ -3256,37 +3366,93 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             .kind = .value,
             .zig_type = zig_t,
             .is_mut = let.is_mut,
-            .closure_node = if (value_kind == .closure) let.value else NodeId.none,
+            .closure_node = switch (value_kind) {
+                .closure => let.value,
+                .ident => if (ctx.lookup(ast.exprData(let.value))) |src| src.closure_node else NodeId.none,
+                else => NodeId.none,
+            },
+            .aggregate = zig_t.len == 0 and switch (value_kind) {
+                .array_lit, .closure, .some_lit => true,
+                .ident => if (ctx.lookup(ast.exprData(let.value))) |src| src.aggregate else false,
+                else => false,
+            },
+            .fixed_elem = switch (value_kind) {
+                .array_lit => blk: {
+                    const al = ast.array_lits.items[ast.exprData(let.value)];
+                    if (al.elements_len == 0) break :blk "";
+                    break :blk inferExprZigType(ast, ctx, @bitCast(ast.extra.items[al.elements_start]));
+                },
+                .ident => if (ctx.lookup(ast.exprData(let.value))) |src| src.fixed_elem else "",
+                else => "",
+            },
         },
     });
 }
 
-fn emitAssign(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.AssignStmt) CodegenError!void {
+/// The head of a `let`: `const name = `, `var name = ` when `mutable`, or
+/// `_ = ` when nothing names the binding.
+fn emitLetHead(w: *Writer, ast: *const AstArena, name: StringId, named: bool, mutable: bool) CodegenError!void {
+    try w.writeIndent();
+    if (!named) return w.write("_ = ");
+    try w.print("{s} ", .{if (mutable) "var" else "const"});
+    try w.ident(ast.strings.slice(name));
+    try w.write(" = ");
+}
+
+/// `_ = <value>;` for a `let` nothing names, under the type its binding would
+/// have had, or through its address when it has no Zig type: a bare
+/// `_ = name;` marks `name` discarded, which Zig refuses for a binding also
+/// read.
+fn emitLetDiscard(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, value: NodeId, zig_t: []const u8) CodegenError!void {
+    try w.writeIndent();
+    if (zig_t.len > 0) try w.print("_ = @as({s}, ", .{zig_t}) else try w.write("_ = &(");
+    try emitExpr(w, ast, ctx, value);
+    try w.write(");\n");
+}
+
+/// An assignment, its right-hand side evaluated before its place
+/// (`etch-reference-part1.md` §7.9): a right-hand side that is not pure is bound
+/// to `__rhs<n>` first, `n` the statement's slab index.
+fn emitAssign(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
+    const assign = ast.assign_stmts.items[data];
+    if (ast.exprKind(assign.target) == .index) {
+        const ix = ast.index_exprs.items[ast.exprData(assign.target)];
+        if (mapKVZig(inferExprZigType(ast, ctx, ix.receiver))) |kv| {
+            if (assign.op != .assign) return CodegenError.UnsupportedConstruct;
+            const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+            w.arena_used = true;
+            try w.writeIndent();
+            try w.print("{{ const __rhs{d}: {s} = ", .{ data, kv.value });
+            try emitExpr(w, ast, ctx, assign.value);
+            try w.write("; __etchMapInsert(&(");
+            try emitPlace(w, ast, ctx, ix.receiver);
+            try w.print("), {s}, ", .{fa});
+            try emitExpr(w, ast, ctx, ix.index);
+            try w.print(", __rhs{d}); }}\n", .{data});
+            return;
+        }
+    }
     // Resource-field write — `get_mut(R).f = …` direct
     // or through a mutable `let s = get_mut(R)` alias: the write target is a
     // `*R` formed through `getMutResource`, which sets the dirty bit
     // co-located with the write — the same logical point as the
     // interpreter's `writeResourceField` (a pure read never dirties), so
     // `when resource R changed` gating is byte-exact by construction.
-    if (assignTargetResource(ast, ctx, assign.target)) |rname| {
-        const fa = ast.field_accesses.items[ast.exprData(assign.target)];
-        try w.writeIndent();
-        try w.print("@as(*{s}, @ptrCast(@alignCast(world.resources.getMutResource({s}_id).?.ptr))).", .{ rname, rname });
-        try w.ident(ast.strings.slice(fa.field_name));
-        try w.write(" ");
-        try w.write(assignOpText(assign.op));
-        try w.write(" ");
-        try emitExpr(w, ast, ctx, assign.value);
-        try w.write(";\n");
-        return;
-    }
+    const resource = assignTargetResource(ast, ctx, assign.target);
+    const rhs: ?u32 = if (exprIsPure(ast, assign.value)) null else data;
+    const ptr: ?u32 = if (assign.op != .assign and ast.exprKind(assign.target) == .index) data else null;
     try w.writeIndent();
-    try emitExpr(w, ast, ctx, assign.target);
-    try w.write(" ");
-    try w.write(assignOpText(assign.op));
-    try w.write(" ");
-    try emitExpr(w, ast, ctx, assign.value);
-    try w.write(";\n");
+    if (rhs != null or ptr != null) try w.write("{ ");
+    if (rhs) |n| {
+        try w.print("const __rhs{d}: @TypeOf(", .{n});
+        try emitAssignTarget(w, ast, ctx, assign.target, resource);
+        try w.write(") = ");
+        try emitExpr(w, ast, ctx, assign.value);
+        try w.write("; ");
+    }
+    try emitAssignOperator(w, ast, ctx, assign, resource, rhs, ptr);
+    try w.write(if (rhs != null or ptr != null) "; }\n" else ";\n");
+    if (resource != null) return;
     // Change detection: right after a component-field write, stamp
     // the slot's `changed_tick` so an `entity has T changed` rule sees it. The
     // marking is co-located with the assignment (so it executes exactly when
@@ -3349,6 +3515,97 @@ fn assignTargetComponent(ast: *const AstArena, ctx: *const LocalCtx, target: Nod
     }
 }
 
+/// The place an assignment writes: a resource field through `getMutResource`
+/// when `resource` names one, the target expression otherwise.
+fn emitAssignTarget(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, target: NodeId, resource: ?[]const u8) CodegenError!void {
+    const rname = resource orelse return emitPlace(w, ast, ctx, target);
+    const fa = ast.field_accesses.items[ast.exprData(target)];
+    try w.print("@as(*{s}, @ptrCast(@alignCast(world.resources.getMutResource({s}_id).?.ptr))).", .{ rname, rname });
+    try w.ident(ast.strings.slice(fa.field_name));
+}
+
+/// The storage a binding names, never a copy; any other expression is
+/// emitted as `emitExpr` emits it.
+fn emitPlace(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) CodegenError!void {
+    if (ast.exprKind(id) == .ident) {
+        if (ctx.lookup(ast.exprData(id))) |local| if (local.kind == .value) {
+            try w.ident(ast.strings.slice(ast.exprData(id)));
+            if (local.deref) try w.write(".*");
+            return;
+        };
+    }
+    try emitExpr(w, ast, ctx, id);
+}
+
+/// The place, operator and value of an assignment, the value `__rhs<n>`
+/// when `rhs` is `n`, the place `__p<n>.*` when `ptr` is `n`. An integer
+/// compound assignment goes through the prelude helper of its operator, and a
+/// float `%=` through `@rem`, as the binary operators do.
+fn emitAssignOperator(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.AssignStmt, resource: ?[]const u8, rhs: ?u32, ptr: ?u32) CodegenError!void {
+    const bin: ?ast_mod.BinaryOp = switch (assign.op) {
+        .assign => null,
+        .add_assign => .add,
+        .sub_assign => .sub,
+        .mul_assign => .mul,
+        .div_assign => .div,
+        .rem_assign => .rem,
+    };
+    const target_zig = inferExprZigType(ast, ctx, assign.target);
+    if (ptr) |n| {
+        try w.print("const __p{d} = &", .{n});
+        try emitAssignTarget(w, ast, ctx, assign.target, resource);
+        try w.write("; ");
+    }
+    const place = struct {
+        fn emit(pw: *Writer, past: *const AstArena, pctx: *LocalCtx, a: ast_mod.AssignStmt, res: ?[]const u8, p: ?u32) CodegenError!void {
+            if (p) |n| return pw.print("__p{d}.*", .{n});
+            try emitAssignTarget(pw, past, pctx, a.target, res);
+        }
+    };
+    try place.emit(w, ast, ctx, assign, resource, ptr);
+    if (bin) |op| {
+        const is_int = type_map.isIntLikeZigType(target_zig);
+        if (is_int or op == .rem) {
+            if (is_int) try w.print(" = {s}({s}, ", .{ intArithHelper(op).?, target_zig }) else try w.write(" = @rem(");
+            try place.emit(w, ast, ctx, assign, resource, ptr);
+            try w.write(", ");
+            try emitAssignValue(w, ast, ctx, assign.value, rhs);
+            try w.write(")");
+            return;
+        }
+    }
+    try w.write(" ");
+    try w.write(assignOpText(assign.op));
+    try w.write(" ");
+    try emitAssignValue(w, ast, ctx, assign.value, rhs);
+}
+
+fn emitAssignValue(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, value: NodeId, rhs: ?u32) CodegenError!void {
+    if (rhs) |n| return w.print("__rhs{d}", .{n});
+    try emitExpr(w, ast, ctx, value);
+}
+
+/// Whether evaluating `id` writes nothing and calls nothing: a literal, a
+/// binding, a read through a field or an element of one, or an operator on
+/// such operands.
+fn exprIsPure(ast: *const AstArena, id: NodeId) bool {
+    const data = ast.exprData(id);
+    return switch (ast.exprKind(id)) {
+        .int_lit, .float_lit, .bool_lit, .string_lit, .ident, .tag_path, .none_lit => true,
+        .field_access => exprIsPure(ast, ast.field_accesses.items[data].receiver),
+        .index => blk: {
+            const ix = ast.index_exprs.items[data];
+            break :blk ast.exprKind(ix.index) != .range and exprIsPure(ast, ix.receiver) and exprIsPure(ast, ix.index);
+        },
+        .binary => blk: {
+            const bin = ast.binary_exprs.items[data];
+            break :blk exprIsPure(ast, bin.lhs) and exprIsPure(ast, bin.rhs);
+        },
+        .unary => exprIsPure(ast, ast.unary_exprs.items[data].operand),
+        else => false,
+    };
+}
+
 fn assignOpText(op: ast_mod.AssignOp) []const u8 {
     return switch (op) {
         .assign => "=",
@@ -3364,8 +3621,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
     const kind = ast.exprKind(id);
     const data = ast.exprData(id);
     switch (kind) {
-        .int_lit => try w.write(ast.strings.slice(data)),
-        .float_lit => try w.write(ast.strings.slice(data)),
+        .int_lit, .float_lit => try writeLiteralDigits(w, ast.strings.slice(data)),
         .bool_lit => try w.write(ast.strings.slice(data)),
         .string_lit => {
             // String literal → a Zig `[]const u8`
@@ -3441,7 +3697,18 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             const name_id: StringId = data;
             if (ctx.lookup(name_id)) |local| {
                 switch (local.kind) {
-                    .value => try w.ident(ast.strings.slice(name_id)),
+                    // A dynamic array, a map or a set read as a value is a
+                    // copy (`etch-reference-part1.md` §5.2). Without an arena
+                    // a collection is never filled, so it is read in place.
+                    .value => if (isListZigType(local.zig_type) and ctx.arena_param != null) {
+                        w.arena_used = true;
+                        try w.write("(");
+                        try w.ident(ast.strings.slice(name_id));
+                        try w.print(".clone({s}) catch unreachable)", .{ctx.arena_param.?});
+                    } else {
+                        try w.ident(ast.strings.slice(name_id));
+                        if (local.deref) try w.write(".*");
+                    },
                     .capture => {
                         // A captured outer binding reads through the closure
                         // struct's receiver — the value
@@ -3499,6 +3766,14 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             if (al.elements_len == 0) return CodegenError.UnsupportedConstruct;
             const first: NodeId = @bitCast(ast.extra.items[al.elements_start]);
             const elem_zig = inferExprZigType(ast, ctx, first);
+            // An element type the inference cannot name — a nested collection,
+            // an optional, a component read — has no Zig spelling here, nor has
+            // an array whose first element the checker wraps into an optional,
+            // or whose later one it wraps where the first is no optional.
+            if (elem_zig.len == 0 or std.mem.eql(u8, elem_zig, "struct")) return CodegenError.UnsupportedConstruct;
+            for (ast.extra.items[al.elements_start..][0..al.elements_len], 0..) |e, i| {
+                if (ast.implicit_wraps.contains(e) and (i == 0 or elem_zig[0] != '?')) return CodegenError.UnsupportedConstruct;
+            }
             if (al.is_fill) {
                 try w.print("[_]{s}{{", .{elem_zig});
                 try emitExpr(w, ast, ctx, first);
@@ -3527,7 +3802,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             if (mapKVZig(inferExprZigType(ast, ctx, ix.receiver)) != null) {
                 if (ast.exprKind(ix.index) == .range) return CodegenError.UnsupportedConstruct;
                 try w.write("__etchMapGet(");
-                try emitExpr(w, ast, ctx, ix.receiver);
+                try emitPlace(w, ast, ctx, ix.receiver);
                 try w.write(", ");
                 try emitExpr(w, ast, ctx, ix.index);
                 try w.write(")");
@@ -3538,7 +3813,15 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // array in the interpreter) is deferred — fail loud.
             const recv_is_dyn = dynArrayElemZig(inferExprZigType(ast, ctx, ix.receiver)) != null;
             if (recv_is_dyn and ast.exprKind(ix.index) == .range) return CodegenError.UnsupportedConstruct;
-            try emitExpr(w, ast, ctx, ix.receiver);
+            // A slice of a fixed array is a copy, a dynamic array of its elements.
+            const slice_list: ?[]const u8 = if (ast.exprKind(ix.index) == .range) inferExprZigType(ast, ctx, id) else null;
+            if (slice_list) |list| {
+                if (list.len == 0) return CodegenError.UnsupportedConstruct;
+                const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+                w.arena_used = true;
+                try w.print("{s}.fromOwnedSlice({s}.dupe({s}, ", .{ list, fa, dynArrayElemZig(list).? });
+            }
+            try emitPlace(w, ast, ctx, ix.receiver);
             if (recv_is_dyn) try w.write(".items");
             if (ast.exprKind(ix.index) == .range) {
                 const r = ast.ranges.items[ast.exprData(ix.index)];
@@ -3547,6 +3830,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try w.write("))..@as(usize, @intCast(");
                 try emitExpr(w, ast, ctx, r.end);
                 try w.write(if (r.inclusive) " + 1))]" else "))]");
+                if (slice_list != null) try w.write(") catch unreachable)");
             } else {
                 try w.write("[@as(usize, @intCast(");
                 try emitExpr(w, ast, ctx, ix.index);
@@ -3634,7 +3918,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 w.indentBy(1);
                 var s: u32 = 0;
                 while (s < body_blk.body_len) : (s += 1) {
-                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[body_blk.body_start + s]));
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[body_blk.body_start + s]), restAfter(body_blk.body_start, body_blk.body_len, s, body_blk.value));
                 }
                 if (!body_blk.value.isNone()) {
                     try w.writeIndent();
@@ -3711,14 +3995,9 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try w.write(")");
         },
         .struct_lit => {
-            // `T { f: v, … }` → Zig `T{ .f = v, … }`. The
-            // anonymous `.{ … }` form (`type_name == 0`)
-            // is emitted by its typed context (let annotation / typed field
-            // value) through `emitStructLitAs` — the resolver rejects any
-            // other position (E0210); belt here.
             const sl = ast.struct_lits.items[data];
-            if (sl.type_name == 0) return CodegenError.UnsupportedConstruct;
-            try emitStructLitAs(w, ast, ctx, sl, sl.type_name);
+            const name = if (sl.type_name != 0) sl.type_name else ast.anonStruct(id) orelse return CodegenError.UnsupportedConstruct;
+            try emitStructLitAs(w, ast, ctx, sl, name);
         },
         .method_call => {
             // `recv.method(args)` / `Type.assoc(args)` → Zig method / associated
@@ -3743,6 +4022,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 }
                 return CodegenError.UnsupportedConstruct;
             }
+            if (argsBindFirst(ast, ctx, mc)) return emitMethodCallTemps(w, ast, ctx, id, data, mc);
             // Builtin dynamic-array / map methods (tranches 3-4 — minimal
             // faithful subset, stdlib §13.2/§14.2), routed on the
             // receiver's emitted declaration type. `push` / `insert` allocate
@@ -3757,7 +4037,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                     const mname = ast.strings.slice(mc.method_name);
                     if (std.mem.eql(u8, mname, "pop") and mc.args_len == 0) {
                         try w.write("(");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.write(").pop()");
                         return;
                     }
@@ -3765,15 +4045,15 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                         const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
                         w.arena_used = true;
                         try w.write("(");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.print(").append({s}, ", .{fa});
-                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try emitCallArg(w, ast, ctx, mc, 0);
                         try w.write(") catch unreachable");
                         return;
                     }
                     if (std.mem.eql(u8, mname, "len") and mc.args_len == 0) {
                         try w.write("@as(i64, @intCast((");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.write(").items.len))");
                         return;
                     }
@@ -3785,17 +4065,17 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                         const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
                         w.arena_used = true;
                         try w.write("__etchMapInsert(&(");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.print("), {s}, ", .{fa});
-                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try emitCallArg(w, ast, ctx, mc, 0);
                         try w.write(", ");
-                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + 1]));
+                        try emitCallArg(w, ast, ctx, mc, 1);
                         try w.write(")");
                         return;
                     }
                     if (std.mem.eql(u8, mname, "len") and mc.args_len == 0) {
                         try w.write("@as(i64, @intCast((");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.write(").items.len))");
                         return;
                     }
@@ -3814,23 +4094,23 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                         const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
                         w.arena_used = true;
                         try w.write("__etchSetInsert(&(");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.print("), {s}, ", .{fa});
-                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try emitCallArg(w, ast, ctx, mc, 0);
                         try w.write(")");
                         return;
                     }
                     if (std.mem.eql(u8, mname, "contains") and mc.args_len == 1) {
                         try w.write("__etchSetContains(");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.write(", ");
-                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try emitCallArg(w, ast, ctx, mc, 0);
                         try w.write(")");
                         return;
                     }
                     if (std.mem.eql(u8, mname, "len") and mc.args_len == 0) {
                         try w.write("@as(i64, @intCast((");
-                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try emitPlace(w, ast, ctx, mc.receiver);
                         try w.write(").items.len))");
                         return;
                     }
@@ -3883,7 +4163,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 if (std.mem.eql(u8, tname, "Set")) return CodegenError.UnsupportedConstruct;
                 try w.write(tname);
             } else {
-                try emitExpr(w, ast, ctx, mc.receiver);
+                try emitPlace(w, ast, ctx, mc.receiver);
             }
             try w.write(".");
             try w.ident(ast.strings.slice(mc.method_name));
@@ -3891,7 +4171,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             var i: u32 = 0;
             while (i < mc.args_len) : (i += 1) {
                 if (i > 0) try w.write(", ");
-                try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + i]));
+                try emitCallArg(w, ast, ctx, mc, i);
             }
             try w.write(")");
         },
@@ -3908,7 +4188,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             w.indentBy(1);
             var s: u32 = 0;
             while (s < lp.body_len) : (s += 1) {
-                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[lp.body_start + s]));
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[lp.body_start + s]), restAfter(lp.body_start, lp.body_len, s, NodeId.none));
             }
             w.indentBy(-1);
             try w.writeIndent();
@@ -3949,20 +4229,18 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // in `@as(T, …)`. The conversion builtin
             // is picked from the operand's inferred domain vs the target's.
             const c = ast.casts.items[data];
-            const named = ast.named_types.items[ast.typeNodeData(c.type_node)];
-            const zig_t = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse return CodegenError.UnsupportedConstruct;
+            const target = ast.namedTypeName(c.type_node) orelse return CodegenError.UnsupportedConstruct;
+            const zig_t = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(target))) orelse return CodegenError.UnsupportedConstruct;
             const target_is_float = std.mem.eql(u8, zig_t, "f32") or std.mem.eql(u8, zig_t, "f64");
             const src_zig = inferExprZigType(ast, ctx, c.operand);
             const src_is_float = std.mem.eql(u8, src_zig, "f32") or std.mem.eql(u8, src_zig, "f64");
-            const conv: []const u8 = if (target_is_float and !src_is_float)
-                "@floatFromInt"
-            else if (!target_is_float and src_is_float)
-                "@intFromFloat"
-            else if (target_is_float)
-                "@floatCast"
-            else
-                "@intCast";
-            try w.print("@as({s}, {s}(", .{ zig_t, conv });
+            if (!target_is_float) {
+                try w.print("{s}({s}, ", .{ if (src_is_float) "__etchIntFromFloat" else "__etchNarrow", zig_t });
+                try emitExpr(w, ast, ctx, c.operand);
+                try w.write(")");
+                return;
+            }
+            try w.print("@as({s}, {s}(", .{ zig_t, if (src_is_float) "@floatCast" else "@floatFromInt" });
             try emitExpr(w, ast, ctx, c.operand);
             try w.write("))");
         },
@@ -3988,6 +4266,39 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try w.write(" }) catch unreachable)");
                 return;
             }
+            // Two fixed arrays compare element by element; `std.meta.eql`
+            // compares a string by its pointer, so a string element fails loud.
+            if (b.op == .eq or b.op == .neq) {
+                if (fixedArrayElem(ast, ctx, b.lhs) orelse fixedArrayElem(ast, ctx, b.rhs)) |elem| {
+                    const scalar = type_map.isIntLikeZigType(elem) or std.mem.eql(u8, elem, "f64") or std.mem.eql(u8, elem, "f32") or std.mem.eql(u8, elem, "bool");
+                    if (!scalar) return CodegenError.UnsupportedConstruct;
+                    try w.write(if (b.op == .eq) "std.meta.eql(" else "!std.meta.eql(");
+                    try emitExpr(w, ast, ctx, b.lhs);
+                    try w.write(", ");
+                    try emitExpr(w, ast, ctx, b.rhs);
+                    try w.write(")");
+                    return;
+                }
+            }
+            const operand_zig = inferExprZigType(ast, ctx, b.lhs);
+            if (intArithHelper(b.op)) |helper| {
+                if (type_map.isIntLikeZigType(operand_zig)) {
+                    try w.print("{s}({s}, ", .{ helper, operand_zig });
+                    try emitExpr(w, ast, ctx, b.lhs);
+                    try w.write(", ");
+                    try emitExpr(w, ast, ctx, b.rhs);
+                    try w.write(")");
+                    return;
+                }
+                if (b.op == .rem) {
+                    try w.write("@rem(");
+                    try emitExpr(w, ast, ctx, b.lhs);
+                    try w.write(", ");
+                    try emitExpr(w, ast, ctx, b.rhs);
+                    try w.write(")");
+                    return;
+                }
+            }
             try w.write("(");
             try emitExpr(w, ast, ctx, b.lhs);
             try w.print(" {s} ", .{binaryOpText(b.op)});
@@ -3998,7 +4309,12 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             const u = ast.unary_exprs.items[data];
             switch (u.op) {
                 .neg => {
-                    try w.write("-(");
+                    const operand_zig = inferExprZigType(ast, ctx, u.operand);
+                    if (type_map.isIntLikeZigType(operand_zig)) {
+                        try w.print("__etchNeg({s}, ", .{operand_zig});
+                    } else {
+                        try w.write("-(");
+                    }
                     try emitExpr(w, ast, ctx, u.operand);
                     try w.write(")");
                 },
@@ -4070,9 +4386,15 @@ fn emitMatch(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Codege
         switch (arm.pattern_kind) {
             .literal => {
                 const lit: NodeId = @bitCast(arm.pattern_payload);
-                try w.print("if (__m{d} == ", .{lbl});
-                try emitExpr(w, ast, ctx, lit);
-                try w.print(") break :blk{d} ", .{lbl});
+                if (isStringPattern(ast, lit)) {
+                    try w.print("if (std.mem.eql(u8, __m{d}, ", .{lbl});
+                    try emitExpr(w, ast, ctx, lit);
+                    try w.print(")) break :blk{d} ", .{lbl});
+                } else {
+                    try w.print("if (__m{d} == ", .{lbl});
+                    try emitExpr(w, ast, ctx, lit);
+                    try w.print(") break :blk{d} ", .{lbl});
+                }
                 try emitExpr(w, ast, ctx, arm.body);
                 try w.write("; ");
             },
@@ -4161,9 +4483,15 @@ fn emitMatchAsStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) 
         switch (arm.pattern_kind) {
             .literal => {
                 const lit: NodeId = @bitCast(arm.pattern_payload);
-                try w.print("if (__ms{d} == ", .{lbl});
-                try emitExpr(w, ast, ctx, lit);
-                try w.write(") ");
+                if (isStringPattern(ast, lit)) {
+                    try w.print("if (std.mem.eql(u8, __ms{d}, ", .{lbl});
+                    try emitExpr(w, ast, ctx, lit);
+                    try w.write(")) ");
+                } else {
+                    try w.print("if (__ms{d} == ", .{lbl});
+                    try emitExpr(w, ast, ctx, lit);
+                    try w.write(") ");
+                }
                 try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, null);
                 chained = true;
             },
@@ -4226,7 +4554,7 @@ fn emitArmBodyAsStmts(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, body: No
         const blk = ast.block_exprs.items[ast.exprData(body)];
         var s: u32 = 0;
         while (s < blk.body_len) : (s += 1) {
-            try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]));
+            try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]), restAfter(blk.body_start, blk.body_len, s, blk.value));
         }
         if (!blk.value.isNone()) {
             try w.writeIndent();
@@ -4268,7 +4596,7 @@ fn emitBlockExprValue(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u3
     w.indentBy(1);
     var s: u32 = 0;
     while (s < blk.body_len) : (s += 1) {
-        try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]));
+        try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]), restAfter(blk.body_start, blk.body_len, s, blk.value));
     }
     try w.writeIndent();
     try w.print("break :__bex{d} ", .{data});
@@ -4292,7 +4620,7 @@ fn emitBraceBlock(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) C
     w.indentBy(1);
     var s: u32 = 0;
     while (s < blk.body_len) : (s += 1) {
-        try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]));
+        try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]), restAfter(blk.body_start, blk.body_len, s, blk.value));
     }
     if (!blk.value.isNone()) {
         try w.writeIndent();
@@ -4353,9 +4681,9 @@ fn emitIfChain(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Code
 /// expects annotated scalar params; a missing / non-scalar annotation falls
 /// back to `i64` (the interpreter is the reference for richer closures).
 fn closureParamZigType(ast: *const AstArena, p: ast_mod.ClosureParam) []const u8 {
-    if (p.type_node.isNone() or ast.typeNodeKind(p.type_node) != .named) return "i64";
-    const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
-    return type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(tnode.name))) orelse "i64";
+    if (p.type_node.isNone()) return "i64";
+    const declared = ast.namedTypeName(p.type_node) orelse return "i64";
+    return type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(declared))) orelse "i64";
 }
 
 /// One captured outer binding of a closure: the Etch
@@ -4575,10 +4903,10 @@ fn inferZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId, annotation: 
     // Only a named-type annotation maps to a scalar Zig type here; collection
     // annotations (`T[]`, `[K: V]`, `Set<T>`, `T[N]`) leave the binding
     // un-annotated so Zig infers the array / slice type.
-    if (!annotation.isNone() and ast.typeNodeKind(annotation) == .named) {
-        const tnode = ast.named_types.items[ast.typeNodeData(annotation)];
-        const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
-        if (type_map.mapBuiltin(tname)) |z| return z;
+    if (!annotation.isNone()) {
+        if (ast.namedTypeName(annotation)) |declared| {
+            if (type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(declared)))) |z| return z;
+        }
     }
     // `T?` optional annotation → `?<payload>`: used so `let o:
     // int? = none` emits `const o: ?i64 = null;`. A `some(...)` RHS self-types
@@ -4594,9 +4922,8 @@ fn inferZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId, annotation: 
 /// payload (deferred) yields `null`.
 fn optionalAnnotationZig(ast: *const AstArena, type_node: NodeId) ?[]const u8 {
     const payload_node: NodeId = @bitCast(ast.typeNodeData(type_node));
-    if (ast.typeNodeKind(payload_node) != .named) return null;
-    const tnode = ast.named_types.items[ast.typeNodeData(payload_node)];
-    const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+    const declared = ast.namedTypeName(payload_node) orelse return null;
+    const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
     // `string?`: `string` is deliberately not in
     // `type_map.mapBuiltin` (the let-routing leaves plain string bindings
     // un-annotated) — only the optional path needs its Zig spelling.
@@ -4623,6 +4950,26 @@ fn optionalOf(zig_scalar: []const u8) ?[]const u8 {
 /// builtin element scalars (+ string); any other element type is deferred
 /// (fail loud). Static strings keep the emitter allocation-free and make the
 /// reverse lookup (`dynArrayElemZig`) exact.
+/// The element type of `id` when it is a fixed array whose element the codegen
+/// knows: an array literal, or a binding of one.
+fn fixedArrayElem(ast: *const AstArena, ctx: *LocalCtx, id: NodeId) ?[]const u8 {
+    const elem = switch (ast.exprKind(id)) {
+        .array_lit => blk: {
+            const al = ast.array_lits.items[ast.exprData(id)];
+            if (al.elements_len == 0) return null;
+            break :blk inferExprZigType(ast, ctx, @bitCast(ast.extra.items[al.elements_start]));
+        },
+        .ident => (ctx.lookup(ast.exprData(id)) orelse return null).fixed_elem,
+        else => return null,
+    };
+    return if (elem.len == 0) null else elem;
+}
+
+/// Whether `zig_t` is the type of a dynamic array, a map or a set.
+fn isListZigType(zig_t: []const u8) bool {
+    return dynArrayElemZig(zig_t) != null or mapKVZig(zig_t) != null or setElemZig(zig_t) != null;
+}
+
 fn dynArrayZigType(elem_zig: []const u8) ?[]const u8 {
     inline for (dyn_array_types) |p| {
         if (std.mem.eql(u8, elem_zig, p[0])) return p[1];
@@ -4672,14 +5019,14 @@ fn mapKVZig(zig_t: []const u8) ?struct { key: []const u8, value: []const u8 } {
 }
 
 const map_types_table = .{
-    .{ "i64", "i64", "std.ArrayListUnmanaged(struct { key: i64, value: i64 })" },
-    .{ "i64", "f64", "std.ArrayListUnmanaged(struct { key: i64, value: f64 })" },
-    .{ "i64", "bool", "std.ArrayListUnmanaged(struct { key: i64, value: bool })" },
-    .{ "i64", "[]const u8", "std.ArrayListUnmanaged(struct { key: i64, value: []const u8 })" },
-    .{ "bool", "i64", "std.ArrayListUnmanaged(struct { key: bool, value: i64 })" },
-    .{ "bool", "f64", "std.ArrayListUnmanaged(struct { key: bool, value: f64 })" },
-    .{ "bool", "bool", "std.ArrayListUnmanaged(struct { key: bool, value: bool })" },
-    .{ "bool", "[]const u8", "std.ArrayListUnmanaged(struct { key: bool, value: []const u8 })" },
+    .{ "i64", "i64", "__EtchMap_i64_i64", "std.ArrayListUnmanaged(struct { key: i64, value: i64 })" },
+    .{ "i64", "f64", "__EtchMap_i64_f64", "std.ArrayListUnmanaged(struct { key: i64, value: f64 })" },
+    .{ "i64", "bool", "__EtchMap_i64_bool", "std.ArrayListUnmanaged(struct { key: i64, value: bool })" },
+    .{ "i64", "[]const u8", "__EtchMap_i64_str", "std.ArrayListUnmanaged(struct { key: i64, value: []const u8 })" },
+    .{ "bool", "i64", "__EtchMap_bool_i64", "std.ArrayListUnmanaged(struct { key: bool, value: i64 })" },
+    .{ "bool", "f64", "__EtchMap_bool_f64", "std.ArrayListUnmanaged(struct { key: bool, value: f64 })" },
+    .{ "bool", "bool", "__EtchMap_bool_bool", "std.ArrayListUnmanaged(struct { key: bool, value: bool })" },
+    .{ "bool", "[]const u8", "__EtchMap_bool_str", "std.ArrayListUnmanaged(struct { key: bool, value: []const u8 })" },
 };
 
 /// The list declaration type for a `T[]` slice annotation with a builtin
@@ -4687,9 +5034,8 @@ const map_types_table = .{
 /// element → the caller fails loud).
 fn sliceAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
     const at = ast.array_types.items[ast.typeNodeData(annotation)];
-    if (ast.typeNodeKind(at.elem) != .named) return null;
-    const named = ast.named_types.items[ast.typeNodeData(at.elem)];
-    const elem_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse return null;
+    const elem = ast.namedTypeName(at.elem) orelse return null;
+    const elem_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(elem))) orelse return null;
     return dynArrayZigType(elem_zig);
 }
 
@@ -4697,11 +5043,10 @@ fn sliceAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8
 /// the key/value pair is outside the emitter's map table.
 fn mapAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
     const mt = ast.map_types.items[ast.typeNodeData(annotation)];
-    if (ast.typeNodeKind(mt.key) != .named or ast.typeNodeKind(mt.value) != .named) return null;
-    const knamed = ast.named_types.items[ast.typeNodeData(mt.key)];
-    const vnamed = ast.named_types.items[ast.typeNodeData(mt.value)];
-    const key_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(knamed.name))) orelse return null;
-    const value_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(vnamed.name))) orelse return null;
+    const key = ast.namedTypeName(mt.key) orelse return null;
+    const value = ast.namedTypeName(mt.value) orelse return null;
+    const key_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(key))) orelse return null;
+    const value_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(value))) orelse return null;
     return mapZigType(key_zig, value_zig);
 }
 
@@ -4731,17 +5076,16 @@ fn setElemZig(zig_t: []const u8) ?[]const u8 {
 }
 
 const set_types_table = .{
-    .{ "i64", "std.ArrayListUnmanaged(struct { item: i64 })" },
-    .{ "bool", "std.ArrayListUnmanaged(struct { item: bool })" },
+    .{ "i64", "__EtchSet_i64", "std.ArrayListUnmanaged(struct { item: i64 })" },
+    .{ "bool", "__EtchSet_bool", "std.ArrayListUnmanaged(struct { item: bool })" },
 };
 
 /// The list declaration type for a `Set<T>` annotation, or `null` when
 /// the element is outside the emitter's set table.
 fn setAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
     const st = ast.set_types.items[ast.typeNodeData(annotation)];
-    if (ast.typeNodeKind(st.elem) != .named) return null;
-    const named = ast.named_types.items[ast.typeNodeData(st.elem)];
-    const elem_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse return null;
+    const elem = ast.namedTypeName(st.elem) orelse return null;
+    const elem_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(elem))) orelse return null;
     return setZigType(elem_zig);
 }
 
@@ -4759,9 +5103,7 @@ fn structFieldEnumName(ast: *const AstArena, type_name: StringId, field_name: St
         while (f_i < sd.fields_len) : (f_i += 1) {
             const f = ast.fields.items[sd.fields_start + f_i];
             if (f.name != field_name) continue;
-            if (ast.typeNodeKind(f.type_node) != .named) return null;
-            const named = ast.named_types.items[ast.typeNodeData(f.type_node)];
-            const resolved = ast.resolveTypeAliasName(named.name);
+            const resolved = ast.resolveTypeAliasName(ast.namedTypeName(f.type_node) orelse return null);
             if (!isEnumName(ast, resolved)) return null;
             return ast.strings.slice(resolved);
         }
@@ -4848,9 +5190,7 @@ fn structFieldStructName(ast: *const AstArena, type_name: StringId, field_name: 
         while (f_i < sd.fields_len) : (f_i += 1) {
             const f = ast.fields.items[sd.fields_start + f_i];
             if (f.name != field_name) continue;
-            if (ast.typeNodeKind(f.type_node) != .named) return null;
-            const named = ast.named_types.items[ast.typeNodeData(f.type_node)];
-            const resolved = ast.resolveTypeAliasName(named.name);
+            const resolved = ast.resolveTypeAliasName(ast.namedTypeName(f.type_node) orelse return null);
             if (!isStructName(ast, resolved)) return null;
             return resolved;
         }
@@ -6230,6 +6570,69 @@ fn emitNamedFnCall(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, call: ast_m
     try w.write("); }");
 }
 
+/// Whether `mc`'s arguments are bound to temporaries before its receiver's
+/// place is formed (`etch-reference-part1.md` §7.9): a place rooted in a
+/// binding, and an argument that may change it.
+fn argsBindFirst(ast: *const AstArena, ctx: *const LocalCtx, mc: ast_mod.MethodCall) bool {
+    if (mc.names_start != ast_mod.no_arg_names) return false;
+    if (ctx.call_temps) |t| {
+        if (t.args_start == mc.args_start) return false;
+    }
+    var cur = mc.receiver;
+    while (true) {
+        switch (ast.exprKind(cur)) {
+            .field_access => cur = ast.field_accesses.items[ast.exprData(cur)].receiver,
+            .index => cur = ast.index_exprs.items[ast.exprData(cur)].receiver,
+            .ident => break,
+            else => return false,
+        }
+    }
+    for (ast.extra.items[mc.args_start..][0..mc.args_len]) |raw| {
+        if (!exprIsPure(ast, @bitCast(raw))) return true;
+    }
+    return false;
+}
+
+/// `recv.method(args)` with each argument bound to `__mc<n>_<j>` before the
+/// call `id` is emitted over them.
+fn emitMethodCallTemps(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId, seq: u32, mc: ast_mod.MethodCall) CodegenError!void {
+    try w.print("(__mc{d}: {{ ", .{seq});
+    var j: u32 = 0;
+    while (j < mc.args_len) : (j += 1) {
+        const zig_t = methodArgZigType(ast, ctx, mc, j);
+        if (zig_t.len > 0) try w.print("const __mc{d}_{d}: {s} = ", .{ seq, j, zig_t }) else try w.print("const __mc{d}_{d} = ", .{ seq, j });
+        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + j]));
+        try w.write("; ");
+    }
+    try w.print("break :__mc{d} ", .{seq});
+    const saved = ctx.call_temps;
+    ctx.call_temps = .{ .args_start = mc.args_start, .seq = seq };
+    defer ctx.call_temps = saved;
+    try emitExpr(w, ast, ctx, id);
+    try w.write("; })");
+}
+
+/// The Zig type of the parameter that argument `j` of `mc` binds, "" when the
+/// codegen names none.
+fn methodArgZigType(ast: *const AstArena, ctx: *LocalCtx, mc: ast_mod.MethodCall, j: u32) []const u8 {
+    const recv_zig = inferExprZigType(ast, ctx, mc.receiver);
+    if (dynArrayElemZig(recv_zig)) |elem| return elem;
+    if (mapKVZig(recv_zig)) |kv| return if (j == 0) kv.key else kv.value;
+    if (setElemZig(recv_zig)) |elem| return elem;
+    const decl = findImplMethodDecl(ast, recv_zig, mc.method_name) orelse return "";
+    if (j >= decl.params_len) return "";
+    return fnTypeZig(ast, ast.fn_params.items[decl.params_start + j].type_node) catch "";
+}
+
+/// Argument `j` of `mc`: its temporary while the call is emitted over them,
+/// else the argument itself.
+fn emitCallArg(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, mc: ast_mod.MethodCall, j: u32) CodegenError!void {
+    if (ctx.call_temps) |t| {
+        if (t.args_start == mc.args_start) return w.print("__mc{d}_{d}", .{ t.seq, j });
+    }
+    try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + j]));
+}
+
 /// Method-call variant of `emitNamedFnCall`. The receiver (bounded to the
 /// pure shapes by the caller) is emitted inside the break line — after the
 /// temporaries, which is unobservable for a pure receiver.
@@ -6247,7 +6650,7 @@ fn emitNamedMethodCall(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, mc: ast
     if (ast.exprKind(mc.receiver) == .path) {
         try w.write(ast.strings.slice(ast.exprData(mc.receiver)));
     } else {
-        try emitExpr(w, ast, ctx, mc.receiver);
+        try emitPlace(w, ast, ctx, mc.receiver);
     }
     try w.write(".");
     try w.ident(ast.strings.slice(mc.method_name));
@@ -6329,7 +6732,7 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         .some_lit, .none_lit => "",
         .ident => blk: {
             const sid: StringId = data;
-            if (ctx.lookup(sid)) |local| break :blk if (local.zig_type.len > 0) local.zig_type else "i64";
+            if (ctx.lookup(sid)) |local| break :blk if (local.zig_type.len > 0 or local.aggregate) local.zig_type else "i64";
             break :blk "i64";
         },
         .binary => blk: {
@@ -6374,24 +6777,44 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
             const z = fieldZigTypeOnComponent(ast, comp_name, fname) orelse break :blk "i64";
             break :blk z;
         },
-        // Array literals and index/slice results are emitted without a `let` type
-        // annotation — Zig infers the array / element / slice type. Returning "" makes
-        // `emitLet` drop the `: T`.
+        // An array literal is emitted without a `let` type annotation — Zig infers
+        // it. Returning "" makes `emitLet` drop the `: T`.
         .array_lit => "",
-        .index => "",
-        // Closures (anonymous struct type) and call results are left to Zig
-        // inference too.
-        .closure => "",
-        .fn_call => "",
-        // Struct literals (struct type) and method-call results (the method's
-        // return type) are left to Zig inference.
-        .struct_lit => blk: {
-            // An explicit `T { … }` literal types as `T`; the anonymous `.{ … }` form
-            // keeps "" (context-typed).
-            const sl = ast.struct_lits.items[data];
-            break :blk if (sl.type_name == 0) "" else ast.strings.slice(sl.type_name);
+        // An element types as its array's element and a slice of a fixed array
+        // as a dynamic array of it; a map entry is left to Zig.
+        .index => blk: {
+            const ix = ast.index_exprs.items[data];
+            const range = ast.exprKind(ix.index) == .range;
+            if (dynArrayElemZig(inferExprZigType(ast, ctx, ix.receiver))) |e| break :blk if (range) "" else e;
+            if (ast.exprKind(ix.receiver) != .ident) break :blk "";
+            const local = ctx.lookup(ast.exprData(ix.receiver)) orelse break :blk "";
+            if (!range) break :blk local.fixed_elem;
+            break :blk dynArrayZigType(local.fixed_elem) orelse "";
         },
-        .method_call => "",
+        // A closure is an anonymous struct type, left to Zig inference.
+        .closure => "",
+        // A top-level fn's call types as its declared return.
+        .fn_call => blk: {
+            const call = ast.call_exprs.items[data];
+            if (ast.exprKind(call.callee) != .ident or ctx.lookup(ast.exprData(call.callee)) != null) break :blk "";
+            const decl = findFnDecl(ast, ast.exprData(call.callee)) orelse break :blk "";
+            if (decl.return_type.isNone()) break :blk "";
+            break :blk fnTypeZig(ast, decl.return_type) catch "";
+        },
+        .struct_lit => blk: {
+            const sl = ast.struct_lits.items[data];
+            const name = if (sl.type_name != 0) sl.type_name else ast.anonStruct(expr) orelse break :blk "";
+            break :blk ast.strings.slice(name);
+        },
+        // A user method's call types as its declared return.
+        .method_call => blk: {
+            const mc = ast.method_calls.items[data];
+            const recv_t = inferExprZigType(ast, ctx, mc.receiver);
+            if (recv_t.len == 0 or type_map.mapBuiltin(recv_t) != null) break :blk "";
+            const decl = findImplMethodDecl(ast, recv_t, mc.method_name) orelse break :blk "";
+            if (decl.return_type.isNone()) break :blk "";
+            break :blk fnTypeZig(ast, decl.return_type) catch "";
+        },
         // A loop expression's value type is inferred by Zig from its break.
         .loop_expr => "",
         // A block expression's value type is inferred by Zig from its trailing
@@ -6409,8 +6832,8 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         .method_get, .method_get_mut => "struct", // not directly inferable; should not appear at let-rhs after method_get handling
         .cast => blk: {
             const c = ast.casts.items[data];
-            const named = ast.named_types.items[ast.typeNodeData(c.type_node)];
-            break :blk type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse "i64";
+            const target = ast.namedTypeName(c.type_node) orelse break :blk "i64";
+            break :blk type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(target))) orelse "i64";
         },
         .match_expr => blk: {
             // The match result type is the (unified) type of its arm bodies;
@@ -6444,7 +6867,11 @@ fn receiverComponentName(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) ?[]
             }
             break :blk null;
         },
-        .field_access => null, // chained field access not introspected — fall back to default type
+        .field_access => blk: {
+            const t = inferExprZigType(ast, ctx, expr);
+            const id = ast.strings.find(t) orelse break :blk null;
+            break :blk if (isStructName(ast, id)) t else null;
+        },
         else => null,
     };
 }
@@ -6481,16 +6908,13 @@ fn fieldZigTypeOnComponent(ast: *const AstArena, comp_name: []const u8, field_na
             if (std.mem.eql(u8, fname, field_name)) {
                 // A non-named field type (`Error?` — the builtin Error's
                 // `source`) has no scalar Zig name; the caller falls back.
-                // Guards the `named_types` mis-index too.
-                if (ast.typeNodeKind(f.type_node) != .named) return null;
-                const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-                const resolved = ast.resolveTypeAliasName(tnode.name);
+                const resolved = ast.resolveTypeAliasName(ast.namedTypeName(f.type_node) orelse return null);
                 const etch_t = ast.strings.slice(resolved);
                 // `string` fields (`Error.message`) → the codegen string type, driving
                 // `.len()` dispatch; enum-typed fields (`Error.code`) map 1:1, driving
                 // the match shorthand.
                 if (std.mem.eql(u8, etch_t, "string")) return "[]const u8";
-                if (isEnumName(ast, resolved)) return etch_t;
+                if (isEnumName(ast, resolved) or isStructName(ast, resolved)) return etch_t;
                 return type_map.mapBuiltin(etch_t);
             }
         }
@@ -6500,49 +6924,47 @@ fn fieldZigTypeOnComponent(ast: *const AstArena, comp_name: []const u8, field_na
 
 // ─── Const expressions (field defaults / filter values) ─────────────────────
 
+/// Emits a constant as the value `const_eval.fold` gives it, the value the
+/// interpreter stores. A float literal keeps its own digits, so Zig rounds it
+/// once to the slot's type as the source does.
 fn emitConstExpr(w: *Writer, ast: *const AstArena, expr: NodeId, target_zig_type: []const u8) CodegenError!void {
-    const kind = ast.exprKind(expr);
-    const data = ast.exprData(expr);
-    switch (kind) {
-        .int_lit => {
-            const text = ast.strings.slice(data);
-            // Coerce int literal to a float-typed slot by emitting
-            // `<text>.0` so Zig is happy with the field type.
-            if (type_map.isFloatLikeZigType(target_zig_type)) {
-                try w.print("@as({s}, {s})", .{ target_zig_type, text });
-            } else {
-                try w.write(text);
-            }
-        },
-        .float_lit => try w.write(ast.strings.slice(data)),
-        .bool_lit => try w.write(ast.strings.slice(data)),
-        .binary => {
-            const b = ast.binary_exprs.items[data];
-            try w.write("(");
-            try emitConstExpr(w, ast, b.lhs, target_zig_type);
-            try w.print(" {s} ", .{binaryOpText(b.op)});
-            try emitConstExpr(w, ast, b.rhs, target_zig_type);
-            try w.write(")");
-        },
-        .unary => {
-            const u = ast.unary_exprs.items[data];
-            switch (u.op) {
-                .neg => {
-                    try w.write("-(");
-                    try emitConstExpr(w, ast, u.operand, target_zig_type);
-                    try w.write(")");
-                },
-                .logical_not => {
-                    try w.write("!(");
-                    try emitConstExpr(w, ast, u.operand, target_zig_type);
-                    try w.write(")");
-                },
-                // `expr!` needs a runtime optional — never const-evaluable.
-                .force_unwrap => return CodegenError.UnsupportedConstruct,
-            }
-        },
+    const folded = const_eval.fold(w.gpa, ast, expr) catch |err| switch (err) {
+        error.OutOfMemory => return CodegenError.OutOfMemory,
         else => return CodegenError.UnsupportedConstruct,
+    };
+    switch (folded) {
+        .int_ => |v| if (type_map.isFloatLikeZigType(target_zig_type))
+            try w.print("@as({s}, {d})", .{ target_zig_type, v })
+        else
+            try w.print("{d}", .{v}),
+        .float_ => |v| {
+            var lit = expr;
+            var negated = false;
+            if (ast.exprKind(lit) == .unary) {
+                lit = ast.unary_exprs.items[ast.exprData(lit)].operand;
+                negated = true;
+            }
+            if (ast.exprKind(lit) == .float_lit) {
+                if (negated) try w.write("-");
+                try writeLiteralDigits(w, ast.strings.slice(ast.exprData(lit)));
+            } else {
+                try w.print("{e}", .{v});
+            }
+        },
+        .bool_ => |v| try w.write(if (v) "true" else "false"),
     }
+}
+
+/// Writes a numeric literal's text without its `_` separators, which the lexer
+/// admits anywhere in the digit run and Zig does not.
+fn writeLiteralDigits(w: *Writer, text: []const u8) CodegenError!void {
+    var start: usize = 0;
+    for (text, 0..) |c, i| {
+        if (c != '_') continue;
+        try w.write(text[start..i]);
+        start = i + 1;
+    }
+    try w.write(text[start..]);
 }
 
 // ─── `tick` ─────────────────────────────────────────────────────────────────
@@ -6812,8 +7234,8 @@ fn walkWhen(
             const tf = ast.tag_filters.items[node.aux];
             switch (tf.op) {
                 .has_tag, .has_any_tag, .has_all_tags => {
-                    const gop = try seen.getOrPut(gpa, "TagSet");
-                    if (!gop.found_existing) try components.append(gpa, "TagSet");
+                    const gop = try seen.getOrPut(gpa, tagset_name);
+                    if (!gop.found_existing) try components.append(gpa, tagset_name);
                     has_component_ref.* = true;
                 },
                 .has_no_tag, .has_no_tags => return CodegenError.UnsupportedConstruct,
@@ -6880,8 +7302,8 @@ fn collectComponents(
             const tf = ast.tag_filters.items[node.aux];
             switch (tf.op) {
                 .has_tag, .has_any_tag, .has_all_tags => {
-                    const gop = try seen.getOrPut(gpa, "TagSet");
-                    if (!gop.found_existing) try components.append(gpa, "TagSet");
+                    const gop = try seen.getOrPut(gpa, tagset_name);
+                    if (!gop.found_existing) try components.append(gpa, tagset_name);
                 },
                 .has_no_tag, .has_no_tags => return CodegenError.UnsupportedConstruct,
             }
@@ -7001,7 +7423,7 @@ fn emitTagFilterGuard(w: *Writer, tf: TagFilterInfo) CodegenError!void {
         .has_tag, .has_all_tags => {
             // Every listed bit must be set.
             for (entries.items) |e| {
-                try w.printLine("if ((TagSet_arr[slot].bits[{d}] & 0x{x}) != 0x{x}) continue;", .{ e.word, e.mask, e.mask });
+                try w.printLine("if ((" ++ tagset_name ++ "_arr[slot].bits[{d}] & 0x{x}) != 0x{x}) continue;", .{ e.word, e.mask, e.mask });
             }
         },
         .has_any_tag => {
@@ -7010,7 +7432,7 @@ fn emitTagFilterGuard(w: *Writer, tf: TagFilterInfo) CodegenError!void {
             try w.write("if (");
             for (entries.items, 0..) |e, idx| {
                 if (idx > 0) try w.write(" and ");
-                try w.print("(TagSet_arr[slot].bits[{d}] & 0x{x}) == 0", .{ e.word, e.mask });
+                try w.print("(" ++ tagset_name ++ "_arr[slot].bits[{d}] & 0x{x}) == 0", .{ e.word, e.mask });
             }
             try w.write(") continue;\n");
         },
@@ -7021,3 +7443,11 @@ fn emitTagFilterGuard(w: *Writer, tf: TagFilterInfo) CodegenError!void {
 // Dedicated lowering tests live under `src/etch/zig_codegen/tests/lower_test.zig`.
 // They are pulled into the import graph by `zig_codegen/root.zig` and run as
 // part of `zig build test`.
+
+/// A string pattern compares by bytes: Zig refuses `==` on a slice.
+fn isStringPattern(ast: *const AstArena, lit: NodeId) bool {
+    return switch (ast.exprKind(lit)) {
+        .string_lit, .string_interp => true,
+        else => false,
+    };
+}

@@ -1,21 +1,10 @@
-//! Shader compiler.
+//! Shader compiler: compiles GLSL to SPIR-V by spawning the `glslc` CLI (no
+//! shaderc binding, `ARCH-024`).
 //!
-//! Compiles GLSL shaders into SPIR-V by spawning the `glslc` CLI (consistent
-//! with the keeper policy: no shaderc/glslang binding, the keeper count
-//! stays at 7).
-//!
-//! Consistent with "glslc is a peer dependency only
-//! for `zig build shaders` (regeneration) or for the dev runtime hot-reload.
-//! The standard `zig build` build does not depend on `glslc`." If
-//! `glslc` is absent from PATH, `compile` returns `error.GlslcNotFound`.
-//!
-//! Zig 0.16 API: `std.process.run` (which takes `io: Io`) — not
-//! `std.process.Child.init` which no longer exists.
+//! `glslc` is needed by `zig build shaders`, `zig build shaders-check` and the
+//! dev hot-reload only; `zig build` does not depend on it.
 
 const std = @import("std");
-
-/// Global counter to generate unique temp file names.
-var unique_id: std.atomic.Value(u64) = .init(0);
 
 /// The supported shader stages (geometry, tessellation
 /// raygen/closesthit/miss for RT).
@@ -23,6 +12,15 @@ pub const Stage = enum {
     vertex,
     fragment,
     compute,
+
+    /// The stage a shader file's name carries (`*.vert*`, `*.frag*`,
+    /// `*.comp*`), or null when it carries none.
+    pub fn ofFileName(name: []const u8) ?Stage {
+        if (std.mem.indexOf(u8, name, ".vert") != null) return .vertex;
+        if (std.mem.indexOf(u8, name, ".frag") != null) return .fragment;
+        if (std.mem.indexOf(u8, name, ".comp") != null) return .compute;
+        return null;
+    }
 
     pub fn glslcArg(self: Stage) []const u8 {
         return switch (self) {
@@ -42,6 +40,8 @@ pub const CompileError = error{
     OutOfMemory,
     InvalidUtf8,
     ProcessSpawnFailed,
+    /// Reading glslc's output or waiting for it failed.
+    GlslcIoFailed,
 };
 
 /// Result of a compilation.
@@ -60,15 +60,13 @@ pub const Result = struct {
     }
 };
 
-/// Compiles `source` (GLSL text) to SPIR-V via glslc. The caller must
-/// pass the correct `stage` (glslc needs it for shader model
-/// selection). `entry_point` defaults to "main".
+/// Compiles `source` (GLSL text) to SPIR-V via glslc, which reads it on
+/// stdin. The caller must pass the correct `stage` (glslc needs it for shader
+/// model selection). `entry_point` defaults to "main".
 ///
-/// Returns `error.GlslcNotFound` if glslc is not findable in
-/// PATH — usable as a heuristic to disable hot-reload.
-///
-/// Uses `std.process.run` (Zig 0.16 API). The caller provides
-/// the required `io: std.Io` instance.
+/// Returns `error.GlslcNotFound` if glslc is not findable in PATH. A source
+/// glslc refuses is not an error: the result carries no SPIR-V and glslc's
+/// diagnostics.
 pub fn compile(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -76,23 +74,6 @@ pub fn compile(
     stage: Stage,
     entry_point: ?[]const u8,
 ) CompileError!Result {
-    // Writes the source to a temp file. Unique name via an atomic
-    // counter (avoids the dependency on `std.time.nanoTimestamp` which
-    // no longer exists in Zig 0.16).
-    const id = unique_id.fetchAdd(1, .monotonic);
-    var tmp_buf: [128]u8 = undefined;
-    const tmp_name = std.fmt.bufPrint(&tmp_buf, "/tmp/weld_shader_{d}.glsl", .{id}) catch return error.OutOfMemory;
-
-    {
-        var file = std.Io.Dir.cwd().createFile(io, tmp_name, .{ .truncate = true }) catch return error.ProcessSpawnFailed;
-        defer file.close(io);
-        file.writeStreamingAll(io, source) catch return error.ProcessSpawnFailed;
-    }
-    defer {
-        std.Io.Dir.cwd().deleteFile(io, tmp_name) catch {};
-    }
-
-    // Builds argv.
     var argv: std.ArrayListUnmanaged([]const u8) = .empty;
     defer argv.deinit(allocator);
     argv.append(allocator, "glslc") catch return error.OutOfMemory;
@@ -104,34 +85,55 @@ pub fn compile(
         ep_buf = ep_arg;
         argv.append(allocator, ep_arg) catch return error.OutOfMemory;
     }
-    argv.append(allocator, "-o") catch return error.OutOfMemory;
-    argv.append(allocator, "-") catch return error.OutOfMemory;
-    argv.append(allocator, tmp_name) catch return error.OutOfMemory;
+    argv.appendSlice(allocator, &.{ "-o", "-", "-" }) catch return error.OutOfMemory;
 
-    const run_result = std.process.run(allocator, io, .{
+    var child = std.process.spawn(io, .{
         .argv = argv.items,
-        .stdout_limit = std.Io.Limit.limited(16 * 1024 * 1024),
-        .stderr_limit = std.Io.Limit.limited(1024 * 1024),
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
     }) catch |e| switch (e) {
         error.FileNotFound => return error.GlslcNotFound,
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.ProcessSpawnFailed,
     };
-    defer allocator.free(run_result.stdout);
-    defer allocator.free(run_result.stderr);
+    defer child.kill(io);
 
-    switch (run_result.term) {
+    // glslc reads all of its input before it writes anything, so the whole
+    // source goes in before either output is read. A write that fails means
+    // glslc has exited; its exit status and stderr say why.
+    child.stdin.?.writeStreamingAll(io, source) catch {};
+    child.stdin.?.close(io);
+    child.stdin = null;
+
+    var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(allocator, io, multi_reader_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi_reader.deinit();
+    while (multi_reader.fill(64, .none)) |_| {} else |err| switch (err) {
+        error.EndOfStream => {},
+        else => return error.GlslcIoFailed,
+    }
+    multi_reader.checkAnyError() catch return error.GlslcIoFailed;
+    const term = child.wait(io) catch return error.GlslcIoFailed;
+
+    const stdout = multi_reader.toOwnedSlice(0) catch return error.OutOfMemory;
+    defer allocator.free(stdout);
+    const stderr = multi_reader.toOwnedSlice(1) catch return error.OutOfMemory;
+    defer allocator.free(stderr);
+
+    switch (term) {
         .exited => |code| if (code != 0) {
-            const diag = allocator.dupe(u8, run_result.stderr) catch return error.OutOfMemory;
+            const diag = allocator.dupe(u8, stderr) catch return error.OutOfMemory;
             return Result{ .spv = &.{}, .diagnostics = diag };
         },
         else => return error.GlslcCrashed,
     }
 
     // SPIR-V in stdout. Basic validation: ≥ 4 bytes.
-    if (run_result.stdout.len < 4) return error.GlslSyntaxError;
-    const spv = allocator.dupe(u8, run_result.stdout) catch return error.OutOfMemory;
-    const diag = allocator.dupe(u8, run_result.stderr) catch return error.OutOfMemory;
+    if (stdout.len < 4) return error.GlslSyntaxError;
+    const spv = allocator.dupe(u8, stdout) catch return error.OutOfMemory;
+    const diag = allocator.dupe(u8, stderr) catch return error.OutOfMemory;
     return Result{ .spv = spv, .diagnostics = diag };
 }
 
@@ -156,6 +158,14 @@ test "compiler: Stage.glslcArg covers all stages" {
     try t.expectEqualStrings("-fshader-stage=vertex", Stage.vertex.glslcArg());
     try t.expectEqualStrings("-fshader-stage=fragment", Stage.fragment.glslcArg());
     try t.expectEqualStrings("-fshader-stage=compute", Stage.compute.glslcArg());
+}
+
+test "compiler: a file name gives its stage, or none" {
+    const t = std.testing;
+    try t.expectEqual(Stage.vertex, Stage.ofFileName("a.vert.glsl").?);
+    try t.expectEqual(Stage.fragment, Stage.ofFileName("a.frag.glsl").?);
+    try t.expectEqual(Stage.compute, Stage.ofFileName("a.comp.glsl").?);
+    try t.expectEqual(@as(?Stage, null), Stage.ofFileName("a.glsl"));
 }
 
 test "compiler: isAvailable does not crash" {

@@ -34,6 +34,7 @@ pub const DiagnosticCode = enum {
     not_a_module, // E0103 NotAModule (import path resolves to no module)
     unknown_export, // E0104 UnknownExport (item absent from target's exports)
     enum_variant_not_found, // E0105 EnumVariantNotFound
+    ambiguous_enum_variant, // E0106 AmbiguousEnumVariant (a `.variant` shorthand no expected type resolves, several enums naming it)
     import_private_item, // E0107 ImportPrivateItem (buildExports sets .private from Item.visibility)
     import_cycle, // E0108 ImportCycle (D-B: NOT E0101; E0101 is DuplicateSymbol)
     private_type_in_public_impl, // W0902 PrivateTypeInPublicImpl (visibility §10.2, warning)
@@ -42,12 +43,14 @@ pub const DiagnosticCode = enum {
     type_mismatch, // E0200 TypeMismatch
     arg_count_mismatch, // E0203 ArgCountMismatch (unfolded from E0200; also named-arg binding failures)
     return_type_mismatch, // E0204 ReturnTypeMismatch (unfolded from E0200)
+    empty_array_type_annotation_required, // E0207 EmptyArrayTypeAnnotationRequired
     struct_field_missing, // E0208 StructFieldMissing
     ambiguous_type, // E0210 AmbiguousType
     ambiguous_trait_method, // E0211 AmbiguousTraitMethod
     incomplete_trait_impl, // E0214 IncompleteTraitImpl
     conditional_impl_condition_not_proven, // E0215 ConditionalImplConditionNotProven
     orphan_impl, // E0217 OrphanImpl
+    ambiguous_inherent_method, // E0218 AmbiguousInherentMethod (two inherent impls of one type define a method of one name)
     immutable_receiver_for_mut_self, // E0220 ImmutableReceiverForMutSelfMethod
     closure_cannot_mutate_capture, // E0221 ClosureCannotMutateCapture
     collection_field_element_invalid, // E0222 CollectionFieldElementInvalid (resource collection field: unsupported element or nested collection)
@@ -62,6 +65,7 @@ pub const DiagnosticCode = enum {
     prefab_spawn_not_executable, // E0305 PrefabSpawnNotExecutable (spawn("Name") recognized but gated on the prefab runtime; not executable)
     structural_component_field_unknown, // E0306 StructuralComponentFieldUnknown (spawn/add component-literal field absent from the component decl)
     structural_component_field_type_invalid, // E0307 StructuralComponentFieldTypeInvalid (spawn/add component-literal field value type mismatch)
+    resource_field_type_invalid, // E0308 ResourceFieldTypeInvalid (scene `resources` block field value type mismatch)
 
     // ── Annotation errors (E0500-E0599) ──
     annotation_misapplied, // E0502 AnnotationMisapplied
@@ -376,6 +380,8 @@ pub const DiagnosticCode = enum {
     prefab_component_redefined, // E1796 PrefabComponentRedefined (RESERVED: variant/base component-shape merge is a runtime concern)
     prefab_remove_base_component, // W1790 PrefabRemoveBaseComponent (RESERVED: no `remove` syntax in the §24.1 grammar)
     extension_additive_conflict, // E1797 ExtensionAdditiveConflict (fatal cook error, strictly-additive `extends` → reject: (a) two extensions declare the same component, (b) an extension declares a component already carried by the base/an earlier extension, (c) the same extension is listed twice; guarantees `cooked ⇒ loadable`; runtime backstops `error.ExtensionComponentConflict` (a/b) / `error.ExtensionAlreadyActive` (c))
+    illegal_statement_in_extension_hook, // E1798 IllegalStatementInExtensionHook (`return`, `throw` outside a `try`, or a timer in an `on_attach` / `on_detach` body: a hook runs to completion with no caller, no task and no error channel)
+    prefab_hook_not_allowed, // E1799 PrefabHookNotAllowed (`requires`, `on_attach` or `on_detach` on a prefab without `extends`)
 
     // ── async / effects (9xx, etch-resolver-types.md §9.2) ──
     async_call_in_non_async_context, // E0901 AsyncCallInNonAsyncContext (async fn/method call, or `await`, in a non-async fn/rule)
@@ -387,6 +393,7 @@ pub const DiagnosticCode = enum {
     event_not_entity_scoped, // E0908 EventNotEntityScoped (`await entity_event(e, T)` where T has no `Entity` field)
     ambiguous_event_entity_target, // E0909 AmbiguousEventEntityTarget (T has multiple `Entity` fields with no `@entity_target`)
     measure_outside_test, // E0910 MeasureOutsideTest (`measure { … }` outside a test body; wall-clock stays out of deterministic gameplay)
+    control_flow_escapes_closure, // E0911 ControlFlowEscapesClosure (`break`/`continue` in a closure body targeting a loop outside it)
 
     // ── Declaration files `.d.etch` (900-E1919, `etch-validation-ecs.md` §28,
     // `etch-grammar.md` §20). The E19xx block was empty before this milestone. The two
@@ -406,6 +413,7 @@ pub const DiagnosticCode = enum {
     // `etch-grammar.md` §20.3 describes keys on a `.etchc`, which does not exist. ──
     declaration_file_body_not_allowed, // E1900 DeclarationFileBodyNotAllowed (a `fn` carries a body inside a `.d.etch`)
     construct_not_allowed_in_declaration_file, // E1901 ConstructNotAllowedInDeclarationFile (a behavioural top-level construct appears in a `.d.etch`)
+    typed_extension_mismatch, // E0858 TypedExtensionMismatch (a construct in the wrong typed extension, `etch-grammar.md` §21.2)
     declaration_file_implementation_mismatch, // E1902 DeclarationFileImplementationMismatch (a committed `.d.etch` diverges from what the emitter produces on the current Zig `ServiceSpec`)
 
     /// Canonical short code, e.g. `"E0001"`.
@@ -420,15 +428,18 @@ pub const DiagnosticCode = enum {
             .import_cycle => "E0108",
             .private_type_in_public_impl => "W0902",
             .enum_variant_not_found => "E0105",
+            .ambiguous_enum_variant => "E0106",
             .type_mismatch => "E0200",
             .arg_count_mismatch => "E0203",
             .return_type_mismatch => "E0204",
+            .empty_array_type_annotation_required => "E0207",
             .struct_field_missing => "E0208",
             .ambiguous_type => "E0210",
             .ambiguous_trait_method => "E0211",
             .incomplete_trait_impl => "E0214",
             .conditional_impl_condition_not_proven => "E0215",
             .orphan_impl => "E0217",
+            .ambiguous_inherent_method => "E0218",
             .immutable_receiver_for_mut_self => "E0220",
             .closure_cannot_mutate_capture => "E0221",
             .collection_field_element_invalid => "E0222",
@@ -440,6 +451,7 @@ pub const DiagnosticCode = enum {
             .prefab_spawn_not_executable => "E0305",
             .structural_component_field_unknown => "E0306",
             .structural_component_field_type_invalid => "E0307",
+            .resource_field_type_invalid => "E0308",
             .annotation_misapplied => "E0502",
             .annotation_arg_mismatch => "E0503",
             .requires_cycle => "E0505",
@@ -602,6 +614,8 @@ pub const DiagnosticCode = enum {
             .prefab_component_redefined => "E1796",
             .prefab_remove_base_component => "W1790",
             .extension_additive_conflict => "E1797",
+            .illegal_statement_in_extension_hook => "E1798",
+            .prefab_hook_not_allowed => "E1799",
             .async_call_in_non_async_context => "E0901",
             .unhandled_throws_call => "E0902",
             .await_not_statement_head => "E0904",
@@ -611,8 +625,10 @@ pub const DiagnosticCode = enum {
             .event_not_entity_scoped => "E0908",
             .ambiguous_event_entity_target => "E0909",
             .measure_outside_test => "E0910",
+            .control_flow_escapes_closure => "E0911",
             .declaration_file_body_not_allowed => "E1900",
             .construct_not_allowed_in_declaration_file => "E1901",
+            .typed_extension_mismatch => "E0858",
             .declaration_file_implementation_mismatch => "E1902",
         };
     }
@@ -629,15 +645,18 @@ pub const DiagnosticCode = enum {
             .import_cycle => "ImportCycle",
             .private_type_in_public_impl => "PrivateTypeInPublicImpl",
             .enum_variant_not_found => "EnumVariantNotFound",
+            .ambiguous_enum_variant => "AmbiguousEnumVariant",
             .type_mismatch => "TypeMismatch",
             .arg_count_mismatch => "ArgCountMismatch",
             .return_type_mismatch => "ReturnTypeMismatch",
+            .empty_array_type_annotation_required => "EmptyArrayTypeAnnotationRequired",
             .struct_field_missing => "StructFieldMissing",
             .ambiguous_type => "AmbiguousType",
             .ambiguous_trait_method => "AmbiguousTraitMethod",
             .incomplete_trait_impl => "IncompleteTraitImpl",
             .conditional_impl_condition_not_proven => "ConditionalImplConditionNotProven",
             .orphan_impl => "OrphanImpl",
+            .ambiguous_inherent_method => "AmbiguousInherentMethod",
             .immutable_receiver_for_mut_self => "ImmutableReceiverForMutSelfMethod",
             .closure_cannot_mutate_capture => "ClosureCannotMutateCapture",
             .collection_field_element_invalid => "CollectionFieldElementInvalid",
@@ -649,6 +668,7 @@ pub const DiagnosticCode = enum {
             .prefab_spawn_not_executable => "PrefabSpawnNotExecutable",
             .structural_component_field_unknown => "StructuralComponentFieldUnknown",
             .structural_component_field_type_invalid => "StructuralComponentFieldTypeInvalid",
+            .resource_field_type_invalid => "ResourceFieldTypeInvalid",
             .annotation_misapplied => "AnnotationMisapplied",
             .annotation_arg_mismatch => "AnnotationArgMismatch",
             .requires_cycle => "RequiresCycle",
@@ -811,6 +831,8 @@ pub const DiagnosticCode = enum {
             .prefab_component_redefined => "PrefabComponentRedefined",
             .prefab_remove_base_component => "PrefabRemoveBaseComponent",
             .extension_additive_conflict => "ExtensionAdditiveConflict",
+            .illegal_statement_in_extension_hook => "IllegalStatementInExtensionHook",
+            .prefab_hook_not_allowed => "PrefabHookNotAllowed",
             .async_call_in_non_async_context => "AsyncCallInNonAsyncContext",
             .unhandled_throws_call => "UnhandledThrowsCall",
             .await_not_statement_head => "AwaitNotStatementHead",
@@ -820,8 +842,10 @@ pub const DiagnosticCode = enum {
             .event_not_entity_scoped => "EventNotEntityScoped",
             .ambiguous_event_entity_target => "AmbiguousEventEntityTarget",
             .measure_outside_test => "MeasureOutsideTest",
+            .control_flow_escapes_closure => "ControlFlowEscapesClosure",
             .declaration_file_body_not_allowed => "DeclarationFileBodyNotAllowed",
             .construct_not_allowed_in_declaration_file => "ConstructNotAllowedInDeclarationFile",
+            .typed_extension_mismatch => "TypedExtensionMismatch",
             .declaration_file_implementation_mismatch => "DeclarationFileImplementationMismatch",
         };
     }
@@ -929,4 +953,10 @@ test "DiagnosticCode code and name are stable cross-version" {
     try std.testing.expectEqualStrings("AmbiguousEventEntityTarget", DiagnosticCode.ambiguous_event_entity_target.name());
     try std.testing.expectEqualStrings("E1797", DiagnosticCode.extension_additive_conflict.code());
     try std.testing.expectEqualStrings("ExtensionAdditiveConflict", DiagnosticCode.extension_additive_conflict.name());
+    try std.testing.expectEqualStrings("E1798", DiagnosticCode.illegal_statement_in_extension_hook.code());
+    try std.testing.expectEqualStrings("IllegalStatementInExtensionHook", DiagnosticCode.illegal_statement_in_extension_hook.name());
+    try std.testing.expectEqualStrings("E1799", DiagnosticCode.prefab_hook_not_allowed.code());
+    try std.testing.expectEqualStrings("PrefabHookNotAllowed", DiagnosticCode.prefab_hook_not_allowed.name());
+    try std.testing.expectEqualStrings("E0207", DiagnosticCode.empty_array_type_annotation_required.code());
+    try std.testing.expectEqualStrings("EmptyArrayTypeAnnotationRequired", DiagnosticCode.empty_array_type_annotation_required.name());
 }

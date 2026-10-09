@@ -98,6 +98,8 @@ pub const ComponentId = registry.ComponentId;
 /// validate `@storage`'s argument against the domain's single declaration
 /// instead of re-listing its spellings (`etch-resolver-types.md` §13.3.1).
 pub const StorageKind = registry.StorageKind;
+/// Component or resource, as the registry records each type.
+pub const TypeKind = registry.TypeKind;
 
 /// Stable archetype handle (index into `World.archetypes`).
 pub const ArchetypeId = world.ArchetypeId;

@@ -154,6 +154,28 @@ test "a service string argument and result cross in both directions" {
     try std.testing.expectEqual(@as(u32, 1), r.calls);
 }
 
+test "a service call whose argument throws is not made" {
+    const gpa = std.testing.allocator;
+    var r = try run(gpa, accumulator ++
+        \\
+        \\rule use_service(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let acc = entity.get_mut(Acc)
+        \\  try {
+        \\    acc.out = toy.echo(toy.risky(5))
+        \\  } catch err {
+        \\    acc.err_out = 7
+        \\  }
+        \\}
+    , false);
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 7), r.err_out);
+    try std.testing.expectEqual(@as(u32, 1), r.calls);
+}
+
 test "failing toy method propagates to try/catch" {
     const gpa = std.testing.allocator;
     var r = try run(gpa, accumulator ++
@@ -305,4 +327,37 @@ test "a local shadows a service, in the checker and in the interpreter alike" {
     for (r.diagnostics.items) |d| {
         try std.testing.expect(std.mem.indexOf(u8, d.primary_message, "service") == null);
     }
+}
+
+test "a service call binds labeled arguments by name" {
+    const gpa = std.testing.allocator;
+    var r = try run(gpa, accumulator ++
+        \\
+        \\rule use_service(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  entity.get_mut(Acc).out = toy.pair(b: 2, a: 7)
+        \\}
+    , false);
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 72), r.out);
+}
+
+test "an int argument for a float parameter is refused, and fails rather than converts at run time" {
+    const gpa = std.testing.allocator;
+    var r = try run(gpa, accumulator ++
+        \\
+        \\rule use_service(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let h = toy.half(4)
+        \\  entity.get_mut(Acc).out = 1
+        \\}
+    , false);
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.items.len);
+    try std.testing.expectEqual(@as(u64, 1), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 0), r.out);
 }

@@ -1,40 +1,30 @@
 //! One test per diagnostic code that the type-checker emits and that nothing
 //! asserted. The deliverable is coverage, not a count.
 //!
-//! Each test names ONE code and asserts it is PRESENT. That direction is the
-//! whole point: such a test goes red the day the checker stops emitting that
-//! code, which a test asserting absence cannot do. `expectNoCode` exists here
-//! only for the few cases that need to tell two neighbouring codes apart.
+//! Each test asserts its code is PRESENT. That direction is the whole point:
+//! such a test goes red the day the checker stops emitting that code, which a
+//! test asserting absence cannot do.
 //!
 //! WHAT THIS FILE DOES NOT COVER, and why none of it can be covered the same
-//! way. Of the 203 declared codes, 138 already carry an assertion elsewhere and
-//! 33 land here. The remaining 32 cannot have a test that reddens, because
-//! there is nothing to stop emitting:
+//! way. These codes cannot have a test that reddens, because there is nothing
+//! to stop emitting — they appear ONLY in `src/etch/diagnostics.zig`, declared
+//! and referenced nowhere else in the tree:
 //!
-//!   E0420 E0421 E1544 E1549 E1563 E1610 E1611 E1622 E1642 E1643 E1660 E1662
-//!   E1663 E1667 E1668 E1688 E1691 E1692 E1694 E1700 E1701 E1724 E1725 E1748
-//!   E1796 E1802 E1807 E1902 W1682 W1790 W1801
+//!   E0420 E0421 E1216 E1544 E1549 E1563 E1610 E1611 E1622 E1642 E1643 E1660
+//!   E1662 E1663 E1667 E1668 E1688 E1691 E1692 E1694 E1700 E1701 E1724 E1725
+//!   E1748 E1796 E1797 E1802 E1807 W1682 W1790 W1801
 //!
-//! appear ONLY in `src/etch/diagnostics.zig` — declared, referenced nowhere
-//! else in the tree. `E1902` is the one with a reference, in the `.d.etch`
-//! drift tool, as a report LABEL rather than an emitted diagnostic.
+//! `E1902` has one reference, in the `.d.etch` drift tool, as a report LABEL
+//! rather than an emitted diagnostic.
 //!
-//! `E0217` is the 32nd and is a different case: it HAS an emit site, and that
-//! site is unreachable. `validateTraitImpl` returns on `!trait_local` fourteen
-//! lines before testing `!trait_local and !type_local`, so the conjunction is
-//! unsatisfiable in every configuration. The comment there attributes it to
-//! single-file mode, which is what makes the dead branch read as deliberate;
-//! an imported trait lands in `imported_symbols`, which that function never
-//! reads, so it takes the same early return.
-//!
-//! AND WHAT THE COUNT ITSELF DOES NOT SEE. The 138 is a STATIC reading of which
-//! tests name which code, and it is not verified per code: a test may name a
-//! code it does not exercise. That reading was wrong three times here — it
-//! called E1208, E1209 and E1215 uncovered when inline tests in `interp.zig`
-//! do cover them, through a helper whose parameter is `anytype` and therefore
-//! invisible to any search over signatures. What settled it was mutation:
-//! making the checker swallow a code and observing which tests go red. Only
-//! the 33 below have been verified that way.
+//! AND WHAT A STATIC READING DOES NOT SEE. Which tests name which code is not
+//! verified per code: a test may name a code it does not exercise. That
+//! reading was wrong three times here — it called E1208, E1209 and E1215
+//! uncovered when inline tests in `interp.zig` do cover them, through a helper
+//! whose parameter is `anytype` and therefore invisible to any search over
+//! signatures. What settled it was mutation: making the checker swallow a code
+//! and observing which tests go red. Only the 33 below have been verified that
+//! way.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");
@@ -560,4 +550,19 @@ test "W1740 empty track" {
     defer c.deinit(gpa);
     try std.testing.expect(parsedClean(c));
     try expectAnyCode(c.diags.items, .empty_track);
+}
+
+test "an impl naming two undeclared symbols answers undefined_symbol, not orphan_impl" {
+    const gpa = std.testing.allocator;
+    // WRONG FIX when the loop below reddens: deleting it. An undeclared trait
+    // or type is not a foreign one, so `orphan_impl` never answers this program.
+    var c = try check(gpa,
+        \\impl Missing for Absent { fn f(self) { } }
+    );
+    defer c.deinit(gpa);
+    try std.testing.expect(parsedClean(c));
+    try expectAnyCode(c.diags.items, .undefined_symbol);
+    for (c.diags.items) |d| {
+        try std.testing.expect(d.code != .orphan_impl);
+    }
 }

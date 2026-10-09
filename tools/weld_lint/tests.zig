@@ -30,6 +30,7 @@ comptime {
     _ = @import("rules/no_device_dispatch_outside_gal.zig");
     _ = @import("rules/no_float_reduce.zig");
     _ = @import("rules/no_precision_crossing.zig");
+    _ = @import("rules/no_raw_named_type_read.zig");
     _ = @import("rules/conventional_commit.zig");
     _ = @import("rules/comment_identifiers.zig");
     _ = @import("rules/comment_tags.zig");

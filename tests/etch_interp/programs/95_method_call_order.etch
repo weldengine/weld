@@ -1,0 +1,230 @@
+component Order {
+  binding: int = 0
+  field: int = 0
+  element: int = 0
+  named: int = 0
+  self_field: int = 0
+  pushed: int = 0
+  inserted: int = 0
+  set_inserted: int = 0
+  chain: int = 0
+  index: int = 0
+  by_value: int = 0
+  set_lookup: int = 0
+  field_value: int = 0
+  typed_arg: int = 0
+}
+
+struct In {
+  v: int
+}
+
+struct Outer {
+  inner: In
+}
+
+struct Digits {
+  n: int = 0
+}
+
+impl In {
+  fn absorb(mut self, o: In) {
+    self.v = self.v + 1
+    self.v = self.v + o.v * 10
+  }
+
+  fn put(mut self, o: In) {
+    self = o
+  }
+
+  fn plus(self, k: int) -> int {
+    self.v * 10 + k
+  }
+}
+
+impl Digits {
+  fn add(self, k: int) -> Digits {
+    Digits { n: self.n * 10 + k }
+  }
+}
+
+rule order_binding(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut p = In { v: 1 }
+  p.absorb({
+    p = In { v: 5 }
+    let q = In { v: 1 }
+    q
+  })
+  acc.binding = p.v
+}
+
+rule order_field(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut h = Outer { inner: In { v: 1 } }
+  h.inner.absorb({
+    h = Outer { inner: In { v: 5 } }
+    let q = In { v: 1 }
+    q
+  })
+  acc.field = h.inner.v
+}
+
+rule order_element(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut ps: In[1] = [In { v: 1 }]
+  ps[0].absorb({
+    ps = [In { v: 5 }]
+    let q = In { v: 1 }
+    q
+  })
+  acc.element = ps[0].v
+}
+
+rule order_named(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut p = In { v: 1 }
+  p.absorb(o: {
+    p = In { v: 5 }
+    let q = In { v: 1 }
+    q
+  })
+  acc.named = p.v
+}
+
+rule order_self_field(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut h = Outer { inner: In { v: 1 } }
+  h.inner.put({
+    h = Outer { inner: In { v: 5 } }
+    let q = In { v: 7 }
+    q
+  })
+  acc.self_field = h.inner.v
+}
+
+rule order_push(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut ys: int[] = [1]
+  let zs: int[] = [9]
+  ys.push({
+    ys = zs
+    2
+  })
+  acc.pushed = ys.len() * 10 + ys[0]
+}
+
+rule order_insert(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut m: [int: int] = [1: 10]
+  let m2: [int: int] = [5: 50]
+  m.insert(2, {
+    m = m2
+    20
+  })
+  let a = m[5] ?? 0
+  let b = m[2] ?? 0
+  acc.inserted = m.len() * 1000 + a * 10 + b
+}
+
+rule order_set_insert(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut s: Set<int> = Set.from([1])
+  let s2: Set<int> = Set.from([7])
+  s.insert({
+    s = s2
+    3
+  })
+  let c = if s.contains(3) { 1 } else { 0 }
+  acc.set_inserted = s.len() * 10 + c
+}
+
+rule order_chain(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut k = 0
+  let d = Digits { n: 0 }
+  let e = d.add({
+    k = k * 10 + 1
+    1
+  }).add({
+    k = k * 10 + 2
+    2
+  })
+  acc.chain = k * 100 + e.n
+}
+
+rule order_index(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut ps: In[2] = [In { v: 1 }, In { v: 2 }]
+  let mut k = 0
+  ps[k].absorb({
+    k = 1
+    let q = In { v: 3 }
+    q
+  })
+  acc.index = ps[0].v * 100 + ps[1].v
+}
+
+rule order_by_value(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut rv = In { v: 1 }
+  acc.by_value = rv.plus({
+    rv = In { v: 5 }
+    2
+  })
+}
+
+rule order_set_lookup(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut s: Set<int> = Set.from([1])
+  let s2: Set<int> = Set.from([3])
+  let c = s.contains({
+    s = s2
+    3
+  })
+  acc.set_lookup = if c { 1 } else { 0 }
+}
+
+rule order_field_value(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let mut h = Outer { inner: In { v: 1 } }
+  acc.field_value = h.inner.plus({
+    h = Outer { inner: In { v: 5 } }
+    2
+  })
+}
+
+rule order_typed_arg(entity: Entity)
+  when entity has Order
+{
+  let acc = entity.get_mut(Order)
+  let base = In { v: 1 }
+  let c = acc.typed_arg == 0
+  acc.typed_arg = base.plus(if c { 3 } else { 4 })
+}

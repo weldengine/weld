@@ -25,8 +25,8 @@
 //! inter-step gap past the worker spin window, forcing `work_available` parks —
 //! which is what exposes a lost wake if one exists.
 //!
-//! Watchdog identical to `no_alloc_steady_state.zig`: 5 s per dispatch loop,
-//! dump state and `exit(2)` on timeout.
+//! Past `hang_timeout_ns`, per dispatch loop and for the whole run, it dumps
+//! state and exits with code 2, the code the stress loop counts hangs by.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -273,11 +273,13 @@ fn dispatchLoop(args: *DispatchArgs) void {
     args.done.store(true, .release);
 }
 
+const hang_timeout_ns: i96 = 5 * std.time.ns_per_s;
+
 fn runWithWatchdog(args: *DispatchArgs) !void {
     const thread = try std.Thread.spawn(.{}, dispatchLoop, .{args});
 
     const start = std.Io.Clock.now(.awake, args.io);
-    const timeout_ns: i96 = 5 * std.time.ns_per_s;
+    const timeout_ns = hang_timeout_ns;
 
     while (!args.done.load(.acquire)) {
         const now = std.Io.Clock.now(.awake, args.io);
@@ -361,13 +363,13 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
 
     // A GLOBAL watchdog, covering the teardown `Scheduler.deinit()`/`join()`
     // that the per-dispatch `runWithWatchdog` below does NOT reach. Armed after
-    // the noise threads so its 5 s window wraps the scheduler lifecycle tightly
+    // the noise threads so its window wraps the scheduler lifecycle tightly
     // rather than the spin-up, with `defer disarm()` declared before
     // `defer jobs_sched.deinit` so LIFO keeps it armed through deinit and join.
     // It uses `io` and its own thread stack, never the counting `gpa`, so it
     // cannot perturb the measured delta.
     var wd: watchdog.Watchdog = .{};
-    try wd.arm(io, watchdog.default_timeout_ns, "stress steady-state — composite scenario under concurrent CPU and allocator noise");
+    try wd.arm(io, hang_timeout_ns, "stress steady-state — composite scenario under concurrent CPU and allocator noise");
     defer wd.disarm();
 
     var jobs_sched = try weld_core.jobs.scheduler.Scheduler.init(gpa, io);

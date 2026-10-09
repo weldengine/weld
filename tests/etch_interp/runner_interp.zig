@@ -66,6 +66,7 @@ pub const Runner = struct {
         // the codegen runner (which threads it into `tick`) but unused here.
         _ = gpa;
         try self.interp.stepOnce(world, &self.report);
+        if (self.report.runtime_errors != 0) return error.InterpreterRuntimeError;
         world.tickBoundary();
     }
 

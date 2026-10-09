@@ -11,4 +11,10 @@ service toy {
   fn risky(n: int) throws -> int
 
   fn label(prefix: string) -> string
+
+  /// Return a times ten plus b.
+  fn pair(a: int, b: int) -> int
+
+  /// Return half of x.
+  fn half(x: float) -> float
 }

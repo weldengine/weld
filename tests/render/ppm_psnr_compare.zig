@@ -1,16 +1,10 @@
-//! The direct PPM PSNR gate.
+//! The smoke-test PSNR gate.
 //!
-//! Reads the smoke-test capture at `out/smoke_test.ppm`, produced by a prior
-//! `run-example-triangle --smoke-test --capture-frame=N` step, and compares it
-//! against the committed golden by PSNR — WITHOUT rebuilding the render stack
-//! and WITHOUT re-running the triangle. Going through
-//! `zig build test-render-capture` instead rebuilds the test target in
-//! ReleaseSafe and re-spawns the triangle for a PPM the previous step has
-//! already produced, at a measured 3-5 minutes per CI run.
-//!
-//! This module imports only `std` (no `weld_render`), so `zig build
-//! test-ppm-psnr` compiles in seconds. The gate skips when either PPM is
-//! absent (e.g. run locally without first producing the capture).
+//! Compares the capture `zig build run-example-triangle -- --smoke-test
+//! --capture-frame=N` writes against the committed golden. It runs only in the
+//! CI job that produces that capture on lavapipe, through `zig build
+//! test-ppm-psnr`, and is outside `zig build test`: no other cell can produce
+//! the capture. A missing capture or golden fails the gate and names the file.
 
 const std = @import("std");
 
@@ -18,7 +12,8 @@ const FRAME_WIDTH: u32 = 1280;
 const FRAME_HEIGHT: u32 = 720;
 const PSNR_GATE_DB: f64 = 40.0;
 const GOLDEN_PATH: []const u8 = "tests/golden/smoke_test_software.ppm";
-const CAPTURED_PATH: []const u8 = "out/smoke_test.ppm";
+/// The example runs from its own directory and writes `out/smoke_test.ppm` there.
+const CAPTURED_PATH: []const u8 = "examples/triangle/out/smoke_test.ppm";
 
 fn fileExists(io: std.Io, path: []const u8) bool {
     var f = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
@@ -76,16 +71,14 @@ fn psnrDb(a: []const u8, b: []const u8) f64 {
 
 test "ppm psnr gate: captured smoke frame matches golden within 40 dB" {
     const io = std.testing.io;
-    if (!fileExists(io, CAPTURED_PATH)) return error.SkipZigTest;
-    if (!fileExists(io, GOLDEN_PATH)) return error.SkipZigTest;
-
     const allocator = std.testing.allocator;
-    const captured = readPpm(allocator, io, CAPTURED_PATH) catch |e| {
-        std.log.warn("ppm-psnr: failed to read {s}: {t}", .{ CAPTURED_PATH, e });
-        return error.SkipZigTest;
+    for ([_][]const u8{ CAPTURED_PATH, GOLDEN_PATH }) |path| if (!fileExists(io, path)) {
+        std.log.err("ppm-psnr: {s} is absent", .{path});
+        return error.PpmAbsent;
     };
-    defer allocator.free(captured);
 
+    const captured = try readPpm(allocator, io, CAPTURED_PATH);
+    defer allocator.free(captured);
     const golden = try readPpm(allocator, io, GOLDEN_PATH);
     defer allocator.free(golden);
 

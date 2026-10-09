@@ -295,9 +295,10 @@ const Validator = struct {
         }
     }
 
-    /// Walk the Entity Extensions Table + Prefab ID Table + hooks within
-    /// `[ex, cr)`, validating every span and every string ref (prefab names,
-    /// hook text). Returns `prefab_id_count` for the per-entity id check.
+    /// Walk the Entity Extensions Table + Prefab ID Table + hooks + requires,
+    /// which fill `[ex, cr)` exactly, validating every span and every string ref
+    /// (prefab names, hook text, required names). Returns `prefab_id_count` for
+    /// the per-entity id check.
     fn validateExtensionsRegion(self: *const Validator, ex: usize, cr: usize) StructureError!u32 {
         // Entity Extensions Table.
         if (try add(ex, 4) > cr) return error.MalformedScene;
@@ -322,9 +323,10 @@ const Validator = struct {
                 try self.checkStringRef(try readU32(self.bytes, try add(pids_off, try mul(p, 4))));
             }
         }
-        // Hooks (`hook_count ∈ {0,1}` today; refs are string-table offsets, 0 = absent).
+        // Hooks (`hook_count ∈ {0,1}`; refs are string-table offsets, 0 = absent).
         if (try add(pids_end, 4) > cr) return error.MalformedScene;
         const hook_count = try readU32(self.bytes, pids_end);
+        if (hook_count > 1) return error.MalformedScene;
         const hooks_off = try add(pids_end, 4);
         const hooks_end = try add(hooks_off, try mul(hook_count, 8));
         if (hooks_end > cr) return error.MalformedScene;
@@ -336,6 +338,17 @@ const Validator = struct {
                 const d_ref = try readU32(self.bytes, try add(base, 4));
                 if (a_ref != 0) try self.checkStringRef(a_ref);
                 if (d_ref != 0) try self.checkStringRef(d_ref);
+            }
+        }
+        // Requires, the region's last table.
+        if (try add(hooks_end, 4) > cr) return error.MalformedScene;
+        const req_count = try readU32(self.bytes, hooks_end);
+        const req_off = try add(hooks_end, 4);
+        if (try add(req_off, try mul(req_count, 4)) != cr) return error.MalformedScene;
+        {
+            var r: usize = 0;
+            while (r < req_count) : (r += 1) {
+                try self.checkStringRef(try readU32(self.bytes, try add(req_off, try mul(r, 4))));
             }
         }
         return pid_count;
@@ -555,6 +568,8 @@ fn walkAll(acc: accessor_mod.Accessor) void {
         if (h.on_attach) |v| touch(v);
         if (h.on_detach) |v| touch(v);
     }
+    var qi: u32 = 0;
+    while (qi < acc.requiresCount()) : (qi += 1) touch(acc.requiredName(qi));
     // Cross-references.
     var xi: u32 = 0;
     while (xi < acc.crossrefsCount()) : (xi += 1) {
@@ -812,4 +827,87 @@ test "validator rejects non-ascending / duplicate schema indices in an archetype
     std.mem.writeInt(u32, buf[s1..][0..4], 0, .little);
     refixHash(buf);
     try testing.expectError(error.MalformedScene, openAndValidate(buf));
+}
+
+/// One archetype `[Pos]`, one entity, `hook_sets` hook sets whose texts are
+/// model strings 1 and 2, and model string 3 required `requires` times.
+fn buildHookedScene(gpa: std.mem.Allocator, reg: *Registry, hook_sets: usize, requires: usize) ![]u8 {
+    const pos = try registerPod(gpa, reg, "Pos", 8, 4);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const strings = try a.dupe([]const u8, &.{ try a.dupe(u8, "E0"), try a.dupe(u8, "attach"), try a.dupe(u8, "detach"), try a.dupe(u8, "Health") });
+    const uuids = try a.dupe([16]u8, &.{[_]u8{7} ** 16});
+    const col = try a.alloc(u8, 8);
+    @memset(col, 0);
+    const cols = try a.dupe([]u8, &.{col});
+    const ids = try a.dupe(format.ComponentId, &.{pos});
+    const ents = try a.dupe(format.EntityEntry, &.{.{ .name = 0, .uuid = 0, .parent_uuid = format.no_parent }});
+    const blocks = try a.dupe(format.ArchetypeBlock, &.{.{ .component_ids = ids, .entity_count = 1, .columns = cols, .entities = ents }});
+    const hooks = try a.alloc(format.HookSet, hook_sets);
+    for (hooks) |*h| h.* = .{ .on_attach = 1, .on_detach = 2 };
+    const req = try a.alloc(u32, requires);
+    @memset(req, 3);
+    var model: format.CookModel = .{ .strings = strings, .uuids = uuids, .resources = &.{}, .archetypes = blocks, .hooks = hooks, .requires = req, .arena = arena };
+    defer model.deinit();
+    return writer.write(gpa, model, reg);
+}
+
+test "validator accepts one hook set" {
+    const gpa = testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const bytes = try buildHookedScene(gpa, &reg, 1, 0);
+    defer gpa.free(bytes);
+    try openAndValidate(bytes);
+}
+
+test "validator refuses more than one hook set" {
+    const gpa = testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const bytes = try buildHookedScene(gpa, &reg, 2, 0);
+    defer gpa.free(bytes);
+    try testing.expectError(error.MalformedScene, openAndValidate(bytes));
+}
+
+test "validator refuses bytes between the extensions region and the cross-references" {
+    const gpa = testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const base = try buildRichScene(gpa, &reg);
+    defer gpa.free(base);
+    const cr = (try accessor_mod.Accessor.open(base)).header.crossrefs_offset;
+    const buf = try gpa.alloc(u8, base.len + 4);
+    defer gpa.free(buf);
+    @memcpy(buf[0..cr], base[0..cr]);
+    @memset(buf[cr..][0..4], 0);
+    @memcpy(buf[cr + 4 ..], base[cr..]);
+    std.mem.writeInt(u32, buf[48..52], cr + 4, .little);
+    refixHash(buf);
+    try testing.expectError(error.MalformedScene, openAndValidate(buf));
+}
+
+test "validator refuses a requires count past the extensions region" {
+    const gpa = testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const bytes = try buildHookedScene(gpa, &reg, 1, 0);
+    defer gpa.free(bytes);
+    const cr = (try accessor_mod.Accessor.open(bytes)).header.crossrefs_offset;
+    std.mem.writeInt(u32, bytes[cr - 4 ..][0..4], 5, .little); // requires_count, the region's last word
+    refixHash(bytes);
+    try testing.expectError(error.MalformedScene, openAndValidate(bytes));
+}
+
+test "validator refuses a required name past the string table" {
+    const gpa = testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const bytes = try buildHookedScene(gpa, &reg, 1, 1);
+    defer gpa.free(bytes);
+    try openAndValidate(bytes);
+    const cr = (try accessor_mod.Accessor.open(bytes)).header.crossrefs_offset;
+    std.mem.writeInt(u32, bytes[cr - 4 ..][0..4], 0xFFFFFFF0, .little); // the one required name's ref
+    refixHash(bytes);
+    try testing.expectError(error.MalformedScene, openAndValidate(bytes));
 }

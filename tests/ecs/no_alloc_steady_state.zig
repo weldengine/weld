@@ -15,10 +15,8 @@
 //!   dispatch, so `hasPendingDeferred` returns false every frame.
 //!
 //! The measurement loop runs on a worker thread and the test thread polls a
-//! `done` atomic against a 5 s budget (`engine-zig-conventions.md` §13). On
-//! timeout it dumps the scheduler and event bus state through `livelock_dump`
-//! and aborts with exit code 2, which is the signal the stress harness counts
-//! hangs by.
+//! `done` atomic; past `dispatch_timeout_ns` it dumps the scheduler and event
+//! bus state through `livelock_dump` and aborts with exit code 2.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -183,15 +181,18 @@ fn dispatchLoop(args: *DispatchArgs) void {
     args.done.store(true, .release);
 }
 
-/// Watchdog wrapper. Spawns `dispatchLoop` on a worker
-/// thread, polls `done` every 50 ms up to a 5 s wall-clock budget.
-/// On timeout, dumps the scheduler + event bus state to stderr and
-/// aborts the test process with exit code 2 (= SchedulerLivelock).
+/// Short of the test's global watchdog, so a hang inside a dispatch loop gets
+/// this dump, the richer one, rather than the global's.
+const dispatch_timeout_ns: i96 = watchdog.default_timeout_ns - 10 * std.time.ns_per_s;
+
+/// Spawns `dispatchLoop` on a worker thread and polls `done` every 50 ms; past
+/// `dispatch_timeout_ns` it dumps the scheduler and event bus state to stderr
+/// and exits the process with code 2.
 fn runWithWatchdog(args: *DispatchArgs) !void {
     const thread = try std.Thread.spawn(.{}, dispatchLoop, .{args});
 
     const start = std.Io.Clock.now(.awake, args.io);
-    const timeout_ns: i96 = 5 * std.time.ns_per_s;
+    const timeout_ns = dispatch_timeout_ns;
 
     while (!args.done.load(.acquire)) {
         const now = std.Io.Clock.now(.awake, args.io);
