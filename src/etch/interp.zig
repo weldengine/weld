@@ -19305,6 +19305,7 @@ const value_prelude =
 ;
 
 const anon_runs = [_]ScopeRun{
+    .{ .name = "an anonymous literal in a data entry's optional field", .out = 1, .src = value_prelude ++ "struct Item { p: P? = none }\ndata Db: Item {\n  e: { p: .{ x: 1 } },\n}\nrule r() when resource Out {\n  get_mut(Out).n = 1\n}\n" },
     .{ .name = "an anonymous literal into an optional", .out = 4, .src = value_prelude ++ "rule r() when resource Out {\n  let o: P? = .{ x: 4 }\n  get_mut(Out).n = if let p = o { p.x } else { 0 }\n}\n" },
     .{ .name = "an anonymous literal under some", .out = 5, .src = value_prelude ++ "rule r() when resource Out {\n  let o: P? = some(.{ x: 5 })\n  get_mut(Out).n = if let p = o { p.x } else { 0 }\n}\n" },
     .{ .name = "anonymous elements of a dynamic array", .out = 12, .src = value_prelude ++ "rule r() when resource Out {\n  let ps: P[] = [.{ x: 1 }, .{ x: 2 }]\n  get_mut(Out).n = ps[0].x * 10 + ps[1].x\n}\n" },

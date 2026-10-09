@@ -745,6 +745,8 @@ const foreign_accepted = [_]ForeignCase{
     .{ .name = "a field of a qualified component", .main = "import geo as g\nfn f(h: g.Health) -> int { h.hp }" },
     .{ .name = "a foreign generic fn's concrete return", .main = "import geo { wrap, Pos }\nfn f() -> Pos { wrap(1) }" },
     .{ .name = "one enum under two names gives a shorthand one enum", .main = "import geo { Dir, Dir as D2 }\nfn f() -> bool {\n  let d = .north\n  true\n}" },
+    .{ .name = "an anonymous literal in a data entry's optional field of a qualified struct", .main = "import geo as g\nstruct Item { p: g.Pos? = none }\ndata Db: Item {\n  e: { p: .{ x: 1 } },\n}" },
+    .{ .name = "an anonymous literal in a data entry of a foreign entry type", .main = "import items { Item }\ndata Db: Item {\n  e: { p: .{ x: 1 } },\n}", .extra = .{ .name = "items.etch", .source = "import geo { Pos }\nstruct Item { p: Pos? = none }" } },
     .{ .name = "a variant for an audio_graph's imported enum param", .main = "import geo { Dir }\naudio_graph G {\n  params {\n    d: Dir = .south\n  }\n  output(wave_player(\"a.wav\"))\n}" },
     .{ .name = "an anonymous literal for an audio_graph's qualified struct param", .main = "import geo as g\naudio_graph G {\n  params {\n    p: g.Pos = .{ x: 1 }\n  }\n  output(wave_player(\"a.wav\"))\n}" },
 };

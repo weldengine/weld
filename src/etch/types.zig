@@ -2636,8 +2636,8 @@ pub const TypeChecker = struct {
     /// Check one component/resource-instance field (`name: value`) against the
     /// declared field run (over `arena.fields`): `code_unknown` if the field is
     /// absent; `code_type` (when non-null) if a builtin/struct/enum value type
-    /// mismatches. Mirrors `validateDataEntryField` — synthExprE with null ctx;
-    /// check-mode for `.variant` shorthand + anonymous `.{ }` values. Permissive
+    /// mismatches. Synthesized with no rule context, except a `.variant` or a
+    /// `.{ … }` value, checked against a declared enum or struct. Permissive
     /// on non-builtin declared types (no false positives on Vec3-from-array).
     fn checkInstanceField(self: *TypeChecker, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: DiagnosticCode) !void {
         if (field.name == 0) return; // spread — not produced in component/resource bodies
@@ -3475,9 +3475,8 @@ pub const TypeChecker = struct {
     }
 
     /// Validate one named field of a data entry against the declared entry
-    /// struct: E1763 unknown field, E1764 value type. Value typing mirrors
-    /// `checkStructLitAgainst` (check mode for `.variant` shorthands and
-    /// anonymous `.{ … }` values, synth otherwise).
+    /// struct: E1763 unknown field, E1764 value type. The value is checked
+    /// against the field's declared type.
     fn validateDataEntryField(self: *TypeChecker, decl: ast_mod.DataDecl, entry_struct: ?StructRef, field: ast_mod.StructLitField) !void {
         const sd = entry_struct orelse return; // type already reported
         var declared: ?ResolvedType = null;
@@ -3493,18 +3492,7 @@ pub const TypeChecker = struct {
             try self.emit(.entry_field_unknown, .error_, self.arena.exprSpan(field.value), "entry type '{s}' has no field '{s}'", .{ self.arena.strings.slice(decl.entry_type), self.arena.strings.slice(field.name) });
             return;
         };
-        const actual = blk: {
-            if (d == .enum_t and self.arena.exprKind(field.value) == .tag_path) {
-                break :blk try self.checkEnumShorthand(field.value, d.enum_t);
-            }
-            if (d == .struct_t and self.arena.exprKind(field.value) == .struct_lit) {
-                const inner_data = self.arena.exprData(field.value);
-                if (self.arena.struct_lits.items[inner_data].type_name == 0) {
-                    break :blk try self.checkStructLitAgainst(field.value, inner_data, d.struct_t, null);
-                }
-            }
-            break :blk try self.synthExprE(field.value, null);
-        };
+        const actual = try self.checkExpr(field.value, d, null);
         const mismatch = !try self.valueFits(d, field.value, actual);
         if (mismatch) {
             try self.emit(.entry_field_type_invalid, .error_, self.arena.exprSpan(field.value), "data entry field '{s}' value type does not match its declared type", .{self.arena.strings.slice(field.name)});
@@ -8397,7 +8385,7 @@ pub const TypeChecker = struct {
 
     /// The type the values breaking out of the loop `id` join to, each checked
     /// against `expected`; `unknown` when none breaks. Without a rule context,
-    /// the type of the first top-level break.
+    /// the type of the first top-level break, checked the same way.
     fn synthLoop(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx, expected: ResolvedType) TypeError!ResolvedType {
         const lp = self.arena.loop_exprs.items[data];
         if (ctx_opt) |ctx| {
@@ -8436,7 +8424,10 @@ pub const TypeChecker = struct {
             const stmt: NodeId = @bitCast(self.arena.extra.items[lp.body_start + i]);
             if (self.arena.stmtKind(stmt) == .break_stmt) {
                 const b = self.arena.break_stmts.items[self.arena.stmtData(stmt)];
-                return if (b.value.isNone()) ResolvedType.unit else try self.synthExprE(b.value, ctx_opt);
+                if (b.value.isNone()) return ResolvedType.unit;
+                const t = try self.checkExpr(b.value, expected, ctx_opt);
+                try self.recordLoopBreaks(id, &.{.{ .node = b.value, .t = t, .span = self.arena.exprSpan(b.value) }});
+                return t;
             }
         }
         return ResolvedType.unknown;
@@ -18328,6 +18319,52 @@ test "a params default is typed against its declared type" {
     try std.testing.expectEqual(@as(usize, 0), wrong);
 }
 
+const data_entry_value_accepted = [_]UnitCase{
+    .{ .name = "an anonymous literal in an optional field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P? = none }\ndata Db: Item {\n  e: { p: .{ x: 1 } },\n}" },
+    .{ .name = "an anonymous literal under some in an optional field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P? = none }\ndata Db: Item {\n  e: { p: some(.{ x: 1 }) },\n}" },
+    .{ .name = "an anonymous literal nested in an optional field's literal", .code = .type_mismatch, .src = "struct In { v: int = 0 }\nstruct O { inner: In }\nstruct Item { o: O? = none }\ndata Db: Item {\n  e: { o: .{ inner: .{ v: 2 } } },\n}" },
+    .{ .name = "anonymous elements of an optional array field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { ps: P[]? = none }\ndata Db: Item {\n  e: { ps: [.{ x: 1 }, .{ x: 2 }] },\n}" },
+    .{ .name = "an anonymous fill of an optional fixed field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { ps: P[3]? = none }\ndata Db: Item {\n  e: { ps: [.{ x: 1 }; 3] },\n}" },
+    .{ .name = "an anonymous value of an optional map field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { m: [int: P]? = none }\ndata Db: Item {\n  e: { m: [1: .{ x: 1 }] },\n}" },
+    .{ .name = "an anonymous literal beside a spread", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P? = none }\ndata Db: Item {\n  a: { p: .{ x: 1 } },\n  b: { ..Db.a, p: .{ x: 2 } },\n}" },
+    .{ .name = "an anonymous literal in a struct field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P }\ndata Db: Item {\n  e: { p: .{ x: 1 } },\n}" },
+    .{ .name = "a variant two enums name, in an enum field", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nstruct Item { d: Dir = .south }\ndata Db: Item {\n  e: { d: .north },\n}" },
+    .{ .name = "an anonymous value breaking out of a loop", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P }\ndata Db: Item {\n  e: { p: loop {\n    break .{ x: 1 }\n  } },\n}" },
+};
+
+const data_entry_value_refused = [_]UnitCase{
+    .{ .name = "an anonymous literal of a wrong field type, in an optional field", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nstruct Item { p: P? = none }\ndata Db: Item {\n  e: { p: .{ x: true } },\n}" },
+    .{ .name = "an anonymous literal without its struct field, in an optional field", .code = .struct_field_missing, .src = "struct In { v: int = 0 }\nstruct O { inner: In }\nstruct Item { o: O? = none }\ndata Db: Item {\n  e: { o: .{ } },\n}" },
+    .{ .name = "anonymous elements of another length, in an optional fixed field", .code = .entry_field_type_invalid, .src = "struct P { x: int = 0 }\nstruct Item { ps: P[3]? = none }\ndata Db: Item {\n  e: { ps: [.{ x: 1 }] },\n}" },
+    .{ .name = "an empty value breaking out of a loop, in an optional fixed field", .code = .entry_field_type_invalid, .src = "struct Item { xs: int[3]? = none }\ndata Db: Item {\n  e: { xs: loop {\n    break []\n  } },\n}" },
+};
+
+test "a data entry's value is checked against its field's type" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (data_entry_value_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("refused {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (data_entry_value_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("accepted {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
 const closure_body_refused = [_]PlaceCase{
     .{ .name = "an uncalled closure writing a captured struct's field", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = |v: int| { p.x = v }\n}" },
     .{ .name = "an uncalled closure binding an int as a string", .code = .type_mismatch, .needle = "let initializer", .src = "rule r() {\n  let f = |v: int| {\n    let s: string = v\n  }\n}" },
@@ -18429,6 +18466,7 @@ test "== refuses a type that is not Eq, and an ordering a type that is not Ord" 
 }
 
 const shorthand_refused = [_]UnitCase{
+    .{ .name = "a data entry's enum field", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nstruct Item { d: Dir = .north }\ndata Db: Item {\n  e: { d: .west },\n}" },
     .{ .name = "a let annotation's enum has no such variant", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let e: Dir = .west\n}" },
     .{ .name = "a let annotation is not an enum", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let x: int = .south\n}" },
     .{ .name = "no enum has the variant", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let d = .west\n}" },
