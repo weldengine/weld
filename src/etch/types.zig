@@ -700,6 +700,10 @@ pub const TypeChecker = struct {
     /// `break_base` belongs to the innermost task, timer or closure body.
     break_frames: std.ArrayListUnmanaged(BreakFrame) = .empty,
     break_base: usize = 0,
+    /// The values each `loop` breaks with, a run of `loop_break_nodes` keyed by
+    /// the loop's node.
+    loop_breaks: std.AutoHashMapUnmanaged(u32, struct { start: u32, len: u32 }) = .empty,
+    loop_break_nodes: std.ArrayListUnmanaged(NodeId) = .empty,
     /// Names visible at the entry of the innermost scope-snapshot body, in
     /// `escape_names[escape_base..]`: a name referenced there and not declared
     /// there is a capture (`etch-resolver-types.md` §8.2, E0223).
@@ -871,6 +875,8 @@ pub const TypeChecker = struct {
         self.import_arenas.deinit(self.gpa);
         self.conc_labels.deinit(self.gpa);
         self.break_frames.deinit(self.gpa);
+        self.loop_breaks.deinit(self.gpa);
+        self.loop_break_nodes.deinit(self.gpa);
         self.escape_names.deinit(self.gpa);
         for (self.closure_envs.items) |*env| env.deinit(self.gpa);
         self.closure_envs.deinit(self.gpa);
@@ -5603,6 +5609,12 @@ pub const TypeChecker = struct {
                 return false;
             },
             .some_lit => return self.lengthMisfits(slot, @bitCast(data)),
+            .loop_expr => {
+                for (self.loopBreaks(value)) |v| {
+                    if (self.lengthMisfits(slot, v)) return true;
+                }
+                return false;
+            },
             .array_lit => {
                 if (!isArray(slot)) return false;
                 const al = self.arena.array_lits.items[data];
@@ -5693,24 +5705,25 @@ pub const TypeChecker = struct {
     }
 
     /// A loop a `break` can target; `yields` for a `loop`, whose value is its
-    /// breaks'.
+    /// breaks', each checked against `expected`.
     const BreakFrame = struct {
         label: StringId,
         yields: bool,
+        expected: ResolvedType = .unknown,
         values: std.ArrayListUnmanaged(Branch) = .empty,
     };
 
     /// A value one branch of an `if`, a `match` or a loop's `break`s yields.
     const Branch = struct { node: NodeId, t: ResolvedType, span: SourceSpan };
 
-    /// The loop an unlabeled `break` leaves is the innermost one of any kind,
-    /// a labeled one the `loop` carrying its label.
-    fn breakTarget(self: *TypeChecker, label: StringId) ?*BreakFrame {
-        const frames = self.break_frames.items[self.break_base..];
-        var i = frames.len;
-        while (i > 0) {
+    /// The index of the loop a `break` leaves: the innermost one of any kind
+    /// when unlabeled, else the `loop` carrying its label. An index and not a
+    /// pointer: typing the break's value can push frames and move the list.
+    fn breakTarget(self: *const TypeChecker, label: StringId) ?usize {
+        var i = self.break_frames.items.len;
+        while (i > self.break_base) {
             i -= 1;
-            if (label == 0 or frames[i].label == label) return &frames[i];
+            if (label == 0 or self.break_frames.items[i].label == label) return i;
         }
         return null;
     }
@@ -5759,6 +5772,13 @@ pub const TypeChecker = struct {
                     if (!self.everyPathYields(self.arena.match_arms.items[m.arms_start + i].body, leaf)) return false;
                 }
                 return m.arms_len != 0;
+            },
+            .loop_expr => {
+                const breaks = self.loopBreaks(value);
+                for (breaks) |v| {
+                    if (!self.everyPathYields(v, leaf)) return false;
+                }
+                return breaks.len != 0;
             },
             else => return leaf(self.arena, value),
         }
@@ -7197,8 +7217,11 @@ pub const TypeChecker = struct {
                 // `break [label] [value]`. Loop membership and label validity
                 // are permissive.
                 const b = self.arena.break_stmts.items[data];
-                const t: ResolvedType = if (b.value.isNone()) .unit else try self.synthExprE(b.value, ctx);
-                if (self.breakTarget(b.label)) |frame| {
+                const target = self.breakTarget(b.label);
+                const expected: ResolvedType = if (target) |i| self.break_frames.items[i].expected else .unknown;
+                const t: ResolvedType = if (b.value.isNone()) .unit else try self.checkExpr(b.value, expected, ctx);
+                if (target) |i| {
+                    const frame = &self.break_frames.items[i];
                     if (frame.yields) {
                         const span = if (b.value.isNone()) self.arena.stmtSpan(stmt_id) else self.arena.exprSpan(b.value);
                         try frame.values.append(self.gpa, .{ .node = b.value, .t = t, .span = span });
@@ -7862,7 +7885,7 @@ pub const TypeChecker = struct {
     /// Type `id` against the type its slot expects (`etch-resolver-types.md`
     /// §4.1): an anonymous `.{ … }` takes the struct it names, under any
     /// optional, as an element, a map value or `some`'s payload, and as the
-    /// value of a block, an `if` or a `match`.
+    /// value of a block, an `if`, a `match` or a loop's `break`.
     fn checkExpr(self: *TypeChecker, id: NodeId, expected: ResolvedType, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         var target = expected;
         while (target == .optional) target = target.optional.*;
@@ -7875,6 +7898,7 @@ pub const TypeChecker = struct {
             .block_expr => return self.synthBlock(data, ctx_opt, expected),
             .if_expr => return self.synthIf(id, data, ctx_opt, expected),
             .match_expr => return self.synthMatch(id, data, ctx_opt, expected),
+            .loop_expr => return self.synthLoop(id, data, ctx_opt, expected),
             else => {},
         }
         return self.synthExprE(id, ctx_opt);
@@ -8164,7 +8188,7 @@ pub const TypeChecker = struct {
             .fn_call => return try self.synthCall(id, data, ctx_opt),
             .struct_lit => return try self.synthStructLit(id, data, ctx_opt),
             .method_call => return try self.synthMethodCall(id, data, ctx_opt),
-            .loop_expr => return try self.synthLoop(data, ctx_opt),
+            .loop_expr => return try self.synthLoop(id, data, ctx_opt, .unknown),
             .block_expr => return try self.synthBlock(data, ctx_opt, .unknown),
             .measure_expr => return try self.synthMeasure(id, data, ctx_opt),
             .if_expr => return try self.synthIf(id, data, ctx_opt, .unknown),
@@ -8344,10 +8368,10 @@ pub const TypeChecker = struct {
         return .{ .map_t = .{ .key = try self.payloadOf(key_t), .value = try self.payloadOf(value_t) } };
     }
 
-    /// The loop's value is the type of the first value breaking out of it,
-    /// `unknown` when none; without a rule context only top-level breaks are
-    /// read.
-    fn synthLoop(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+    /// The type the values breaking out of the loop `id` join to, each checked
+    /// against `expected`; `unknown` when none breaks. Without a rule context,
+    /// the type of the first top-level break.
+    fn synthLoop(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx, expected: ResolvedType) TypeError!ResolvedType {
         const lp = self.arena.loop_exprs.items[data];
         if (ctx_opt) |ctx| {
             // a `loop` opened here (incl. a labeled one) is
@@ -8360,7 +8384,7 @@ pub const TypeChecker = struct {
             defer if (lp.label != 0) {
                 _ = self.conc_labels.pop();
             };
-            try self.break_frames.append(self.gpa, .{ .label = lp.label, .yields = true });
+            try self.break_frames.append(self.gpa, .{ .label = lp.label, .yields = true, .expected = expected });
             defer {
                 var frame = self.break_frames.pop().?;
                 frame.values.deinit(self.gpa);
@@ -8373,6 +8397,7 @@ pub const TypeChecker = struct {
                 try self.checkStmt(ctx, stmt);
             }
             const values = self.break_frames.getLast().values.items;
+            try self.recordLoopBreaks(id, values);
             const join = try self.joinBranches(values);
             for (values) |v| {
                 if (!try self.branchFits(join, v, true)) try self.emit(.type_mismatch, .error_, v.span, "break values of a loop must all have the same type", .{});
@@ -8388,6 +8413,19 @@ pub const TypeChecker = struct {
             }
         }
         return ResolvedType.unknown;
+    }
+
+    /// Keep the values breaking out of the loop `id` for `loopBreaks`.
+    fn recordLoopBreaks(self: *TypeChecker, id: NodeId, values: []const Branch) TypeError!void {
+        const start: u32 = @intCast(self.loop_break_nodes.items.len);
+        for (values) |v| try self.loop_break_nodes.append(self.gpa, v.node);
+        try self.loop_breaks.put(self.gpa, id.raw(), .{ .start = start, .len = @intCast(values.len) });
+    }
+
+    /// The values the loop `value` breaks with; none when no body checked it.
+    fn loopBreaks(self: *const TypeChecker, value: NodeId) []const NodeId {
+        const run = self.loop_breaks.get(value.raw()) orelse return &.{};
+        return self.loop_break_nodes.items[run.start..][0..run.len];
     }
 
     /// Type a block expression `{ stmts; value }` in a scope of its own. The
@@ -18127,6 +18165,79 @@ test "an anonymous struct literal is refused where its slot names no struct" {
         if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
             wrong += 1;
             std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const loop_break_refused = [_]UnitCase{
+    .{ .name = "an empty break value into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    break []\n  }\n}" },
+    .{ .name = "empty elements of a break value into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3][2] = loop {\n    break [[], []]\n  }\n}" },
+    .{ .name = "an empty break value returned for a fixed return", .code = .return_type_mismatch, .src = "fn g() -> int[3] {\n  return loop {\n    break []\n  }\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "an empty break value as the tail of a fixed return", .code = .return_type_mismatch, .src = "fn g() -> int[3] {\n  loop {\n    break []\n  }\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "an empty break value into an optional fixed array", .code = .type_mismatch, .src = "rule r() {\n  let o: int[3]? = loop {\n    break []\n  }\n}" },
+    .{ .name = "empty break values under an if", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = loop {\n    if c {\n      break []\n    }\n    break []\n  }\n}" },
+    .{ .name = "an empty break value of a loop breaking a loop", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    break loop {\n      break []\n    }\n  }\n}" },
+    .{ .name = "an empty break value twelve loops deep", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break loop {\n    break []\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n  }\n}" },
+    .{ .name = "an empty break value after an inner loop", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    loop {\n      break\n    }\n    break []\n  }\n}" },
+    .{ .name = "an empty break value passed for a fixed parameter", .code = .type_mismatch, .src = "fn f(a: int[3]) -> int {\n  a.len()\n}\nrule r() {\n  let k = f(loop {\n    break []\n  })\n}" },
+    .{ .name = "an empty break value as a fixed map value", .code = .type_mismatch, .src = "rule r() {\n  let m: [int: int[3]] = [1: loop {\n    break []\n  }]\n}" },
+    .{ .name = "a later break value of another length, every break untyped", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[0][1] = loop {\n    if c {\n      break [[]]\n    }\n    break [[], []]\n  }\n}" },
+    .{ .name = "an anonymous break value of a wrong field type", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let p: P = loop {\n    break .{ x: true }\n  }\n}" },
+    .{ .name = "an anonymous break value into a non-struct", .code = .ambiguous_type, .src = "rule r() {\n  let n: int = loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous value breaking to a label past a struct loop", .code = .ambiguous_type, .src = "struct P { x: int = 0 }\nrule r() {\n  outer: loop {\n    let p: P = loop {\n      break outer .{ x: 1 }\n    }\n  }\n}" },
+    .{ .name = "a full and an empty break value into a fixed let", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = loop {\n    if c {\n      break [1, 2, 3]\n    }\n    break []\n  }\n}" },
+    .{ .name = "a loop breaking none on every path makes its branch optional", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let x = if c {\n    loop {\n      break none\n    }\n  } else {\n    5\n  }\n  let y: int = x\n}" },
+};
+
+const loop_break_accepted = [_]UnitCase{
+    .{ .name = "an anonymous break value into a let", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let p: P = loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "anonymous break values under an if", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let c = true\n  let p: P = loop {\n    if c {\n      break .{ x: 1 }\n    }\n    break .{ x: 2 }\n  }\n}" },
+    .{ .name = "anonymous arms of a match break value", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let k = 0\n  let p: P = loop {\n    break match k {\n      0 => .{ x: 1 },\n      _ => .{ x: 2 },\n    }\n  }\n}" },
+    .{ .name = "anonymous break values inside match arm blocks", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let k = 0\n  let p: P = loop {\n    match k {\n      0 => {\n        break .{ x: 1 }\n      },\n      _ => {\n        break .{ x: 2 }\n      },\n    }\n  }\n}" },
+    .{ .name = "an anonymous break value after an inner loop", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let p: P = loop {\n    loop {\n      break\n    }\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous break value of a loop breaking a loop", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let p: P = loop {\n    break loop {\n      break .{ x: 1 }\n    }\n  }\n}" },
+    .{ .name = "an anonymous break value returned", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn mk() -> P {\n  return loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous break value as a fn's tail", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn mk() -> P {\n  loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous break value passed to a fn", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nfn px(p: P) -> int {\n  p.x\n}\nrule r() {\n  let k = px(loop {\n    break .{ x: 1 }\n  })\n}" },
+    .{ .name = "an anonymous break value into an optional", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let o: P? = loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "anonymous elements of a break value", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let ps: P[2] = loop {\n    break [.{ x: 1 }, P { x: 2 }]\n  }\n}" },
+    .{ .name = "an anonymous break value assigned to a binding", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let mut p = P { x: 0 }\n  p = loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous break value as a struct field", .code = .type_mismatch, .src = "struct In { v: int = 0 }\nstruct O { inner: In }\nrule r() {\n  let h = O { inner: loop {\n    break .{ v: 1 }\n  } }\n}" },
+    .{ .name = "an anonymous break value as the default of ??", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let o: P? = none\n  let p = o ?? loop {\n    break .{ x: 1 }\n  }\n}" },
+    .{ .name = "an anonymous break value beside none", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let c = true\n  let o: P? = loop {\n    if c {\n      break .{ x: 1 }\n    }\n    break none\n  }\n}" },
+    .{ .name = "an anonymous break value past a labeled break", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let c = true\n  outer: loop {\n    let p: P = loop {\n      if c {\n        break outer\n      }\n      break .{ x: 1 }\n    }\n  }\n}" },
+    .{ .name = "an empty break value into a dynamic let", .code = .type_mismatch, .src = "rule r() {\n  let a: int[] = loop {\n    break []\n  }\n}" },
+    .{ .name = "an empty break value of length zero", .code = .type_mismatch, .src = "rule r() {\n  let a: int[0] = loop {\n    break []\n  }\n}" },
+    .{ .name = "a break value of the length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    break [1, 2, 3]\n  }\n}" },
+    .{ .name = "a value breaking to a label past a fixed loop", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  outer: loop {\n    let a: int[3] = loop {\n      if c {\n        break outer [1]\n      }\n      break [1, 2, 3]\n    }\n  }\n}" },
+    .{ .name = "a break of a while inside a fixed loop", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let a: int[3] = loop {\n    while c {\n      break\n    }\n    break [1, 2, 3]\n  }\n}" },
+    .{ .name = "a loop breaking a loop inside a for", .code = .type_mismatch, .src = "rule r() {\n  for i in 0..1 {\n    let a: int[3] = loop {\n      break loop {\n        break [1, 2, 3]\n      }\n    }\n  }\n}" },
+    .{ .name = "a value of an inner loop bound to a let is not the outer loop's", .code = .type_mismatch, .src = "rule r() {\n  let a: int[3] = loop {\n    let w = loop {\n      break [1]\n    }\n    break [1, 2, 3]\n  }\n}" },
+    .{ .name = "a loop that never breaks adds no none to a join", .code = .type_mismatch, .src = "rule r() {\n  let c = true\n  let x = if c {\n    loop {\n    }\n  } else {\n    5\n  }\n  let y: int = x\n}" },
+};
+
+test "a value breaking out of a loop is checked against the type its slot expects" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (loop_break_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("refused {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (loop_break_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("accepted {s}:\n", .{c.name});
             for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
         }
     }

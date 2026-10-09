@@ -19671,6 +19671,31 @@ test "an extension name argument is evaluated once" {
     try std.testing.expectEqual(@as(i64, 1), n);
 }
 
+const break_runs = [_]ScopeRun{
+    .{ .name = "a break value takes the struct its slot expects", .out = 1, .src = value_prelude ++ "rule r() when resource Out {\n  let p: P = loop {\n    break .{ x: 1 }\n  }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "break values under an if in the loop", .out = 2, .src = value_prelude ++ "rule r() when resource Out {\n  let c = get(Out).n == 0\n  let p: P = loop {\n    if c {\n      break .{ x: 2 }\n    }\n    break .{ x: 0 }\n  }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "a match as a break value", .out = 3, .src = value_prelude ++ "rule r() when resource Out {\n  let p: P = loop {\n    break match get(Out).n {\n      0 => .{ x: 3 },\n      _ => .{ x: 0 },\n    }\n  }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "a break value after an inner loop", .out = 4, .src = value_prelude ++ "rule r() when resource Out {\n  let p: P = loop {\n    loop {\n      break\n    }\n    break .{ x: 4 }\n  }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "a loop breaking with a loop", .out = 5, .src = value_prelude ++ "rule r() when resource Out {\n  let p: P = loop {\n    break loop {\n      break .{ x: 5 }\n    }\n  }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "a loop returned", .out = 6, .src = value_prelude ++ "fn mk() -> P {\n  return loop {\n    break .{ x: 6 }\n  }\n}\nrule r() when resource Out {\n  get_mut(Out).n = mk().x\n}\n" },
+    .{ .name = "a loop as a fn's tail", .out = 7, .src = value_prelude ++ "fn mk2() -> P {\n  loop {\n    break .{ x: 7 }\n  }\n}\nrule r() when resource Out {\n  get_mut(Out).n = mk2().x\n}\n" },
+    .{ .name = "a loop passed to a fn", .out = 8, .src = value_prelude ++ "fn px(p: P) -> int {\n  p.x\n}\nrule r() when resource Out {\n  get_mut(Out).n = px(loop {\n    break .{ x: 8 }\n  })\n}\n" },
+    .{ .name = "a loop into an optional", .out = 9, .src = value_prelude ++ "rule r() when resource Out {\n  let o: P? = loop {\n    break .{ x: 9 }\n  }\n  get_mut(Out).n = if let p = o { p.x } else { 0 }\n}\n" },
+    .{ .name = "anonymous elements of a break value", .out = 10, .src = value_prelude ++ "rule r() when resource Out {\n  let ps: P[2] = loop {\n    break [.{ x: 1 }, P { x: 0 }]\n  }\n  get_mut(Out).n = ps[0].x * 10 + ps[1].x\n}\n" },
+    .{ .name = "a labeled break past a loop of a struct", .out = 12, .src = value_prelude ++ "rule r() when resource Out {\n  let mut n = 0\n  outer: loop {\n    let p: P = loop {\n      if n > 0 {\n        break outer\n      }\n      break .{ x: 12 }\n    }\n    n = p.x\n  }\n  get_mut(Out).n = n\n}\n" },
+    .{ .name = "a break value beside none", .out = 13, .src = value_prelude ++ "rule r() when resource Out {\n  let c = get(Out).n == 0\n  let o: P? = loop {\n    if c {\n      break .{ x: 13 }\n    }\n    break none\n  }\n  get_mut(Out).n = if let p = o { p.x } else { 0 }\n}\n" },
+    .{ .name = "a loop assigned to a binding", .out = 14, .src = value_prelude ++ "rule r() when resource Out {\n  let mut p = P { x: 0 }\n  p = loop {\n    break .{ x: 14 }\n  }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "a loop as a struct field", .out = 15, .src = value_prelude ++ "rule r() when resource Out {\n  let h = O { inner: loop {\n    break .{ v: 15 }\n  } }\n  get_mut(Out).n = h.inner.v\n}\n" },
+    .{ .name = "a loop as the default of ??", .out = 16, .src = value_prelude ++ "rule r() when resource Out {\n  let o: P? = none\n  let p = o ?? loop {\n    break .{ x: 16 }\n  }\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "a loop pushed", .out = 17, .src = value_prelude ++ "rule r() when resource Out {\n  let mut ps: P[] = []\n  ps.push(loop {\n    break .{ x: 17 }\n  })\n  get_mut(Out).n = ps[0].x\n}\n" },
+    .{ .name = "a loop breaking none as an if branch", .out = 5, .src = value_prelude ++ "rule r() when resource Out {\n  let c = get(Out).n != 0\n  let o: int? = if c {\n    loop {\n      break none\n    }\n  } else {\n    5\n  }\n  get_mut(Out).n = if let v = o { v } else { 0 }\n}\n" },
+    .{ .name = "break values inside match arms", .out = 19, .src = value_prelude ++ "rule r() when resource Out {\n  let p: P = loop {\n    match get(Out).n {\n      0 => {\n        break .{ x: 19 }\n      },\n      _ => {\n        break .{ x: 0 }\n      },\n    }\n  }\n  get_mut(Out).n = p.x\n}\n" },
+};
+
+test "a loop's break values take the type its slot expects" {
+    try expectRuns(&break_runs);
+}
+
 const value_runs = [_]ScopeRun{
     .{ .name = "a struct read into a binding is a copy", .out = 12, .src = value_prelude ++
         \\rule r() when resource Out {

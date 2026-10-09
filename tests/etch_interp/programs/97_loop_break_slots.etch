@@ -1,0 +1,71 @@
+component LoopPos {
+  bound: int = 0
+  guarded: int = 0
+  after_inner: int = 0
+  arm: int = 0
+  elems: int = 0
+  ret: int = 0
+  tail: int = 0
+  arg: int = 0
+}
+
+struct In {
+  v: int = 0
+}
+
+fn take(p: In) -> int {
+  p.v
+}
+
+fn give() -> In {
+  return loop {
+    break .{ v: 6 }
+  }
+}
+
+fn tail() -> In {
+  loop {
+    break .{ v: 7 }
+  }
+}
+
+rule positions(entity: Entity)
+  when entity has LoopPos
+{
+  let acc = entity.get_mut(LoopPos)
+  let p: In = loop {
+    break .{ v: 1 }
+  }
+  acc.bound = p.v
+  let c = acc.guarded == 0
+  let q: In = loop {
+    if c {
+      break .{ v: 2 }
+    }
+    break .{ v: 20 }
+  }
+  acc.guarded = q.v
+  let r: In = loop {
+    loop {
+      break
+    }
+    break .{ v: 3 }
+  }
+  acc.after_inner = r.v
+  let s: In = loop {
+    break match acc.arm {
+      0 => .{ v: 4 },
+      _ => .{ v: 40 },
+    }
+  }
+  acc.arm = s.v
+  let ps: In[2] = loop {
+    break [.{ v: 5 }, In { v: 50 }]
+  }
+  acc.elems = ps[0].v + ps[1].v
+  acc.ret = give().v
+  acc.tail = tail().v
+  acc.arg = take(loop {
+    break .{ v: 8 }
+  })
+}

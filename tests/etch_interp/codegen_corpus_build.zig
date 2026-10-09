@@ -131,4 +131,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p94_anon_struct_positions", .etch_path = "tests/etch_interp/programs/94_anon_struct_positions.etch" },
     .{ .name = "p95_method_call_order", .etch_path = "tests/etch_interp/programs/95_method_call_order.etch" },
     .{ .name = "p96_unused_lets", .etch_path = "tests/etch_interp/programs/96_unused_lets.etch" },
+    .{ .name = "p97_loop_break_slots", .etch_path = "tests/etch_interp/programs/97_loop_break_slots.etch" },
 };
