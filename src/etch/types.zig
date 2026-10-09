@@ -1108,6 +1108,7 @@ pub const TypeChecker = struct {
         try self.validateWidgetDecls();
         try self.validateLocaleDecls();
         try self.validateEffectDecls();
+        try self.validateAudioGraphDecls();
         try self.validateAudioScoreDecls();
         try self.validateSequenceDecls();
         try self.validateAnimGraphDecls();
@@ -2241,6 +2242,17 @@ pub const TypeChecker = struct {
         }
     }
 
+    fn validateAudioGraphDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .audio_graph_decl) continue;
+            const decl = self.arena.audio_graph_decls.items[datas[i]];
+            try self.checkParamDefaults(decl.params_start, decl.params_len);
+        }
+    }
+
     fn validateAudioScoreDecls(self: *TypeChecker) !void {
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -2543,7 +2555,7 @@ pub const TypeChecker = struct {
     /// emission is deferred. SPIR-V/MSL/DXIL emission is out of scope; eval of a
     /// shader body is fail-loud both backends (the descriptor is the Level-B output).
     fn validateShader(self: *TypeChecker, decl: ast_mod.ShaderDecl) !void {
-        try self.checkParamDefaults(decl.params_start, decl.params_len);
+        try self.checkShaderParamRanges(decl.params_start, decl.params_len);
         if (decl.has_vertex) try self.checkShaderBody(decl.vertex.body_start, decl.vertex.body_len);
         try self.checkShaderBody(decl.fragment.body_start, decl.fragment.body_len);
     }
@@ -4582,12 +4594,10 @@ pub const TypeChecker = struct {
                     // (rendered, never executed). All §19 checks are
                     // RESERVED-with-variant (E1700/E1701 — output is
                     // parser-mandatory and single) or DEFERRED-no-variant (the
-                    // Pulse DSP catalogue is not attached), so there is no
-                    // validate pass.
+                    // Pulse DSP catalogue is not attached).
                     const decl = self.arena.audio_graph_decls.items[data];
                     try self.registerSymbol(.audio_graph_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .audio_graph);
-                    try self.checkParamDefaults(decl.params_start, decl.params_len);
                 },
                 .import_decl => {
                     const decl = self.arena.import_decls.items[data];
@@ -5354,9 +5364,26 @@ pub const TypeChecker = struct {
         if (!fits) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(e), "collection element type does not match the declared element type", .{});
     }
 
-    /// A params-block default renders into its descriptor as written, so a
-    /// literal default is range-checked against its declared type.
+    /// Each params-block default against its field's declared type; a type the
+    /// checker does not resolve, such as an engine one, is not judged.
     fn checkParamDefaults(self: *TypeChecker, start: u32, len: u32) !void {
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const f = self.arena.fields.items[start + i];
+            if (f.default_value.isNone()) continue;
+            const declared = self.namedTypeToResolved(f.type_node);
+            if (declared == .unknown) continue;
+            const actual = try self.checkExpr(f.default_value, declared, null);
+            if (!try self.valueFits(declared, f.default_value, actual)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.default_value), "params default value type does not match the declared type", .{});
+            }
+        }
+    }
+
+    /// A shader's params defaults, range-checked only: a shader default of
+    /// another type is E1613 (`etch-validation-ecs.md` §14.2), which has no
+    /// variant.
+    fn checkShaderParamRanges(self: *TypeChecker, start: u32, len: u32) !void {
         var i: u32 = 0;
         while (i < len) : (i += 1) {
             const f = self.arena.fields.items[start + i];
@@ -18232,6 +18259,63 @@ test "a value breaking out of a loop is checked against the type its slot expect
         }
     }
     for (loop_break_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("accepted {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const params_default_refused = [_]UnitCase{
+    .{ .name = "an int for an audio_graph's enum param", .code = .type_mismatch, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    d: Dir = 5\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "another enum's variant for an audio_graph's enum param", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nenum Wind { west }\naudio_graph G {\n  params {\n    d: Dir = .west\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "a short literal for an audio_graph's fixed-array param", .code = .type_mismatch, .src = "audio_graph G {\n  params {\n    a: int[3] = [1, 2]\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an anonymous literal for an audio_graph's enum param", .code = .ambiguous_type, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    d: Dir = .{ x: 1 }\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an int for an audio_graph's struct param", .code = .type_mismatch, .src = "struct P { x: int = 0 }\naudio_graph G {\n  params {\n    p: P = 5\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an anonymous literal of a mistyped field for an audio_graph's struct param", .code = .type_mismatch, .src = "struct P { x: int = 0 }\naudio_graph G {\n  params {\n    p: P = .{ x: true }\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "another enum's variant for an audio_graph's optional enum param", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nenum Wind { west }\naudio_graph G {\n  params {\n    d: Dir? = .west\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an int for an audio_graph's enum param declared after it", .code = .type_mismatch, .src = "audio_graph G {\n  params {\n    d: Dir = 5\n  }\n  output(wave_player(\"a.wav\"))\n}\nenum Dir { north, south }" },
+    .{ .name = "a variant for an audio_graph's int param", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    n: int = .south\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an int for an effect's Color param", .code = .type_mismatch, .src = "effect E {\n  params {\n    c: Color = 5\n  }\n  emitter S {\n    burst: 1\n  }\n}" },
+    .{ .name = "a bool for an effect's float param", .code = .type_mismatch, .src = "effect E {\n  params {\n    f: float = true\n  }\n  emitter S {\n    burst: 1\n  }\n}" },
+    .{ .name = "an int literal for an effect's float param", .code = .type_mismatch, .src = "effect E {\n  params {\n    f: float = 1\n  }\n  emitter S {\n    burst: 1\n  }\n}" },
+    .{ .name = "a two-element literal for an anim_graph's Vec3 param", .code = .type_mismatch, .src = "anim_graph G {\n  params {\n    v: Vec3 = [0, 0]\n  }\n  state A { clip: \"a\" transition -> A }\n}" },
+    .{ .name = "an int for an anim_graph's bool param", .code = .type_mismatch, .src = "anim_graph G {\n  params {\n    b: bool = 1\n  }\n  state A { clip: \"a\" transition -> A }\n}" },
+    .{ .name = "an int literal above i32 for an anim_graph's i32 param", .code = .type_mismatch, .src = "anim_graph G {\n  params {\n    n: i32 = 3000000000\n  }\n  state A { clip: \"a\" transition -> A }\n}" },
+};
+
+const params_default_accepted = [_]UnitCase{
+    .{ .name = "a variant for an audio_graph's enum param", .code = .type_mismatch, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    d: Dir = .south\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "a variant two enums name, for an audio_graph's enum params", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\naudio_graph G {\n  params {\n    d: Dir = .north\n    o: Dir? = .north\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "none and a qualified variant for an audio_graph's enum params", .code = .type_mismatch, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    n: Dir? = none\n    q: Dir = Dir.south\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "anonymous literals for an audio_graph's struct params", .code = .type_mismatch, .src = "struct P { x: int = 0 }\naudio_graph G {\n  params {\n    p: P = .{ x: 1 }\n    q: P? = .{ x: 2 }\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "array literals for an audio_graph's array params", .code = .type_mismatch, .src = "audio_graph G {\n  params {\n    a: int[3] = [1, 2, 3]\n    xs: int[] = []\n    ys: int[] = [1, 2]\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "a variant for an audio_graph's enum param declared after it", .code = .type_mismatch, .src = "audio_graph G {\n  params {\n    d: Dir = .south\n  }\n  output(wave_player(\"a.wav\"))\n}\nenum Dir { north, south }" },
+    .{ .name = "params without defaults", .code = .type_mismatch, .src = "enum Dir { north, south }\naudio_graph G {\n  params {\n    d: Dir\n    s: float\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an effect's builtin params", .code = .type_mismatch, .src = "effect E {\n  params {\n    c: Color = #FFFFFF\n    f: float = 0.5\n  }\n  emitter S {\n    burst: 1\n  }\n}" },
+    .{ .name = "an anim_graph's builtin params", .code = .type_mismatch, .src = "anim_graph G {\n  params {\n    v: Vec3 = [0, 0, 1]\n    b: bool = true\n    n: i32 = 7\n    s: float = 0.5\n  }\n  state A { clip: \"a\" transition -> A }\n}" },
+    .{ .name = "an engine type's anonymous literal and variant", .code = .type_mismatch, .src = "anim_graph G {\n  params {\n    t: Trajectory = .{ samples: 4 }\n  }\n  state A { clip: \"a\" transition -> A }\n}\neffect E {\n  params {\n    m: BlendMode = .additive\n  }\n  emitter S {\n    burst: 1\n  }\n}" },
+};
+
+test "a params default is typed against its declared type" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (params_default_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("refused {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (params_default_accepted) |c| {
         var r = try parseAndCheck(gpa, c.src);
         defer r.deinit(gpa);
         try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);

@@ -723,6 +723,8 @@ const foreign_refused = [_]ForeignCase{
     .{ .name = "a field a qualified component lacks", .main = "import geo as g\nfn f(h: g.Health) -> int { h.nope }", .codes = &.{.invalid_field_filter} },
     .{ .name = "a field a qualified resource lacks", .main = "import geo as g\nfn f(r: g.Score) -> int { r.nope }", .codes = &.{.invalid_field_filter} },
     .{ .name = "a component of a name a whole-module import brings", .main = "import geo as g\ncomponent Health { v: int = 0 }", .codes = &.{.duplicate_symbol} },
+    .{ .name = "an int for an audio_graph's imported enum param", .main = "import geo { Dir }\naudio_graph G {\n  params {\n    d: Dir = 5\n  }\n  output(wave_player(\"a.wav\"))\n}", .codes = &.{.type_mismatch} },
+    .{ .name = "a local enum's variant for an audio_graph's qualified enum param", .main = "import geo as g\nenum Wind { west }\naudio_graph G {\n  params {\n    d: g.Dir = .west\n  }\n  output(wave_player(\"a.wav\"))\n}", .codes = &.{.enum_variant_not_found} },
 };
 
 const foreign_accepted = [_]ForeignCase{
@@ -743,6 +745,8 @@ const foreign_accepted = [_]ForeignCase{
     .{ .name = "a field of a qualified component", .main = "import geo as g\nfn f(h: g.Health) -> int { h.hp }" },
     .{ .name = "a foreign generic fn's concrete return", .main = "import geo { wrap, Pos }\nfn f() -> Pos { wrap(1) }" },
     .{ .name = "one enum under two names gives a shorthand one enum", .main = "import geo { Dir, Dir as D2 }\nfn f() -> bool {\n  let d = .north\n  true\n}" },
+    .{ .name = "a variant for an audio_graph's imported enum param", .main = "import geo { Dir }\naudio_graph G {\n  params {\n    d: Dir = .south\n  }\n  output(wave_player(\"a.wav\"))\n}" },
+    .{ .name = "an anonymous literal for an audio_graph's qualified struct param", .main = "import geo as g\naudio_graph G {\n  params {\n    p: g.Pos = .{ x: 1 }\n  }\n  output(wave_player(\"a.wav\"))\n}" },
 };
 
 /// Whether `main`, beside the foreign modules, draws exactly `c.codes`.
