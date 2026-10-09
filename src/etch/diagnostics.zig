@@ -43,6 +43,7 @@ pub const DiagnosticCode = enum {
     type_mismatch, // E0200 TypeMismatch
     arg_count_mismatch, // E0203 ArgCountMismatch (unfolded from E0200; also named-arg binding failures)
     return_type_mismatch, // E0204 ReturnTypeMismatch (unfolded from E0200)
+    empty_array_type_annotation_required, // E0207 EmptyArrayTypeAnnotationRequired
     struct_field_missing, // E0208 StructFieldMissing
     ambiguous_type, // E0210 AmbiguousType
     ambiguous_trait_method, // E0211 AmbiguousTraitMethod
@@ -431,6 +432,7 @@ pub const DiagnosticCode = enum {
             .type_mismatch => "E0200",
             .arg_count_mismatch => "E0203",
             .return_type_mismatch => "E0204",
+            .empty_array_type_annotation_required => "E0207",
             .struct_field_missing => "E0208",
             .ambiguous_type => "E0210",
             .ambiguous_trait_method => "E0211",
@@ -647,6 +649,7 @@ pub const DiagnosticCode = enum {
             .type_mismatch => "TypeMismatch",
             .arg_count_mismatch => "ArgCountMismatch",
             .return_type_mismatch => "ReturnTypeMismatch",
+            .empty_array_type_annotation_required => "EmptyArrayTypeAnnotationRequired",
             .struct_field_missing => "StructFieldMissing",
             .ambiguous_type => "AmbiguousType",
             .ambiguous_trait_method => "AmbiguousTraitMethod",
@@ -954,4 +957,6 @@ test "DiagnosticCode code and name are stable cross-version" {
     try std.testing.expectEqualStrings("IllegalStatementInExtensionHook", DiagnosticCode.illegal_statement_in_extension_hook.name());
     try std.testing.expectEqualStrings("E1799", DiagnosticCode.prefab_hook_not_allowed.code());
     try std.testing.expectEqualStrings("PrefabHookNotAllowed", DiagnosticCode.prefab_hook_not_allowed.name());
+    try std.testing.expectEqualStrings("E0207", DiagnosticCode.empty_array_type_annotation_required.code());
+    try std.testing.expectEqualStrings("EmptyArrayTypeAnnotationRequired", DiagnosticCode.empty_array_type_annotation_required.name());
 }

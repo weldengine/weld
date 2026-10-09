@@ -638,6 +638,25 @@ test "a mistyped field of an imported resource in a scene file is refused" {
     try std.testing.expectEqual(@as(usize, 2), countCode(diags.items, .resource_field_type_invalid));
 }
 
+test "an empty literal for a field of an imported resource in a scene file takes its type" {
+    const gpa = std.testing.allocator;
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "resource Bag { xs: int[] = [1], n: int = 0 }\ncomponent C { v: int = 0 }\n" },
+        .{ .name = "level.scene.etch", .source =
+        \\import lib { Bag, C }
+        \\scene "S" {
+        \\  resources { Bag { xs: [], n: [] } }
+        \\  entity "e" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 1 } }
+        \\}
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .resource_field_type_invalid));
+}
+
 test "a component and an imported resource of one name are refused, the runtime naming both alike" {
     const gpa = std.testing.allocator;
     const files = [_]etch.ProjectFile{
@@ -723,6 +742,7 @@ const foreign_refused = [_]ForeignCase{
     .{ .name = "a field a qualified component lacks", .main = "import geo as g\nfn f(h: g.Health) -> int { h.nope }", .codes = &.{.invalid_field_filter} },
     .{ .name = "a field a qualified resource lacks", .main = "import geo as g\nfn f(r: g.Score) -> int { r.nope }", .codes = &.{.invalid_field_filter} },
     .{ .name = "a component of a name a whole-module import brings", .main = "import geo as g\ncomponent Health { v: int = 0 }", .codes = &.{.duplicate_symbol} },
+    .{ .name = "an empty literal passed for a service's fixed parameter", .main = "rule r() {\n  let k = sf.take([])\n}", .codes = &.{.type_mismatch}, .extra = .{ .name = "sf.d.etch", .source = "service sf {\n  fn take(a: int[3]) -> int\n}" } },
     .{ .name = "an int for an audio_graph's imported enum param", .main = "import geo { Dir }\naudio_graph G {\n  params {\n    d: Dir = 5\n  }\n  output(wave_player(\"a.wav\"))\n}", .codes = &.{.type_mismatch} },
     .{ .name = "a local enum's variant for an audio_graph's qualified enum param", .main = "import geo as g\nenum Wind { west }\naudio_graph G {\n  params {\n    d: g.Dir = .west\n  }\n  output(wave_player(\"a.wav\"))\n}", .codes = &.{.enum_variant_not_found} },
 };
@@ -745,6 +765,8 @@ const foreign_accepted = [_]ForeignCase{
     .{ .name = "a field of a qualified component", .main = "import geo as g\nfn f(h: g.Health) -> int { h.hp }" },
     .{ .name = "a foreign generic fn's concrete return", .main = "import geo { wrap, Pos }\nfn f() -> Pos { wrap(1) }" },
     .{ .name = "one enum under two names gives a shorthand one enum", .main = "import geo { Dir, Dir as D2 }\nfn f() -> bool {\n  let d = .north\n  true\n}" },
+    .{ .name = "an empty literal passed for a service's dynamic parameter", .main = "rule r() {\n  let k = sf.take([])\n}", .extra = .{ .name = "sf.d.etch", .source = "service sf {\n  fn take(a: int[]) -> int\n}" } },
+    .{ .name = "an anonymous literal passed for a service's struct parameter", .main = "rule r() {\n  let k = sf.put(.{ x: 1 })\n}", .extra = .{ .name = "sf.d.etch", .source = "import geo { Pos }\nservice sf {\n  fn put(p: Pos) -> int\n}" } },
     .{ .name = "an anonymous literal in a data entry's optional field of a qualified struct", .main = "import geo as g\nstruct Item { p: g.Pos? = none }\ndata Db: Item {\n  e: { p: .{ x: 1 } },\n}" },
     .{ .name = "an anonymous literal in a data entry of a foreign entry type", .main = "import items { Item }\ndata Db: Item {\n  e: { p: .{ x: 1 } },\n}", .extra = .{ .name = "items.etch", .source = "import geo { Pos }\nstruct Item { p: Pos? = none }" } },
     .{ .name = "a variant for an audio_graph's imported enum param", .main = "import geo { Dir }\naudio_graph G {\n  params {\n    d: Dir = .south\n  }\n  output(wave_player(\"a.wav\"))\n}" },
