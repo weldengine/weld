@@ -2568,6 +2568,9 @@ const LocalCtx = struct {
     /// fn returns after storing the error (never read by the caller, which
     /// checks `__terr_*` before using the result).
     fn_ret_zig: []const u8 = "",
+    /// The method call whose arguments are bound to `__mc<seq>_<j>`, while
+    /// its call is emitted over them.
+    call_temps: ?struct { args_start: u32, seq: u32 } = null,
 
     pub fn deinit(self: *LocalCtx, gpa: std.mem.Allocator) void {
         self.records.deinit(gpa);
@@ -3961,6 +3964,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 }
                 return CodegenError.UnsupportedConstruct;
             }
+            if (argsBindFirst(ast, ctx, mc)) return emitMethodCallTemps(w, ast, ctx, id, data, mc);
             // Builtin dynamic-array / map methods (tranches 3-4 — minimal
             // faithful subset, stdlib §13.2/§14.2), routed on the
             // receiver's emitted declaration type. `push` / `insert` allocate
@@ -3985,7 +3989,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                         try w.write("(");
                         try emitPlace(w, ast, ctx, mc.receiver);
                         try w.print(").append({s}, ", .{fa});
-                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try emitCallArg(w, ast, ctx, mc, 0);
                         try w.write(") catch unreachable");
                         return;
                     }
@@ -4005,9 +4009,9 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                         try w.write("__etchMapInsert(&(");
                         try emitPlace(w, ast, ctx, mc.receiver);
                         try w.print("), {s}, ", .{fa});
-                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try emitCallArg(w, ast, ctx, mc, 0);
                         try w.write(", ");
-                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + 1]));
+                        try emitCallArg(w, ast, ctx, mc, 1);
                         try w.write(")");
                         return;
                     }
@@ -4034,7 +4038,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                         try w.write("__etchSetInsert(&(");
                         try emitPlace(w, ast, ctx, mc.receiver);
                         try w.print("), {s}, ", .{fa});
-                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try emitCallArg(w, ast, ctx, mc, 0);
                         try w.write(")");
                         return;
                     }
@@ -4042,7 +4046,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                         try w.write("__etchSetContains(");
                         try emitPlace(w, ast, ctx, mc.receiver);
                         try w.write(", ");
-                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try emitCallArg(w, ast, ctx, mc, 0);
                         try w.write(")");
                         return;
                     }
@@ -4109,7 +4113,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             var i: u32 = 0;
             while (i < mc.args_len) : (i += 1) {
                 if (i > 0) try w.write(", ");
-                try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + i]));
+                try emitCallArg(w, ast, ctx, mc, i);
             }
             try w.write(")");
         },
@@ -6506,6 +6510,69 @@ fn emitNamedFnCall(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, call: ast_m
     try w.write("(");
     try emitNamedTempArgs(w, ast, seq, call.args_start, call.args_len, call.names_start, decl.params_start, decl.params_len);
     try w.write("); }");
+}
+
+/// Whether `mc`'s arguments are bound to temporaries before its receiver's
+/// place is formed (`etch-reference-part1.md` §7.9): a place rooted in a
+/// binding, and an argument that may change it.
+fn argsBindFirst(ast: *const AstArena, ctx: *const LocalCtx, mc: ast_mod.MethodCall) bool {
+    if (mc.names_start != ast_mod.no_arg_names) return false;
+    if (ctx.call_temps) |t| {
+        if (t.args_start == mc.args_start) return false;
+    }
+    var cur = mc.receiver;
+    while (true) {
+        switch (ast.exprKind(cur)) {
+            .field_access => cur = ast.field_accesses.items[ast.exprData(cur)].receiver,
+            .index => cur = ast.index_exprs.items[ast.exprData(cur)].receiver,
+            .ident => break,
+            else => return false,
+        }
+    }
+    for (ast.extra.items[mc.args_start..][0..mc.args_len]) |raw| {
+        if (!exprIsPure(ast, @bitCast(raw))) return true;
+    }
+    return false;
+}
+
+/// `recv.method(args)` with each argument bound to `__mc<n>_<j>` before the
+/// call `id` is emitted over them.
+fn emitMethodCallTemps(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId, seq: u32, mc: ast_mod.MethodCall) CodegenError!void {
+    try w.print("(__mc{d}: {{ ", .{seq});
+    var j: u32 = 0;
+    while (j < mc.args_len) : (j += 1) {
+        const zig_t = methodArgZigType(ast, ctx, mc, j);
+        if (zig_t.len > 0) try w.print("const __mc{d}_{d}: {s} = ", .{ seq, j, zig_t }) else try w.print("const __mc{d}_{d} = ", .{ seq, j });
+        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + j]));
+        try w.write("; ");
+    }
+    try w.print("break :__mc{d} ", .{seq});
+    const saved = ctx.call_temps;
+    ctx.call_temps = .{ .args_start = mc.args_start, .seq = seq };
+    defer ctx.call_temps = saved;
+    try emitExpr(w, ast, ctx, id);
+    try w.write("; })");
+}
+
+/// The Zig type of the parameter that argument `j` of `mc` binds, "" when the
+/// codegen names none.
+fn methodArgZigType(ast: *const AstArena, ctx: *LocalCtx, mc: ast_mod.MethodCall, j: u32) []const u8 {
+    const recv_zig = inferExprZigType(ast, ctx, mc.receiver);
+    if (dynArrayElemZig(recv_zig)) |elem| return elem;
+    if (mapKVZig(recv_zig)) |kv| return if (j == 0) kv.key else kv.value;
+    if (setElemZig(recv_zig)) |elem| return elem;
+    const decl = findImplMethodDecl(ast, recv_zig, mc.method_name) orelse return "";
+    if (j >= decl.params_len) return "";
+    return fnTypeZig(ast, ast.fn_params.items[decl.params_start + j].type_node) catch "";
+}
+
+/// Argument `j` of `mc`: its temporary while the call is emitted over them,
+/// else the argument itself.
+fn emitCallArg(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, mc: ast_mod.MethodCall, j: u32) CodegenError!void {
+    if (ctx.call_temps) |t| {
+        if (t.args_start == mc.args_start) return w.print("__mc{d}_{d}", .{ t.seq, j });
+    }
+    try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + j]));
 }
 
 /// Method-call variant of `emitNamedFnCall`. The receiver (bounded to the

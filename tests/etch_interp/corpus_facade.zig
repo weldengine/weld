@@ -105,6 +105,7 @@ const p91 = @import("programs/91_index_writes.expected.zig");
 const p92 = @import("programs/92_collection_copies.expected.zig");
 const p93 = @import("programs/93_fixed_array_eq.expected.zig");
 const p94 = @import("programs/94_anon_struct_positions.expected.zig");
+const p95 = @import("programs/95_method_call_order.expected.zig");
 
 /// Embedded list of the differential corpus programs, consumed by the
 /// interpreter test and by the codegen parity test.
@@ -184,4 +185,5 @@ pub const programs = [_]Program{
     .{ .name = "92_collection_copies", .source = @embedFile("programs/92_collection_copies.etch"), .config = p92.config, .initial = p92.initial, .expected = p92.expected },
     .{ .name = "93_fixed_array_eq", .source = @embedFile("programs/93_fixed_array_eq.etch"), .config = p93.config, .initial = p93.initial, .expected = p93.expected },
     .{ .name = "94_anon_struct_positions", .source = @embedFile("programs/94_anon_struct_positions.etch"), .config = p94.config, .initial = p94.initial, .expected = p94.expected },
+    .{ .name = "95_method_call_order", .source = @embedFile("programs/95_method_call_order.etch"), .config = p95.config, .initial = p95.initial, .expected = p95.expected },
 };

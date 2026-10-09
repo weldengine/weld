@@ -874,6 +874,48 @@ test "has_extension / active_extensions (Etch methods) reflect activation" {
     try std.testing.expectEqual(@as(i32, 1), std.mem.readInt(i32, pb[4..8], .little)); // active_extensions().len() == 1
 }
 
+test "has_extension reads the entity its argument rebound" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const prog =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+        \\component Link { to: Entity, seen: bool = false }
+        \\rule probe(entity: Entity) when entity has Link {
+        \\  let mut e = entity
+        \\  let h = e.has_extension({
+        \\    e = entity.get(Link).to
+        \\    "CombatModule"
+        \\  })
+        \\  entity.get_mut(Link).seen = h
+        \\}
+    ;
+    var pr = try parser.parse(gpa, prog);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    interp.setExtensionResolver(res.ext());
+
+    const health_id = world.componentId("Health").?;
+    const link_id = world.componentId("Link").?;
+    const a = try world.spawnDynamic(gpa, &[_]ComponentId{health_id});
+    try scene.loader.runtimeActivate(&world, gpa, a, "CombatModule", res.ext());
+    const b = try world.spawnDynamic(gpa, &[_]ComponentId{link_id});
+    @memcpy(world.componentBytes(b, link_id).?[0..8], std.mem.asBytes(&a));
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expect(world.componentBytes(b, link_id).?[8] != 0);
+}
+
 test "entity.deactivate_extension executes on_detach and removes components" {
     const gpa = std.testing.allocator;
     const combat_bytes = try cookCombatModule(gpa);

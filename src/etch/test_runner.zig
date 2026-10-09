@@ -362,6 +362,31 @@ test "tick drives an iterative rule" {
     try std.testing.expectEqual(@as(u32, 0), report.failed);
 }
 
+test "a tick count is evaluated once" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\resource Count { n: int = 0 }
+        \\rule bump()
+        \\  when resource Count
+        \\{
+        \\  get_mut(Count).n += 1
+        \\}
+        \\test "one count, one tick" {
+        \\  let world = test_world()
+        \\  let mut k = 0
+        \\  world.tick({
+        \\    k += 1
+        \\    k
+        \\  })
+        \\  assert(k == 1)
+        \\  assert(get(Count).n == 1)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.passed);
+    try std.testing.expectEqual(@as(u32, 0), report.failed);
+}
+
 test "world.emit + tick drives an event-handling rule" {
     const gpa = std.testing.allocator;
     var report = try runSource(gpa,

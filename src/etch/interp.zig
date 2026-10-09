@@ -3226,28 +3226,10 @@ pub const Interpreter = struct {
         return null;
     }
 
-    /// Evaluate a call's arguments in the caller's scope and bind them (parameter
-    /// order, named-arg aware) into `dest`. Shared by the fn and
-    /// method call-frame setup; mirrors the arg handling of `callFn`/`callMethod`.
-    fn bindAsyncParams(self: *Interpreter, world: *World, caller: *Locals, dest: *Locals, fndecl: ast_mod.FnDecl, args_start: u32, args_len: u32, names_start: u32) StmtError!void {
-        if (fndecl.params_len != args_len) return error.RuntimeFailure;
-        if (args_len > max_call_args) return error.RuntimeFailure;
-        var values: [max_call_args]Value = undefined;
-        var j: u32 = 0;
-        while (j < args_len) : (j += 1) {
-            const arg: NodeId = @bitCast(self.ast.extra.items[args_start + j]);
-            values[j] = try self.evalExpr(world, caller, arg);
-        }
-        var i: u32 = 0;
-        while (i < fndecl.params_len) : (i += 1) {
-            const p = self.ast.fn_params.items[fndecl.params_start + i];
-            const idx = self.ast.callArgIndexForParam(args_start, args_len, names_start, i, p.name) orelse return error.RuntimeFailure;
-            try dest.put(self.gpa, p.name, values[idx], false);
-        }
-    }
-
     /// Begin a direct `await f()` on an `async fn` / `async method`:
-    /// resolve the callee, evaluate its args in the caller's scope, create a fresh
+    /// resolve the callee, evaluate its args in the caller's scope (a method's
+    /// before its receiver's place when that place is rooted in a binding,
+    /// `etch-reference-part1.md` §7.9), create a fresh
     /// heap-boxed scope (params + `self`), advance the caller cursor PAST the await,
     /// and push a `call` frame carrying `ret` (where `f`'s return value lands). `f`
     /// then runs as frames on this task; its own `await` suspends the whole task.
@@ -3262,6 +3244,7 @@ pub const Interpreter = struct {
         var fndecl: ast_mod.FnDecl = undefined;
         var self_in: ?Value = null;
         var self_slot: Slot = .none;
+        var args: CallArgs = .{};
         switch (self.ast.exprKind(call_expr)) {
             .fn_call => {
                 const call = self.ast.call_exprs.items[self.ast.exprData(call_expr)];
@@ -3270,11 +3253,24 @@ pub const Interpreter = struct {
                 if (scope.get(callee_name) != null) return error.RuntimeFailure; // a local (closure), not an async fn
                 fndecl = self.fns.get(callee_name) orelse return error.RuntimeFailure;
                 if (!fndecl.is_async) return error.RuntimeFailure;
-                try self.bindAsyncParams(world, scope, new_scope, fndecl, call.args_start, call.args_len, call.names_start);
+                try self.evalArgs(world, scope, call.args_start, call.args_len, &args);
+                if (self.unwinding()) {
+                    new_scope.deinit(self.gpa);
+                    self.gpa.destroy(new_scope);
+                    return .signaled;
+                }
+                try self.bindArgs(new_scope, fndecl, args.slice(), call.args_start, call.names_start);
             },
             .method_call => {
                 const mc = self.ast.method_calls.items[self.ast.exprData(call_expr)];
                 var self_value: ?Value = null;
+                const args_first = self.rootedInPlace(mc.receiver);
+                if (args_first) try self.evalArgs(world, scope, mc.args_start, mc.args_len, &args);
+                if (args_first and self.unwinding()) {
+                    new_scope.deinit(self.gpa);
+                    self.gpa.destroy(new_scope);
+                    return .signaled;
+                }
                 if (self.ast.exprKind(mc.receiver) == .path) {
                     // `Type.assoc()` — associated fn (no `self`).
                     const type_name = self.ast.exprData(mc.receiver);
@@ -3299,11 +3295,19 @@ pub const Interpreter = struct {
                     }
                 }
                 if (!fndecl.is_async) return error.RuntimeFailure;
+                if (!args_first) {
+                    try self.evalArgs(world, scope, mc.args_start, mc.args_len, &args);
+                    if (self.unwinding()) {
+                        new_scope.deinit(self.gpa);
+                        self.gpa.destroy(new_scope);
+                        return .signaled;
+                    }
+                }
                 if (self_value) |sv| {
                     if (self.ast.strings.find("self")) |sid| try new_scope.put(self.gpa, sid, sv, fndecl.self_kind == .by_mut);
                     if (fndecl.self_kind == .by_mut) self_in = sv;
                 }
-                try self.bindAsyncParams(world, scope, new_scope, fndecl, mc.args_start, mc.args_len, mc.names_start);
+                try self.bindArgs(new_scope, fndecl, args.slice(), mc.args_start, mc.names_start);
             },
             else => return error.RuntimeFailure,
         }
@@ -4727,6 +4731,7 @@ pub const Interpreter = struct {
         while (j < mc.args_len) : (j += 1) {
             values[j] = try self.evalExpr(world, locals, @bitCast(self.ast.extra.items[mc.args_start + j]));
         }
+        if (self.unwinding()) return Value{ .unit = {} };
         var args: std.ArrayListUnmanaged(services_mod.Arg) = .empty;
         defer args.deinit(self.gpa);
         try args.ensureTotalCapacity(self.gpa, spec.params.len);
@@ -5335,30 +5340,171 @@ pub const Interpreter = struct {
     /// run executes there. A `return` inside the body raises `self.returning`,
     /// consumed at this boundary; with no explicit return the trailing block
     /// value is the implicit return. `async fn` fails loud here.
+    /// The values of a call's arguments, in source order.
+    const CallArgs = struct {
+        buf: [max_call_args]Value = undefined,
+        len: u32 = 0,
+
+        fn slice(self: *const CallArgs) []const Value {
+            return self.buf[0..self.len];
+        }
+    };
+
+    /// Evaluate a call's arguments into `out`, in source order.
+    fn evalArgs(self: *Interpreter, world: *World, locals: *Locals, args_start: u32, args_len: u32, out: *CallArgs) StmtError!void {
+        if (args_len > max_call_args) return error.RuntimeFailure;
+        var j: u32 = 0;
+        while (j < args_len) : (j += 1) {
+            out.buf[j] = try self.evalExpr(world, locals, @bitCast(self.ast.extra.items[args_start + j]));
+        }
+        out.len = args_len;
+    }
+
+    /// Bind `values`, a call's arguments in source order, to `fndecl`'s
+    /// parameters in `dest`.
+    fn bindArgs(self: *Interpreter, dest: *Locals, fndecl: ast_mod.FnDecl, values: []const Value, args_start: u32, names_start: u32) StmtError!void {
+        if (fndecl.params_len != values.len) return error.RuntimeFailure;
+        var i: u32 = 0;
+        while (i < fndecl.params_len) : (i += 1) {
+            const p = self.ast.fn_params.items[fndecl.params_start + i];
+            const idx = self.ast.callArgIndexForParam(args_start, fndecl.params_len, names_start, i, p.name) orelse return error.RuntimeFailure;
+            try dest.put(self.gpa, p.name, values[idx], false);
+        }
+    }
+
+    /// Whether a `throw`, a `return`, a `break` or a `continue` is unwinding.
+    fn unwinding(self: *const Interpreter) bool {
+        return self.thrown or self.returning or self.control != .none;
+    }
+
+    /// Whether `id` is a place rooted in a binding or an ECS accessor, which a
+    /// method call resolves after its arguments (`etch-reference-part1.md` §7.9).
+    fn rootedInPlace(self: *const Interpreter, id: NodeId) bool {
+        var cur = id;
+        while (true) {
+            switch (self.ast.exprKind(cur)) {
+                .field_access => cur = self.ast.field_accesses.items[self.ast.exprData(cur)].receiver,
+                .index => cur = self.ast.index_exprs.items[self.ast.exprData(cur)].receiver,
+                .ident, .method_get, .method_get_mut => return true,
+                else => return false,
+            }
+        }
+    }
+
+    /// Evaluate `mc`'s arguments into `out`, in source order, unless one is
+    /// read by its method instead.
+    fn evalMethodArgs(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall, out: *CallArgs) StmtError!void {
+        if (self.passesForm(world, mc)) return;
+        try self.evalArgs(world, locals, mc.args_start, mc.args_len, out);
+    }
+
+    /// Whether an argument of `mc` is read by its method rather than
+    /// evaluated: a component (`remove`), a component literal (`add`,
+    /// `spawn_with`) or an event literal (`emit`).
+    fn passesForm(self: *const Interpreter, world: *World, mc: ast_mod.MethodCall) bool {
+        for (self.ast.extra.items[mc.args_start..][0..mc.args_len]) |raw| {
+            const arg: NodeId = @bitCast(raw);
+            switch (self.ast.exprKind(arg)) {
+                .path => if (!self.consts.contains(self.ast.exprData(arg))) return true,
+                .array_lit => {
+                    const al = self.ast.array_lits.items[self.ast.exprData(arg)];
+                    for (self.ast.extra.items[al.elements_start..][0..al.elements_len]) |e| {
+                        if (self.namesForm(world, @bitCast(e))) return true;
+                    }
+                },
+                else => if (self.namesForm(world, arg)) return true,
+            }
+        }
+        return false;
+    }
+
+    /// Whether `id` is a literal of a component or an event.
+    fn namesForm(self: *const Interpreter, world: *World, id: NodeId) bool {
+        if (self.ast.exprKind(id) != .struct_lit) return false;
+        const name = self.ast.struct_lits.items[self.ast.exprData(id)].type_name;
+        return self.event_decls.contains(name) or world.registry.idOf(self.ast.strings.slice(name)) != null;
+    }
+
+    /// `recv.method(args)` or `Type.assoc(args)`. A receiver rooted in a
+    /// binding or an ECS accessor is resolved after the arguments; any other
+    /// receiver, and one under `?.`, before them.
+    noinline fn evalMethodCall(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall) StmtError!Value {
+        var args: CallArgs = .{};
+        if (self.ast.exprKind(mc.receiver) == .path) {
+            const type_name = self.ast.exprData(mc.receiver);
+            // Builtin-type associated calls:
+            // `Set.new()` / `Set.from([...])` route to the set store
+            // BEFORE the user `impl` lookup — `Set` is a builtin
+            // stdlib type and is not user-overridable (stdlib §2.6).
+            if (std.mem.eql(u8, self.ast.strings.slice(type_name), "Set")) {
+                return try self.evalSetAssociated(world, locals, mc);
+            }
+            const method = self.methods.get(methodKey(type_name, mc.method_name)) orelse return error.RuntimeFailure;
+            try self.evalArgs(world, locals, mc.args_start, mc.args_len, &args);
+            if (self.unwinding()) return Value{ .unit = {} };
+            return try self.callMethod(world, locals, method, mc, args.slice(), null, .none);
+        }
+        // Tier 1 service call (`etch-abi-zig.md` §8.7): the receiver is
+        // a bare lowercase IDENT naming a registered service. Placed
+        // before `evalExpr` on the receiver, which would otherwise fail
+        // on an identifier that is not a local — the same position the
+        // type-checker's `synthMethodCall` uses, so the two agree on
+        // what a service call looks like. A LOCAL SHADOWS a service.
+        if (self.ast.exprKind(mc.receiver) == .ident and !mc.opt_chain) {
+            const recv_name: StringId = self.ast.exprData(mc.receiver);
+            if (locals.get(recv_name) == null) {
+                if (self.services) |reg| {
+                    const svc_bytes = self.ast.strings.slice(recv_name);
+                    if (reg.lookupMethod(svc_bytes, self.ast.strings.slice(mc.method_name))) |found| {
+                        return try self.callService(world, locals, mc, found.entry, found.spec);
+                    }
+                }
+            }
+        }
+        const in_chain = mc.opt_chain or self.ast.inOptionalChain(mc.receiver);
+        const args_first = !in_chain and self.rootedInPlace(mc.receiver);
+        if (args_first) {
+            try self.evalMethodArgs(world, locals, mc, &args);
+            if (self.unwinding()) return Value{ .unit = {} };
+        }
+        const place = try self.evalPlaceSlot(world, locals, mc.receiver);
+        const recv = place.value;
+        // `recv?.method(args)`, or a method called after one (part1
+        // §6.6): `none` short-circuits to a fresh `none` without
+        // evaluating the arguments; `some(p)` dispatches on the payload and
+        // re-wraps the result in an optional.
+        if (in_chain and recv == .optional) {
+            const payload = self.optionals.items[recv.optional] orelse {
+                const oh: u32 = @intCast(self.optionals.items.len);
+                try self.optionals.append(self.gpa, null);
+                return Value{ .optional = oh };
+            };
+            try self.evalMethodArgs(world, locals, mc, &args);
+            if (self.unwinding()) return Value{ .unit = {} };
+            const res = try self.dispatchMethodOnValue(world, locals, mc, args.slice(), payload, .none);
+            if (res == .optional) return res;
+            return self.wrapped(res, 1);
+        }
+        if (mc.opt_chain) return error.RuntimeFailure;
+        if (!args_first) {
+            try self.evalMethodArgs(world, locals, mc, &args);
+            if (self.unwinding()) return Value{ .unit = {} };
+        }
+        return try self.dispatchMethodOnValue(world, locals, mc, args.slice(), recv, place.slot);
+    }
+
     fn callFn(self: *Interpreter, world: *World, caller_locals: *Locals, fndecl: ast_mod.FnDecl, call: ast_mod.CallExpr) StmtError!Value {
         // An `async fn` executes via the await call-frame path (`beginAsyncCall`),
         // not this synchronous path. Reaching here for an async fn is
         // a direct (non-`await`) call — a function-coloring violation the
         // type-checker rejects (E0901); until then it degrades to a fail-loud.
         if (fndecl.is_async) return error.RuntimeFailure;
-        if (fndecl.params_len != call.args_len) return error.RuntimeFailure;
+        var args: CallArgs = .{};
+        try self.evalArgs(world, caller_locals, call.args_start, call.args_len, &args);
+        if (self.unwinding()) return Value{ .unit = {} };
         var frame: Locals = .{};
         defer frame.deinit(self.gpa);
-        // Evaluate arguments in SOURCE order, then bind in parameter order
-        // — the codegen emits the same source-order temporaries.
-        var values: [max_call_args]Value = undefined;
-        if (call.args_len > max_call_args) return error.RuntimeFailure;
-        var j: u32 = 0;
-        while (j < call.args_len) : (j += 1) {
-            const arg: NodeId = @bitCast(self.ast.extra.items[call.args_start + j]);
-            values[j] = try self.evalExpr(world, caller_locals, arg);
-        }
-        var i: u32 = 0;
-        while (i < fndecl.params_len) : (i += 1) {
-            const p = self.ast.fn_params.items[fndecl.params_start + i];
-            const idx = self.ast.callArgIndexForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse return error.RuntimeFailure;
-            try frame.put(self.gpa, p.name, values[idx], false);
-        }
+        try self.bindArgs(&frame, fndecl, args.slice(), call.args_start, call.names_start);
         try self.execStmtRun(world, &frame, fndecl.body_start, fndecl.body_len);
         if (self.returning) {
             self.returning = false;
@@ -5528,15 +5674,13 @@ pub const Interpreter = struct {
         return Value{ .struct_ref = handle };
     }
 
-    /// extract the single string argument of an extension method
-    /// (`activate_extension` / `deactivate_extension` / `has_extension`) as raw
-    /// bytes. Borrowed from the current AST arena / run-string store — valid for
-    /// the synchronous resolve / lookup that immediately follows.
-    fn extensionNameArg(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall) StmtError![]const u8 {
-        if (mc.args_len != 1) return error.RuntimeFailure;
-        const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-        const v = try self.evalExpr(world, locals, arg);
-        return self.stringBytes(v) orelse error.RuntimeFailure;
+    /// The bytes of an extension method's single string argument
+    /// (`activate_extension` / `deactivate_extension` / `has_extension`),
+    /// borrowed from the current AST arena / run-string store — valid for the
+    /// synchronous resolve / lookup that immediately follows.
+    fn extensionName(self: *const Interpreter, args: []const Value) StmtError![]const u8 {
+        if (args.len != 1) return error.RuntimeFailure;
+        return self.stringBytes(args[0]) orelse error.RuntimeFailure;
     }
 
     /// Resolve the extension bytes NOW and enqueue a deferred
@@ -5545,8 +5689,7 @@ pub const Interpreter = struct {
     /// mutate an archetype mid-`iterateArchetype`. Missing resolver / unknown name
     /// surface as `RuntimeFailure` (the interp's failure channel). The name is
     /// dup'd (the AST / run-string source may not outlive the flush).
-    fn enqueueExtension(self: *Interpreter, world: *World, locals: *Locals, entity: CoreEntityId, mc: ast_mod.MethodCall, op: ExtOp) StmtError!void {
-        const name = try self.extensionNameArg(world, locals, mc);
+    fn enqueueExtension(self: *Interpreter, entity: CoreEntityId, mc: ast_mod.MethodCall, name: []const u8, op: ExtOp) StmtError!void {
         const span: SourceSpan = if (self.in_hook_text) .{ .byte_start = 0, .byte_end = 0 } else self.ast.exprSpan(@bitCast(self.ast.extra.items[mc.args_start]));
         const resolver = self.bridge.ext_resolver orelse return error.RuntimeFailure;
         const bytes = resolver.resolve(name) orelse return error.RuntimeFailure;
@@ -5642,10 +5785,9 @@ pub const Interpreter = struct {
     /// runFor drives. Rule-tick runtime errors are counted into a throwaway
     /// report (they do not fail the test — a test fails on its OWN body's
     /// assert/throw/failure, §32; the body's assertions catch a wrong result).
-    fn evalWorldTick(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall) StmtError!void {
-        if (mc.args_len != 1) return error.RuntimeFailure;
-        const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-        const v = try self.evalExpr(world, locals, arg);
+    fn evalWorldTick(self: *Interpreter, world: *World, args: []const Value) StmtError!void {
+        if (args.len != 1) return error.RuntimeFailure;
+        const v = args[0];
         if (v != .int_ or v.int_ < 1) return error.RuntimeFailure;
         // Events emitted before this tick (test body / `spawn_with` observers)
         // must reach the first tick's rules: suppress that tick's head-clear.
@@ -5930,13 +6072,12 @@ pub const Interpreter = struct {
         reg.deferred.?.reset();
     }
 
-    /// Dispatch an instance method call on an already-evaluated receiver
-    /// value — §5.5 order: inherent / trait on user types, then the builtin
-    /// string / collection subsets. Split from the `.method_call` arm so the
-    /// optional chain `recv?.method()` dispatches the same way on the
-    /// unwrapped payload — same logical point as the
-    /// resolver's `dispatchMethodOnType` split.
-    fn dispatchMethodOnValue(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall, recv: Value, recv_slot: Slot) StmtError!Value {
+    /// Dispatch an instance method call on its evaluated arguments and
+    /// receiver — §5.5 order: inherent / trait on user types, then the builtin
+    /// string / collection subsets. `args` is empty when an argument is read by
+    /// its method (`passesForm`). `recv?.method()` dispatches through it on the
+    /// unwrapped payload.
+    fn dispatchMethodOnValue(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall, args: []const Value, recv: Value, recv_slot: Slot) StmtError!Value {
         switch (recv) {
             .world_handle => {
                 // the test World surface (§32). The mono-world handle
@@ -5949,7 +6090,7 @@ pub const Interpreter = struct {
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "tick")) {
-                    try self.evalWorldTick(world, locals, mc);
+                    try self.evalWorldTick(world, args);
                     return Value{ .unit = {} };
                 }
                 return error.RuntimeFailure;
@@ -5984,7 +6125,7 @@ pub const Interpreter = struct {
                 const type_name = self.structs.list.items[handle].type_name;
                 const key = methodKey(type_name, mc.method_name);
                 const method = self.methods.get(key) orelse self.trait_methods.get(key) orelse return error.RuntimeFailure;
-                return try self.callMethod(world, locals, method, mc, recv, recv_slot);
+                return try self.callMethod(world, locals, method, mc, args, recv, recv_slot);
             },
             .entity_id => |eid| {
                 const mname = self.ast.strings.slice(mc.method_name);
@@ -5995,16 +6136,15 @@ pub const Interpreter = struct {
                 // missing resolver or unknown extension fails the call, and a
                 // refusal at the tick boundary is a runtime error of that tick.
                 if (std.mem.eql(u8, mname, "activate_extension")) {
-                    try self.enqueueExtension(world, locals, @bitCast(eid), mc, .activate);
+                    try self.enqueueExtension(@bitCast(eid), mc, try self.extensionName(args), .activate);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "deactivate_extension")) {
-                    try self.enqueueExtension(world, locals, @bitCast(eid), mc, .deactivate);
+                    try self.enqueueExtension(@bitCast(eid), mc, try self.extensionName(args), .deactivate);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "has_extension")) {
-                    const name = try self.extensionNameArg(world, locals, mc);
-                    return Value{ .bool_ = world.hasEntityExtension(@bitCast(eid), name) };
+                    return Value{ .bool_ = world.hasEntityExtension(@bitCast(eid), try self.extensionName(args)) };
                 }
                 if (std.mem.eql(u8, mname, "active_extensions")) {
                     if (mc.args_len != 0) return error.RuntimeFailure;
@@ -6057,7 +6197,7 @@ pub const Interpreter = struct {
                 // type key is the interned `Entity`; self is the handle.
                 const entity_name = self.ast.strings.find("Entity") orelse return error.RuntimeFailure;
                 const method = self.trait_methods.get(methodKey(entity_name, mc.method_name)) orelse return error.RuntimeFailure;
-                return try self.callMethod(world, locals, method, mc, recv, recv_slot);
+                return try self.callMethod(world, locals, method, mc, args, recv, recv_slot);
             },
             .string_id, .string_run, .string_persistent, .string_view => {
                 // Builtin string methods: `len` → byte length; any other §12
@@ -6078,12 +6218,8 @@ pub const Interpreter = struct {
                 // other §13 method is unimplemented stdlib → fail loud.
                 const mname = self.ast.strings.slice(mc.method_name);
                 if (std.mem.eql(u8, mname, "push")) {
-                    if (mc.args_len != 1) return error.RuntimeFailure;
-                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-                    const v = try self.evalExpr(world, locals, arg);
-                    // Re-index after the arg eval (a nested collection
-                    // could have grown the outer store vector).
-                    try self.collections.arrays.items[handle].append(self.gpa, v);
+                    if (args.len != 1) return error.RuntimeFailure;
+                    try self.collections.arrays.items[handle].append(self.gpa, args[0]);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "len")) {
@@ -6107,11 +6243,9 @@ pub const Interpreter = struct {
                 // inline).
                 const mname = self.ast.strings.slice(mc.method_name);
                 if (std.mem.eql(u8, mname, "push")) {
-                    if (mc.args_len != 1) return error.RuntimeFailure;
-                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-                    const v = try self.evalExpr(world, locals, arg);
+                    if (args.len != 1) return error.RuntimeFailure;
                     const target = try self.writableBlock(world, locals, ptr, recv_slot);
-                    try self.pushPromoted(persistentArrayOf(target), v);
+                    try self.pushPromoted(persistentArrayOf(target), args[0]);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "len")) {
@@ -6157,13 +6291,9 @@ pub const Interpreter = struct {
                 // membership/read is `m[k] -> V?` (the index path).
                 const mname = self.ast.strings.slice(mc.method_name);
                 if (std.mem.eql(u8, mname, "insert")) {
-                    if (mc.args_len != 2) return error.RuntimeFailure;
-                    const karg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-                    const varg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + 1]);
-                    const k = try self.evalExpr(world, locals, karg);
-                    const v = try self.evalExpr(world, locals, varg);
+                    if (args.len != 2) return error.RuntimeFailure;
                     const target = try self.writableBlock(world, locals, ptr, recv_slot);
-                    try self.mapInsertPromoted(persistentMapOf(target), k, v);
+                    try self.mapInsertPromoted(persistentMapOf(target), args[0], args[1]);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "len")) {
@@ -6180,19 +6310,15 @@ pub const Interpreter = struct {
                 // the subset — so neither is a reachable surface).
                 const mname = self.ast.strings.slice(mc.method_name);
                 if (std.mem.eql(u8, mname, "insert")) {
-                    if (mc.args_len != 1) return error.RuntimeFailure;
-                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-                    const v = try self.evalExpr(world, locals, arg);
+                    if (args.len != 1) return error.RuntimeFailure;
                     const target = try self.writableBlock(world, locals, ptr, recv_slot);
-                    try self.setInsertPromoted(persistentSetOf(target), v);
+                    try self.setInsertPromoted(persistentSetOf(target), args[0]);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "contains")) {
-                    if (mc.args_len != 1) return error.RuntimeFailure;
-                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-                    const v = try self.evalExpr(world, locals, arg);
+                    if (args.len != 1) return error.RuntimeFailure;
                     for (persistentSetOf(ptr).items) |existing| {
-                        if (self.valueEql(existing, v)) return Value{ .bool_ = true };
+                        if (self.valueEql(existing, args[0])) return Value{ .bool_ = true };
                     }
                     return Value{ .bool_ = false };
                 }
@@ -6212,18 +6338,14 @@ pub const Interpreter = struct {
                 // unimplemented stdlib → fail loud.
                 const mname = self.ast.strings.slice(mc.method_name);
                 if (std.mem.eql(u8, mname, "insert")) {
-                    if (mc.args_len != 1) return error.RuntimeFailure;
-                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-                    const v = try self.evalExpr(world, locals, arg);
-                    try self.setInsert(handle, v);
+                    if (args.len != 1) return error.RuntimeFailure;
+                    try self.setInsert(handle, args[0]);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "contains")) {
-                    if (mc.args_len != 1) return error.RuntimeFailure;
-                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-                    const v = try self.evalExpr(world, locals, arg);
+                    if (args.len != 1) return error.RuntimeFailure;
                     for (self.collections.sets.items[handle].items) |existing| {
-                        if (self.valueEql(existing, v)) return Value{ .bool_ = true };
+                        if (self.valueEql(existing, args[0])) return Value{ .bool_ = true };
                     }
                     return Value{ .bool_ = false };
                 }
@@ -6243,12 +6365,8 @@ pub const Interpreter = struct {
                 // method is unimplemented stdlib → fail loud.
                 const mname = self.ast.strings.slice(mc.method_name);
                 if (std.mem.eql(u8, mname, "insert")) {
-                    if (mc.args_len != 2) return error.RuntimeFailure;
-                    const karg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-                    const varg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + 1]);
-                    const k = try self.evalExpr(world, locals, karg);
-                    const v = try self.evalExpr(world, locals, varg);
-                    try self.mapInsert(handle, k, v);
+                    if (args.len != 2) return error.RuntimeFailure;
+                    try self.mapInsert(handle, args[0], args[1]);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "len")) {
@@ -6327,11 +6445,10 @@ pub const Interpreter = struct {
         try self.collections.sets.items[handle].append(self.gpa, item);
     }
 
-    fn callMethod(self: *Interpreter, world: *World, caller_locals: *Locals, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, self_value: ?Value, recv_slot: Slot) StmtError!Value {
+    fn callMethod(self: *Interpreter, world: *World, caller_locals: *Locals, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, args: []const Value, self_value: ?Value, recv_slot: Slot) StmtError!Value {
         // As in `callFn`: an `async method` runs via the await call-frame
         // path; a direct sync call is a coloring violation (E0901).
         if (method.is_async) return error.RuntimeFailure;
-        if (method.params_len != mc.args_len) return error.RuntimeFailure;
         var frame: Locals = .{};
         defer frame.deinit(self.gpa);
         if (self_value) |sv| {
@@ -6339,22 +6456,7 @@ pub const Interpreter = struct {
                 try frame.put(self.gpa, self_id, sv, method.self_kind == .by_mut);
             }
         }
-        // Source-order evaluation, parameter-order binding — the same
-        // contract as `callFn` (the 2026-06-10 evaluation-order ruling).
-        // The receiver evaluated first (it is written first).
-        var values: [max_call_args]Value = undefined;
-        if (mc.args_len > max_call_args) return error.RuntimeFailure;
-        var j: u32 = 0;
-        while (j < mc.args_len) : (j += 1) {
-            const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + j]);
-            values[j] = try self.evalExpr(world, caller_locals, arg);
-        }
-        var i: u32 = 0;
-        while (i < method.params_len) : (i += 1) {
-            const p = self.ast.fn_params.items[method.params_start + i];
-            const idx = self.ast.callArgIndexForParam(mc.args_start, mc.args_len, mc.names_start, i, p.name) orelse return error.RuntimeFailure;
-            try frame.put(self.gpa, p.name, values[idx], false);
-        }
+        try self.bindArgs(&frame, method, args, mc.args_start, mc.names_start);
         try self.execStmtRun(world, &frame, method.body_start, method.body_len);
         const result = blk: {
             if (self.returning) {
@@ -7323,6 +7425,7 @@ pub const Interpreter = struct {
                     const av = try self.evalExpr(world, locals, arg);
                     try frame.put(self.gpa, p.name, av, false);
                 }
+                if (self.unwinding()) return Value{ .unit = {} };
                 const result = try self.evalExpr(world, &frame, ce.body);
                 return self.leaveClosure(result, node);
             },
@@ -7331,62 +7434,7 @@ pub const Interpreter = struct {
                 const name = if (sl.type_name != 0) sl.type_name else self.ast.anonStruct(id) orelse return error.RuntimeFailure;
                 return try self.evalStructLitAs(world, locals, sl, name);
             },
-            .method_call => {
-                // `recv.method(args)` / `Type.assoc(args)` — dispatch in the
-                // §5.5 order (inherent → trait). Associated fn: a bare type-path
-                // receiver, no self. Instance method: a struct receiver (self
-                // bound to it — a `mut self` method mutates it in place via the
-                // shared store handle) or an `Entity` receiver for a trait method
-                // (`impl Trait for Entity`; mutation flows through `self.get_mut`).
-                const mc = self.ast.method_calls.items[data];
-                if (self.ast.exprKind(mc.receiver) == .path) {
-                    const type_name = self.ast.exprData(mc.receiver);
-                    // Builtin-type associated calls:
-                    // `Set.new()` / `Set.from([...])` route to the set store
-                    // BEFORE the user `impl` lookup — `Set` is a builtin
-                    // stdlib type and is not user-overridable (stdlib §2.6).
-                    if (std.mem.eql(u8, self.ast.strings.slice(type_name), "Set")) {
-                        return try self.evalSetAssociated(world, locals, mc);
-                    }
-                    const method = self.methods.get(methodKey(type_name, mc.method_name)) orelse return error.RuntimeFailure;
-                    return try self.callMethod(world, locals, method, mc, null, .none);
-                }
-                // Tier 1 service call (`etch-abi-zig.md` §8.7): the receiver is
-                // a bare lowercase IDENT naming a registered service. Placed
-                // before `evalExpr` on the receiver, which would otherwise fail
-                // on an identifier that is not a local — the same position the
-                // type-checker's `synthMethodCall` uses, so the two agree on
-                // what a service call looks like. A LOCAL SHADOWS a service.
-                if (self.ast.exprKind(mc.receiver) == .ident and !mc.opt_chain) {
-                    const recv_name: StringId = self.ast.exprData(mc.receiver);
-                    if (locals.get(recv_name) == null) {
-                        if (self.services) |reg| {
-                            const svc_bytes = self.ast.strings.slice(recv_name);
-                            if (reg.lookupMethod(svc_bytes, self.ast.strings.slice(mc.method_name))) |found| {
-                                return try self.callService(world, locals, mc, found.entry, found.spec);
-                            }
-                        }
-                    }
-                }
-                const place = try self.evalPlaceSlot(world, locals, mc.receiver);
-                const recv = place.value;
-                // `recv?.method(args)`, or a method called after one (part1
-                // §6.6): `none` short-circuits to a fresh `none` without
-                // dispatching; `some(p)` dispatches on the payload and
-                // re-wraps the result in an optional.
-                if (mc.opt_chain or (recv == .optional and self.ast.inOptionalChain(mc.receiver))) {
-                    if (recv != .optional) return error.RuntimeFailure;
-                    const payload = self.optionals.items[recv.optional] orelse {
-                        const oh: u32 = @intCast(self.optionals.items.len);
-                        try self.optionals.append(self.gpa, null);
-                        return Value{ .optional = oh };
-                    };
-                    const res = try self.dispatchMethodOnValue(world, locals, mc, payload, .none);
-                    if (res == .optional) return res;
-                    return self.wrapped(res, 1);
-                }
-                return try self.dispatchMethodOnValue(world, locals, mc, recv, place.slot);
-            },
+            .method_call => return try self.evalMethodCall(world, locals, self.ast.method_calls.items[data]),
             .loop_expr => {
                 // `loop { body }` — run the body repeatedly until a `break`
                 // targeting this loop fires; the loop's value is that break's
@@ -19293,6 +19341,336 @@ test "an anonymous struct literal takes the struct its slot expects" {
     try expectRuns(&anon_runs);
 }
 
+const call_order_prelude = value_prelude ++
+    \\struct H { p: P }
+    \\struct R { x: int = 0 }
+    \\impl R {
+    \\  fn put(mut self, o: R) {
+    \\    self = o
+    \\  }
+    \\  fn plus(self, k: int) -> int {
+    \\    self.x * 10 + k
+    \\  }
+    \\  fn plus_loud(self, k: int) throws -> int {
+    \\    throw Error { message: "ran", code: ErrorCode.io_fail }
+    \\  }
+    \\}
+    \\struct HR { r: R }
+    \\struct Digits { n: int = 0 }
+    \\impl Digits {
+    \\  fn add(self, k: int) -> Digits {
+    \\    Digits { n: self.n * 10 + k }
+    \\  }
+    \\  fn add_loud(self, k: int) throws -> Digits {
+    \\    throw Error { message: "ran", code: ErrorCode.io_fail }
+    \\  }
+    \\  fn make_loud(k: int) throws -> Digits {
+    \\    throw Error { message: "ran", code: ErrorCode.io_fail }
+    \\  }
+    \\}
+    \\const K: int = 3
+    \\fn risky(n: int) throws -> int {
+    \\  if n > 2 {
+    \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+    \\  }
+    \\  return n * 10
+    \\}
+    \\fn g(n: int) -> int {
+    \\  0
+    \\}
+    \\fn early(c: bool) -> int {
+    \\  let k = g({
+    \\    if c {
+    \\      return 5
+    \\    }
+    \\    1
+    \\  })
+    \\  k + 100
+    \\}
+    \\fn early_closure(c: bool) -> int {
+    \\  let f = |n: int| n + 1
+    \\  let k = f({
+    \\    if c {
+    \\      return 7
+    \\    }
+    \\    1
+    \\  })
+    \\  k + 100
+    \\}
+    \\fn early_method(c: bool) -> int {
+    \\  let mut q = P { x: 1 }
+    \\  q.absorb({
+    \\    if c {
+    \\      return 6
+    \\    }
+    \\    P { x: 1 }
+    \\  })
+    \\  0
+    \\}
+    \\
+;
+
+const call_order_runs = [_]ScopeRun{
+    .{ .name = "a mut self method writes the binding its argument rebound", .out = 16, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut p = P { x: 1 }\n  p.absorb({\n    p = P { x: 5 }\n    let q = P { x: 1 }\n    q\n  })\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "a mut self method writes the field of the struct its argument rebound", .out = 16, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut h = H { p: P { x: 1 } }\n  h.p.absorb({\n    h = H { p: P { x: 5 } }\n    let q = P { x: 1 }\n    q\n  })\n  get_mut(Out).n = h.p.x\n}\n" },
+    .{ .name = "a mut self method writes the element of the array its argument rebound", .out = 16, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut ps: P[] = [P { x: 1 }]\n  ps[0].absorb({\n    ps = [P { x: 5 }]\n    let q = P { x: 1 }\n    q\n  })\n  get_mut(Out).n = ps[0].x\n}\n" },
+    .{ .name = "a mut self method writes the element its argument's index names", .out = 133, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut ps: P[] = [P { x: 1 }, P { x: 2 }]\n  let mut k = 0\n  ps[k].absorb({\n    k = 1\n    let q = P { x: 3 }\n    q\n  })\n  get_mut(Out).n = ps[0].x * 100 + ps[1].x\n}\n" },
+    .{ .name = "named arguments are evaluated before the receiver", .out = 16, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut p = P { x: 1 }\n  p.absorb(o: {\n    p = P { x: 5 }\n    let q = P { x: 1 }\n    q\n  })\n  get_mut(Out).n = p.x\n}\n" },
+    .{ .name = "self = v lands in the struct its argument rebound", .out = 7, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut h = HR { r: R { x: 1 } }\n  h.r.put({\n    h = HR { r: R { x: 5 } }\n    let q = R { x: 7 }\n    q\n  })\n  get_mut(Out).n = h.r.x\n}\n" },
+    .{ .name = "a self method reads the binding its argument rebound", .out = 52, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut rv = R { x: 1 }\n  get_mut(Out).n = rv.plus({\n    rv = R { x: 5 }\n    2\n  })\n}\n" },
+    .{ .name = "a const argument is a value", .out = 13, .src = call_order_prelude ++ "rule r() when resource Out {\n  let rv = R { x: 1 }\n  get_mut(Out).n = rv.plus(K)\n}\n" },
+    .{ .name = "a push lands in the array its argument rebound", .out = 29, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut ys: int[] = [1]\n  ys.push({\n    ys = [9]\n    2\n  })\n  get_mut(Out).n = ys.len() * 10 + ys[0]\n}\n" },
+    .{ .name = "an insert lands in the map its argument rebound", .out = 2520, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut m: [int: int] = [1: 10]\n  m.insert(2, {\n    m = [5: 50]\n    20\n  })\n  let a = m[5] ?? 0\n  let b = m[2] ?? 0\n  get_mut(Out).n = m.len() * 1000 + a * 10 + b\n}\n" },
+    .{ .name = "a set insert lands in the set its argument rebound", .out = 21, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut s: Set<int> = Set.from([1])\n  s.insert({\n    s = Set.from([7])\n    3\n  })\n  let c = if s.contains(3) { 1 } else { 0 }\n  get_mut(Out).n = s.len() * 10 + c\n}\n" },
+    .{ .name = "a set lookup reads the set its argument rebound", .out = 1, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut s: Set<int> = Set.from([1])\n  let c = s.contains({\n    s = Set.from([3])\n    3\n  })\n  get_mut(Out).n = if c { 1 } else { 0 }\n}\n" },
+    .{ .name = "a receiver that is a call's result is evaluated before the arguments", .out = 1212, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut k = 0\n  let d = Digits { n: 0 }\n  let e = d.add({\n    k = k * 10 + 1\n    1\n  }).add({\n    k = k * 10 + 2\n    2\n  })\n  get_mut(Out).n = k * 100 + e.n\n}\n" },
+    .{ .name = "an optional chain reads its receiver before its arguments", .out = 12, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut o: R? = some(R { x: 1 })\n  let v = o?.plus({\n    o = none\n    2\n  })\n  let w = v ?? 0\n  get_mut(Out).n = w\n}\n" },
+    .{ .name = "an optional chain on none evaluates no argument", .out = 3, .src = call_order_prelude ++ "rule r() when resource Out {\n  let o: R? = none\n  let mut k = 0\n  let v = o?.plus({\n    k += 1\n    2\n  })\n  let w = v ?? 3\n  get_mut(Out).n = k * 10 + w\n}\n" },
+    .{ .name = "a method after an optional field reads its receiver before its arguments", .out = 12, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut o: HR? = some(HR { r: R { x: 1 } })\n  let v = o?.r.plus({\n    o = none\n    2\n  })\n  get_mut(Out).n = v ?? 0\n}\n" },
+    .{ .name = "a throw in an argument unwinds before its receiver's place is read", .out = 7, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut ps: P[] = [P { x: 1 }]\n  try {\n    ps[0].absorb({\n      let p = ps.pop()\n      let k = risky(5)\n      P { x: k }\n    })\n  } catch err {\n    get_mut(Out).n = 7\n  }\n}\n" },
+    .{ .name = "a push whose argument throws pushes nothing", .out = 27, .src = call_order_prelude ++ "rule r() when resource Out {\n  let mut xs: int[] = [1]\n  try {\n    xs.push(risky(5))\n  } catch err {\n    xs.push(7)\n  }\n  get_mut(Out).n = xs.len() * 10 + xs[xs.len() - 1]\n}\n" },
+    .{ .name = "a throw in an associated fn's argument skips the call", .out = 4, .src = call_order_prelude ++ "rule r() when resource Out {\n  try {\n    let d = Digits.make_loud(risky(5))\n    get_mut(Out).n = d.n\n  } catch err {\n    get_mut(Out).n = err.message.len()\n  }\n}\n" },
+    .{ .name = "a throw in an argument of a method under ?. skips the call", .out = 4, .src = call_order_prelude ++ "rule r() when resource Out {\n  let o: R? = some(R { x: 1 })\n  try {\n    let v = o?.plus_loud(risky(5))\n    get_mut(Out).n = v ?? 0\n  } catch err {\n    get_mut(Out).n = err.message.len()\n  }\n}\n" },
+    .{ .name = "a throw in an argument of a value receiver's method skips the call", .out = 4, .src = call_order_prelude ++ "rule r() when resource Out {\n  let d = Digits { n: 0 }\n  try {\n    let e = d.add(1).add_loud(risky(5))\n    get_mut(Out).n = e.n\n  } catch err {\n    get_mut(Out).n = err.message.len()\n  }\n}\n" },
+    .{ .name = "a return in a fn argument leaves the caller", .out = 5, .src = call_order_prelude ++ "rule r() when resource Out {\n  get_mut(Out).n = early(true)\n}\n" },
+    .{ .name = "a return in a closure argument leaves the caller", .out = 7, .src = call_order_prelude ++ "rule r() when resource Out {\n  get_mut(Out).n = early_closure(true)\n}\n" },
+    .{ .name = "a return in a method argument leaves the caller", .out = 6, .src = call_order_prelude ++ "rule r() when resource Out {\n  get_mut(Out).n = early_method(true)\n}\n" },
+};
+
+test "a method call evaluates its arguments before its receiver's place" {
+    try expectRuns(&call_order_runs);
+}
+
+test "a push whose argument removes its receiver element fails loud" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut a: int[][] = [get(R).xs]
+        \\  a[0].push({
+        \\    let p = a.pop()
+        \\    1
+        \\  })
+        \\  get_mut(Out).n = get(R).xs.len() * 10 + a.len()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "Out", "n"));
+}
+
+test "a type name passed as an argument fails loud" {
+    const gpa = std.testing.allocator;
+    const srcs = [_][:0]const u8{
+        "resource Out { n: int = 0 }\nrule r() when resource Out {\n  let mut xs: int[] = [1]\n  xs.push(Out)\n  get_mut(Out).n = 1\n}",
+        "resource Out { n: int = 0 }\nrule r() when resource Out {\n  let mut m: [int: int] = [1: 1]\n  m.insert(Out, 1)\n  get_mut(Out).n = 1\n}",
+        "resource Out { n: int = 0 }\nrule r() when resource Out {\n  let mut s: Set<int> = Set.from([1])\n  s.insert(Out)\n  get_mut(Out).n = 1\n}",
+        "resource Out { n: int = 0 }\nrule r() when resource Out {\n  let s: Set<int> = Set.from([1])\n  let c = s.contains(Out)\n  get_mut(Out).n = 1\n}",
+        "resource Out { n: int = 0 }\nstruct P { x: int = 0 }\nimpl P {\n  fn absorb(mut self, o: P) {\n    self.x = o.x\n  }\n}\nrule r() when resource Out {\n  let mut p = P { x: 1 }\n  p.absorb(Out)\n  get_mut(Out).n = 1\n}",
+        "resource Out { n: int = 0 }\nresource R { xs: int[] = [1] }\nrule r() when resource Out and resource R {\n  get_mut(R).xs.push(Out)\n  get_mut(Out).n = 1\n}",
+    };
+    for (srcs) |src| {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa, src);
+        defer pr.deinit(gpa);
+        try std.testing.expect(pr.diagnostics.len == 0);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const report = try interp.runFor(&world, 1);
+        try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+        try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "Out", "n"));
+    }
+}
+
+test "a trait method on an entity reads its receiver after its arguments, sync and async" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { src: [:0]const u8, n: i64 }{
+        .{ .n = 1, .src =
+        \\trait Same { fn same(self, o: Entity) -> bool }
+        \\component L { to: Entity, n: int = 0 }
+        \\impl Same for Entity {
+        \\  fn same(self, o: Entity) -> bool {
+        \\    self == o
+        \\  }
+        \\}
+        \\rule r(entity: Entity) when entity has L {
+        \\  let mut e = entity
+        \\  let s = e.same({
+        \\    e = entity.get(L).to
+        \\    entity.get(L).to
+        \\  })
+        \\  entity.get_mut(L).n = if s { 1 } else { 2 }
+        \\}
+        },
+        .{ .n = 1, .src =
+        \\trait Same { async fn same(self, o: Entity) -> bool }
+        \\component L { to: Entity, n: int = 0 }
+        \\impl Same for Entity {
+        \\  async fn same(self, o: Entity) -> bool {
+        \\    self == o
+        \\  }
+        \\}
+        \\async rule r(entity: Entity) when entity has L {
+        \\  let mut e = entity
+        \\  let s = await e.same({
+        \\    e = entity.get(L).to
+        \\    entity.get(L).to
+        \\  })
+        \\  entity.get_mut(L).n = if s { 1 } else { 2 }
+        \\}
+        },
+        .{ .n = 2, .src =
+        \\trait Same { async fn same(self, o: Entity) -> bool }
+        \\component L { to: Entity, n: int = 0 }
+        \\impl Same for Entity {
+        \\  async fn same(self, o: Entity) -> bool {
+        \\    self == o
+        \\  }
+        \\}
+        \\fn pick(e: Entity) -> Entity {
+        \\  e
+        \\}
+        \\async rule r(entity: Entity) when entity has L {
+        \\  let s = await pick(entity).same(entity.get(L).to)
+        \\  entity.get_mut(L).n = if s { 1 } else { 2 }
+        \\}
+        },
+    };
+    for (cases) |c| {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa, c.src);
+        defer pr.deinit(gpa);
+        try std.testing.expect(pr.diagnostics.len == 0);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const cid = world.registry.idOf("L").?;
+        const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+        const report = try interp.runFor(&world, 1);
+        try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+        var n: i64 = 0;
+        @memcpy(std.mem.asBytes(&n), componentBytes(&world, eid, cid)[8..16]);
+        try std.testing.expectEqual(c.n, n);
+    }
+}
+
+test "a call whose argument throws runs nothing, sync and async" {
+    const gpa = std.testing.allocator;
+    const srcs = [_][:0]const u8{
+        \\fn risky(n: int) throws -> int {
+        \\  if n > 2 {
+        \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+        \\  }
+        \\  return n * 10
+        \\}
+        \\component C { v: int = 0 }
+        \\fn mark(n: int) throws {
+        \\  throw Error { message: "ran", code: ErrorCode.io_fail }
+        \\}
+        \\rule r(entity: Entity) when entity has C {
+        \\  try {
+        \\    mark(risky(5))
+        \\  } catch err {
+        \\    entity.get_mut(C).v = err.message.len()
+        \\  }
+        \\}
+        ,
+        \\fn risky(n: int) throws -> int {
+        \\  if n > 2 {
+        \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+        \\  }
+        \\  return n * 10
+        \\}
+        \\component C { v: int = 0 }
+        \\async fn mark(n: int) throws {
+        \\  throw Error { message: "ran", code: ErrorCode.io_fail }
+        \\}
+        \\async rule r(entity: Entity) when entity has C {
+        \\  try {
+        \\    await mark(risky(5))
+        \\  } catch err {
+        \\    entity.get_mut(C).v = err.message.len()
+        \\  }
+        \\}
+        ,
+        \\fn risky(n: int) throws -> int {
+        \\  if n > 2 {
+        \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+        \\  }
+        \\  return n * 10
+        \\}
+        \\component C { v: int = 0 }
+        \\trait Mark { async fn mark(self, n: int) throws }
+        \\impl Mark for Entity {
+        \\  async fn mark(self, n: int) throws {
+        \\    throw Error { message: "ran", code: ErrorCode.io_fail }
+        \\  }
+        \\}
+        \\async rule r(entity: Entity) when entity has C {
+        \\  try {
+        \\    await entity.mark(risky(5))
+        \\  } catch err {
+        \\    entity.get_mut(C).v = err.message.len()
+        \\  }
+        \\}
+        ,
+    };
+    for (srcs) |src| {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try checkCleanProgram(gpa, src);
+        defer pr.deinit(gpa);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const cid = world.registry.idOf("C").?;
+        const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+        const report = try interp.runFor(&world, 1);
+        try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+        var v: i64 = 0;
+        @memcpy(std.mem.asBytes(&v), componentBytes(&world, eid, cid)[0..8]);
+        try std.testing.expectEqual(@as(i64, 4), v);
+    }
+}
+
+test "an extension name argument is evaluated once" {
+    const gpa = std.testing.allocator;
+    var pr = try checkCleanProgram(gpa,
+        \\component C { n: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let mut k = 0
+        \\  let h = entity.has_extension({
+        \\    k += 1
+        \\    "X"
+        \\  })
+        \\  entity.get_mut(C).n = if h { 100 } else { k }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("C").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    var n: i64 = 0;
+    @memcpy(std.mem.asBytes(&n), componentBytes(&world, eid, cid)[0..8]);
+    try std.testing.expectEqual(@as(i64, 1), n);
+}
+
 const value_runs = [_]ScopeRun{
     .{ .name = "a struct read into a binding is a copy", .out = 12, .src = value_prelude ++
         \\rule r() when resource Out {
@@ -19650,14 +20028,31 @@ const cow_runs = [_]ScopeRun{
         \\  }
         \\}
     },
-    .{ .name = "a push whose argument rebinds its receiver leaves the resource", .out = 3, .src = cow_prelude ++
+    .{ .name = "a push whose argument rebinds its receiver pushes onto what it bound", .out = 32, .src = cow_prelude ++
         \\rule r() when resource Out and resource R {
         \\  let mut ys = get(R).xs
         \\  ys.push({
         \\    ys = [9]
         \\    2
         \\  })
-        \\  get_mut(Out).n = get(R).xs.len()
+        \\  get_mut(Out).n = get(R).xs.len() * 10 + ys.len()
+        \\}
+    },
+    .{ .name = "a push whose argument replaces the resource collection lands in the new one", .out = 327, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let snap = get(R).xs
+        \\  get_mut(R).xs.push({
+        \\    get_mut(R).xs = [7]
+        \\    4
+        \\  })
+        \\  get_mut(Out).n = snap.len() * 100 + get(R).xs.len() * 10 + get(R).xs[0]
+        \\}
+    },
+    .{ .name = "a push whose argument copies its receiver on write lands in that copy", .out = 33, .src = cow_prelude ++
+        \\rule r() when resource Out and resource R {
+        \\  let mut ys = get(R).xs
+        \\  ys.push(ys.pop() ?? 0)
+        \\  get_mut(Out).n = get(R).xs.len() * 10 + ys.len()
         \\}
     },
     .{ .name = "a push to a resource collection marks the resource changed", .out = 3, .ticks = 5, .src = cow_prelude ++
@@ -19820,14 +20215,14 @@ const index_runs = [_]ScopeRun{
         \\  get_mut(Out).n = get(R).xs.len() * 10 + a[0].len()
         \\}
     },
-    .{ .name = "a push whose argument removes its receiver element leaves the resource", .out = 30, .src = cow_prelude ++
+    .{ .name = "an index write whose index removes its receiver element leaves the resource", .out = 130, .src = cow_prelude ++
         \\rule r() when resource Out and resource R {
         \\  let mut a: int[][] = [get(R).xs]
-        \\  a[0].push({
+        \\  a[0][{
         \\    let p = a.pop()
-        \\    1
-        \\  })
-        \\  get_mut(Out).n = get(R).xs.len() * 10 + a.len()
+        \\    0
+        \\  }] = 5
+        \\  get_mut(Out).n = get(R).xs[0] * 100 + get(R).xs.len() * 10 + a.len()
         \\}
     },
     .{ .name = "a resource map entry inserted by index", .out = 3, .src = cow_prelude ++
