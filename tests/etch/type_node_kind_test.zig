@@ -122,6 +122,13 @@ test "the codegen refuses an optional fn return" {
     );
 }
 
+test "the codegen refuses a set built from a binding, even unread" {
+    try std.testing.expectError(
+        error.UnsupportedConstruct,
+        lowerSource(std.testing.allocator, "rule r() {\n  let xs: int[] = [1]\n  let s: Set<int> = Set.from(xs)\n}", true),
+    );
+}
+
 test "the codegen refuses an anonymous literal under an optional annotation" {
     try std.testing.expectError(
         error.UnsupportedConstruct,

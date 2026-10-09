@@ -857,11 +857,10 @@ fn exprCanThrow(ast: *const AstArena, expr: NodeId) bool {
     }
 }
 
-/// Whether a statement run references identifier `name` — drives the `_ = <name>;`
-/// discard for an unused catch binding (Zig rejects unused captures). An inner
-/// rebinding of the same name counts as a use (over-approximation): the discard is then
-/// skipped and Zig fails loud on the unused outer capture — an exotic shadowing shape,
-/// never a silent divergence.
+/// Whether a statement run names `name` where its emitted Zig does: drives the
+/// discard of a binding nothing names — a `let`, a catch binding, a map loop's
+/// key or value. An inner binding of the same name counts as a use of the outer
+/// one.
 fn stmtRunUsesIdent(ast: *const AstArena, name: StringId, start: u32, len: u32) bool {
     var s: u32 = 0;
     while (s < len) : (s += 1) {
@@ -876,8 +875,9 @@ fn stmtUsesIdent(ast: *const AstArena, name: StringId, stmt_id: NodeId) bool {
         .throw_stmt => return exprUsesIdent(ast, name, ast.throw_stmts.items[data].value),
         .try_catch_stmt => {
             const tc = ast.try_catch_stmts.items[data];
+            // A try body that cannot throw is emitted without its catch body.
             return stmtRunUsesIdent(ast, name, tc.try_start, tc.try_len) or
-                stmtRunUsesIdent(ast, name, tc.catch_start, tc.catch_len);
+                (stmtRunCanThrow(ast, tc.try_start, tc.try_len) and stmtRunUsesIdent(ast, name, tc.catch_start, tc.catch_len));
         },
         .let_stmt => return exprUsesIdent(ast, name, ast.let_stmts.items[data].value),
         .assign_stmt => {
@@ -918,6 +918,16 @@ fn exprUsesIdent(ast: *const AstArena, name: StringId, expr: NodeId) bool {
     const data = ast.exprData(expr);
     switch (ast.exprKind(expr)) {
         .ident => return data == name,
+        .some_lit => return exprUsesIdent(ast, name, @bitCast(data)),
+        .map_lit => {
+            const ml = ast.map_lits.items[data];
+            var i: u32 = 0;
+            while (i < ml.entries_len) : (i += 1) {
+                const entry = ast.map_entries.items[ml.entries_start + i];
+                if (exprUsesIdent(ast, name, entry.key) or exprUsesIdent(ast, name, entry.value)) return true;
+            }
+            return false;
+        },
         .fn_call => {
             const call = ast.call_exprs.items[data];
             if (exprUsesIdent(ast, name, call.callee)) return true;
@@ -1217,7 +1227,7 @@ fn emitMethod(w: *Writer, ast: *const AstArena, struct_name: []const u8, method:
     w.indentBy(1);
     var s: u32 = 0;
     while (s < method.body_len) : (s += 1) {
-        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[method.body_start + s]));
+        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[method.body_start + s]), restAfter(method.body_start, method.body_len, s, method.value));
     }
     if (!method.value.isNone()) {
         try w.writeIndent();
@@ -1546,7 +1556,7 @@ fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenErr
     body_w.arena_used = w.arena_used;
     var s: u32 = 0;
     while (s < decl.body_len) : (s += 1) {
-        try emitStmt(&body_w, ast, &ctx, @bitCast(ast.extra.items[decl.body_start + s]));
+        try emitStmt(&body_w, ast, &ctx, @bitCast(ast.extra.items[decl.body_start + s]), restAfter(decl.body_start, decl.body_len, s, decl.value));
     }
     // Trailing block value = implicit return.
     if (!decl.value.isNone()) {
@@ -1721,7 +1731,7 @@ fn emitObserverRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDec
     }
     var s: u32 = 0;
     while (s < rule.body_len) : (s += 1) {
-        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[rule.body_start + s]));
+        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[rule.body_start + s]), restAfter(rule.body_start, rule.body_len, s, NodeId.none));
     }
 
     w.indentBy(-1);
@@ -2286,7 +2296,7 @@ fn emitRuleBodyOnce(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, in
     while (s < rule.body_len) : (s += 1) {
         const stmt_raw = ast.extra.items[rule.body_start + s];
         const stmt_id: NodeId = @bitCast(stmt_raw);
-        try emitStmt(w, ast, &ctx, stmt_id);
+        try emitStmt(w, ast, &ctx, stmt_id, restAfter(rule.body_start, rule.body_len, s, NodeId.none));
     }
 }
 
@@ -2313,7 +2323,7 @@ fn emitRuleBody(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: 
     while (s < rule.body_len) : (s += 1) {
         const stmt_raw = ast.extra.items[rule.body_start + s];
         const stmt_id: NodeId = @bitCast(stmt_raw);
-        try emitStmt(w, ast, &ctx, stmt_id);
+        try emitStmt(w, ast, &ctx, stmt_id, restAfter(rule.body_start, rule.body_len, s, NodeId.none));
     }
 }
 
@@ -2342,7 +2352,7 @@ fn emitRuleBodyQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, i
     while (s < rule.body_len) : (s += 1) {
         const stmt_raw = ast.extra.items[rule.body_start + s];
         const stmt_id: NodeId = @bitCast(stmt_raw);
-        try emitStmt(w, ast, &ctx, stmt_id);
+        try emitStmt(w, ast, &ctx, stmt_id, restAfter(rule.body_start, rule.body_len, s, NodeId.none));
     }
 }
 
@@ -2619,13 +2629,26 @@ const LocalCtx = struct {
     }
 };
 
-fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) CodegenError!void {
+/// The statements after a statement in its run, and the value the run ends
+/// with: where a binding the statement declares can be named.
+const RunRest = struct { start: u32, len: u32, tail: NodeId };
+
+fn restAfter(start: u32, len: u32, s: u32, tail: NodeId) RunRest {
+    return .{ .start = start + s + 1, .len = len - s - 1, .tail = tail };
+}
+
+fn restUsesIdent(ast: *const AstArena, name: StringId, rest: RunRest) bool {
+    return stmtRunUsesIdent(ast, name, rest.start, rest.len) or
+        (!rest.tail.isNone() and exprUsesIdent(ast, name, rest.tail));
+}
+
+fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId, rest: RunRest) CodegenError!void {
     const kind = ast.stmtKind(stmt_id);
     const data = ast.stmtData(stmt_id);
     switch (kind) {
         .let_stmt => {
             const let = ast.let_stmts.items[data];
-            try emitLet(w, ast, ctx, let);
+            try emitLet(w, ast, ctx, let, rest);
         },
         .assign_stmt => try emitAssign(w, ast, ctx, data),
         .expr_stmt => {
@@ -2728,7 +2751,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try ctx.records.append(w.gpa, .{ .key = .{ .name = f.var_name }, .info = .{ .kind = .value, .zig_type = "i64", .is_mut = false } });
                 var s: u32 = 0;
                 while (s < f.body_len) : (s += 1) {
-                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]));
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]), restAfter(f.body_start, f.body_len, s, NodeId.none));
                 }
                 ctx.records.items.len = saved;
                 w.indentBy(-1);
@@ -2773,7 +2796,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try ctx.records.append(w.gpa, .{ .key = .{ .name = f.index_name }, .info = .{ .kind = .value, .zig_type = kv.value, .is_mut = false } });
                 var s: u32 = 0;
                 while (s < f.body_len) : (s += 1) {
-                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]));
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]), restAfter(f.body_start, f.body_len, s, NodeId.none));
                 }
                 ctx.records.items.len = saved;
                 w.indentBy(-1);
@@ -2799,7 +2822,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try ctx.records.append(w.gpa, .{ .key = .{ .name = f.var_name }, .info = .{ .kind = .value, .zig_type = dyn_elem orelse "", .is_mut = false } });
                 var s: u32 = 0;
                 while (s < f.body_len) : (s += 1) {
-                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]));
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]), restAfter(f.body_start, f.body_len, s, NodeId.none));
                 }
                 ctx.records.items.len = saved;
                 w.indentBy(-1);
@@ -2828,7 +2851,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             w.indentBy(1);
             var s: u32 = 0;
             while (s < wh.body_len) : (s += 1) {
-                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[wh.body_start + s]));
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[wh.body_start + s]), restAfter(wh.body_start, wh.body_len, s, NodeId.none));
             }
             ctx.records.items.len = saved;
             w.indentBy(-1);
@@ -2948,7 +2971,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             var s: u32 = 0;
             if (!stmtRunCanThrow(ast, tc.try_start, tc.try_len)) {
                 while (s < tc.try_len) : (s += 1) {
-                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.try_start + s]));
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.try_start + s]), restAfter(tc.try_start, tc.try_len, s, NodeId.none));
                 }
                 return;
             }
@@ -2958,7 +2981,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             const saved_label = ctx.try_label;
             ctx.try_label = data;
             while (s < tc.try_len) : (s += 1) {
-                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.try_start + s]));
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.try_start + s]), restAfter(tc.try_start, tc.try_len, s, NodeId.none));
             }
             ctx.try_label = saved_label;
             w.indentBy(-1);
@@ -2978,7 +3001,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             try ctx.records.append(w.gpa, .{ .key = .{ .name = tc.catch_name }, .info = .{ .kind = .value, .zig_type = "Error", .is_mut = false } });
             s = 0;
             while (s < tc.catch_len) : (s += 1) {
-                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.catch_start + s]));
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.catch_start + s]), restAfter(tc.catch_start, tc.catch_len, s, NodeId.none));
             }
             ctx.records.items.len = saved_records;
             w.indentBy(-1);
@@ -3039,8 +3062,12 @@ fn emitThrowsCallExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, call: as
     try w.print("&__terr_{d})", .{call_idx});
 }
 
-fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStmt) CodegenError!void {
+fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStmt, rest: RunRest) CodegenError!void {
     const value_kind = ast.exprKind(let.value);
+    // A binding the rest of its scope never names is not declared: its value
+    // is evaluated and discarded, or not emitted when it is an empty
+    // collection.
+    const named = restUsesIdent(ast, let.name, rest);
     if (value_kind == .method_get or value_kind == .method_get_mut) {
         // `let h = entity.get(T)` / `let h = entity.get_mut(T)` — bind the
         // ident to the component alias. The emitted code is a comment to
@@ -3086,6 +3113,12 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             if (value_kind == .method_get_mut) "get_mut" else "get",
             cname,
         });
+        if (!named) {
+            try w.writeIndent();
+            try w.write("_ = ");
+            try emitComponentSlot(w, ctx, cname);
+            try w.write(";\n");
+        }
         return;
     }
 
@@ -3100,10 +3133,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         const call = ast.call_exprs.items[call_idx];
         if (throwsCalleeDecl(ast, ctx, call)) |callee| {
             try w.printLine("var __terr_{d}: ?Error = null;", .{call_idx});
-            try w.writeIndent();
-            try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
-            try w.ident(ast.strings.slice(let.name));
-            try w.write(" = ");
+            try emitLetHead(w, ast, let.name, named, let.is_mut);
             try emitThrowsCallExpr(w, ast, ctx, call, call_idx);
             try w.write(";\n");
             const ret_zig = if (callee.return_type.isNone()) "" else try fnTypeZig(ast, callee.return_type);
@@ -3124,10 +3154,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             // default (the interpreter binds unit) and control transfers
             // before any use — observably identical.
             try w.printLine("var __terr_{d}: ?Error = null;", .{call_idx});
-            try w.writeIndent();
-            try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
-            try w.ident(ast.strings.slice(let.name));
-            try w.write(" = ");
+            try emitLetHead(w, ast, let.name, named, let.is_mut);
             try emitExpr(w, ast, ctx, call.callee);
             try w.write(".call(");
             var i: u32 = 0;
@@ -3157,6 +3184,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         if (ast.exprKind(let.value) != .array_lit) return CodegenError.UnsupportedConstruct;
         const al = ast.array_lits.items[ast.exprData(let.value)];
         if (al.is_fill) return CodegenError.UnsupportedConstruct;
+        if (!named and al.elements_len == 0) return;
         try w.writeIndent();
         try w.print("{s} ", .{if (let.is_mut or al.elements_len > 0) "var" else "const"});
         try w.ident(ast.strings.slice(let.name));
@@ -3202,6 +3230,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
     if (map_list_t) |list_t| {
         if (ast.exprKind(let.value) != .map_lit) return CodegenError.UnsupportedConstruct;
         const ml = ast.map_lits.items[ast.exprData(let.value)];
+        if (!named and ml.entries_len == 0) return;
         try w.writeIndent();
         try w.print("{s} ", .{if (let.is_mut or ml.entries_len > 0) "var" else "const"});
         try w.ident(ast.strings.slice(let.name));
@@ -3257,15 +3286,15 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
     };
     if (set_list_t) |list_t| {
         const call = setCallOf(ast, let.value) orelse return CodegenError.UnsupportedConstruct;
-        const seeded = call == .from and ast.exprKind(call.from) == .array_lit and ast.array_lits.items[ast.exprData(call.from)].elements_len > 0;
+        if (call == .from and (ast.exprKind(call.from) != .array_lit or ast.array_lits.items[ast.exprData(call.from)].is_fill)) return CodegenError.UnsupportedConstruct;
+        const seeded = call == .from and ast.array_lits.items[ast.exprData(call.from)].elements_len > 0;
+        if (!named and !seeded) return;
         try w.writeIndent();
         try w.print("{s} ", .{if (let.is_mut or seeded) "var" else "const"});
         try w.ident(ast.strings.slice(let.name));
         try w.print(": {s} = .empty;\n", .{list_t});
         if (call == .from) {
-            if (ast.exprKind(call.from) != .array_lit) return CodegenError.UnsupportedConstruct;
             const al = ast.array_lits.items[ast.exprData(call.from)];
-            if (al.is_fill) return CodegenError.UnsupportedConstruct;
             if (al.elements_len > 0) {
                 const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
                 w.arena_used = true;
@@ -3296,10 +3325,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             const annotated = ast.namedTypeName(let.type_annotation) orelse return CodegenError.UnsupportedConstruct;
             const sname = ast.resolveTypeAliasName(annotated);
             if (!isStructName(ast, sname)) return CodegenError.UnsupportedConstruct;
-            try w.writeIndent();
-            try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
-            try w.ident(ast.strings.slice(let.name));
-            try w.write(" = ");
+            try emitLetHead(w, ast, let.name, named, let.is_mut);
             try emitStructLitAs(w, ast, ctx, sl, sname);
             try w.write(";\n");
             try ctx.records.append(w.gpa, .{
@@ -3313,6 +3339,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
     // Plain-value let. Try to infer the Zig type so the binding is annotated
     // when possible (helps Zig's int-literal coercion).
     const zig_t = inferZigType(ast, ctx, let.value, let.type_annotation);
+    if (!named) return emitLetDiscard(w, ast, ctx, let.value, zig_t);
 
     const keyword = if (let.is_mut) "var" else "const";
     try w.writeIndent();
@@ -3355,6 +3382,27 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             },
         },
     });
+}
+
+/// The head of a `let`: `const name = `, `var name = ` when `mutable`, or
+/// `_ = ` when nothing names the binding.
+fn emitLetHead(w: *Writer, ast: *const AstArena, name: StringId, named: bool, mutable: bool) CodegenError!void {
+    try w.writeIndent();
+    if (!named) return w.write("_ = ");
+    try w.print("{s} ", .{if (mutable) "var" else "const"});
+    try w.ident(ast.strings.slice(name));
+    try w.write(" = ");
+}
+
+/// `_ = <value>;` for a `let` nothing names, under the type its binding would
+/// have had, or through its address when it has no Zig type: a bare
+/// `_ = name;` marks `name` discarded, which Zig refuses for a binding also
+/// read.
+fn emitLetDiscard(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, value: NodeId, zig_t: []const u8) CodegenError!void {
+    try w.writeIndent();
+    if (zig_t.len > 0) try w.print("_ = @as({s}, ", .{zig_t}) else try w.write("_ = &(");
+    try emitExpr(w, ast, ctx, value);
+    try w.write(");\n");
 }
 
 /// An assignment, its right-hand side evaluated before its place
@@ -3860,7 +3908,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 w.indentBy(1);
                 var s: u32 = 0;
                 while (s < body_blk.body_len) : (s += 1) {
-                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[body_blk.body_start + s]));
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[body_blk.body_start + s]), restAfter(body_blk.body_start, body_blk.body_len, s, body_blk.value));
                 }
                 if (!body_blk.value.isNone()) {
                     try w.writeIndent();
@@ -4130,7 +4178,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             w.indentBy(1);
             var s: u32 = 0;
             while (s < lp.body_len) : (s += 1) {
-                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[lp.body_start + s]));
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[lp.body_start + s]), restAfter(lp.body_start, lp.body_len, s, NodeId.none));
             }
             w.indentBy(-1);
             try w.writeIndent();
@@ -4496,7 +4544,7 @@ fn emitArmBodyAsStmts(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, body: No
         const blk = ast.block_exprs.items[ast.exprData(body)];
         var s: u32 = 0;
         while (s < blk.body_len) : (s += 1) {
-            try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]));
+            try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]), restAfter(blk.body_start, blk.body_len, s, blk.value));
         }
         if (!blk.value.isNone()) {
             try w.writeIndent();
@@ -4538,7 +4586,7 @@ fn emitBlockExprValue(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u3
     w.indentBy(1);
     var s: u32 = 0;
     while (s < blk.body_len) : (s += 1) {
-        try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]));
+        try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]), restAfter(blk.body_start, blk.body_len, s, blk.value));
     }
     try w.writeIndent();
     try w.print("break :__bex{d} ", .{data});
@@ -4562,7 +4610,7 @@ fn emitBraceBlock(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) C
     w.indentBy(1);
     var s: u32 = 0;
     while (s < blk.body_len) : (s += 1) {
-        try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]));
+        try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]), restAfter(blk.body_start, blk.body_len, s, blk.value));
     }
     if (!blk.value.isNone()) {
         try w.writeIndent();
