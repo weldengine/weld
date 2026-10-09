@@ -18479,6 +18479,53 @@ test "an empty array literal takes the array its slot expects, else is E0207" {
     try std.testing.expectEqual(@as(usize, 0), wrong);
 }
 
+const optional_element_accepted = [_]UnitCase{
+    .{ .name = "anonymous elements and none in an array of optionals", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let os: P?[] = [.{ x: 1 }, none]\n}" },
+    .{ .name = "anonymous elements and none pushed onto optionals", .code = .type_mismatch, .src = "struct P { x: int = 0 }\nrule r() {\n  let mut os: P?[] = []\n  os.push(.{ x: 1 })\n  os.push(none)\n}" },
+    .{ .name = "a fixed array of optionals", .code = .type_mismatch, .src = "rule r() {\n  let a: int?[3] = [1, none, 3]\n  let v: int = a[1] ?? 0\n}" },
+    .{ .name = "an optional of an array of optionals", .code = .type_mismatch, .src = "rule r() {\n  let a: int?[]? = some([1, none])\n  let b: int?[]? = none\n}" },
+    .{ .name = "fixed arrays of optionals compared and keyed", .code = .type_mismatch, .src = "rule r() {\n  let a: int?[2] = [1, none]\n  let b: int?[2] = [1, none]\n  let e = a == b\n  let m: [int?[2]: int] = [:]\n}" },
+    .{ .name = "a map of arrays of optionals and an array of maps", .code = .type_mismatch, .src = "rule r() {\n  let m: [int: int?[]] = [1: [none]]\n  let g: [int: int][] = [[1: 2]]\n}" },
+    .{ .name = "a generic fn over an array of optionals", .code = .type_mismatch, .src = "fn first<T>(xs: T?[]) -> T? {\n  xs[0]\n}\nrule r() {\n  let a: int?[] = [1, none]\n  let v: int? = first(a)\n}" },
+    .{ .name = "optional fixed elements of their length", .code = .type_mismatch, .src = "rule r() {\n  let a: int[2]?[] = [[1, 2], none]\n}" },
+    .{ .name = "an empty literal under an array of optionals", .code = .type_mismatch, .src = "rule r() {\n  let e: int?[] = []\n}" },
+    .{ .name = "empty and none elements under optional arrays", .code = .type_mismatch, .src = "rule r() {\n  let a: int[]?[] = [[], none]\n}" },
+};
+
+const optional_element_refused = [_]PlaceCase{
+    .{ .name = "an array of optionals into an array of its payload", .code = .type_mismatch, .needle = "initializer", .src = "rule r() {\n  let a: int?[] = [1, none]\n  let b: int[] = a\n}" },
+    .{ .name = "a dynamic array of optionals compared", .code = .type_mismatch, .needle = "equality", .src = "rule r() {\n  let a: int?[] = [1]\n  let e = a == a\n}" },
+    .{ .name = "a dynamic array of optionals as a key", .code = .bound_not_satisfied, .needle = "Hash", .src = "rule r() {\n  let m: [int?[]: int] = [:]\n}" },
+    .{ .name = "a literal of another length into optional fixed elements", .code = .type_mismatch, .needle = "initializer", .src = "rule r() {\n  let a: int[2]?[] = [[1, 2, 3]]\n}" },
+    .{ .name = "a value of another payload pushed onto optionals", .code = .type_mismatch, .needle = "pushed", .src = "rule r() {\n  let mut xs: int?[] = []\n  xs.push(1.5)\n}" },
+};
+
+test "an optional composes with an array" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (optional_element_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
+            wrong += 1;
+            std.debug.print("accepted {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    for (optional_element_refused) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 1 or countMessage(r.diagnostics.items, c.code, c.needle) != 1) {
+            wrong += 1;
+            std.debug.print("refused {s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
 const closure_body_refused = [_]PlaceCase{
     .{ .name = "an uncalled closure writing a captured struct's field", .code = .closure_cannot_mutate_capture, .needle = "captured", .src = "struct P { x: int = 0 }\nrule r() {\n  let mut p = P { x: 1 }\n  let f = |v: int| { p.x = v }\n}" },
     .{ .name = "an uncalled closure binding an int as a string", .code = .type_mismatch, .needle = "let initializer", .src = "rule r() {\n  let f = |v: int| {\n    let s: string = v\n  }\n}" },

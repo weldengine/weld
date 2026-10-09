@@ -3063,6 +3063,11 @@ fn emitThrowsCallExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, call: as
 }
 
 fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStmt, rest: RunRest) CodegenError!void {
+    // An optional whose payload is no named type (`int[2]?`) has no Zig
+    // spelling here.
+    if (!let.type_annotation.isNone() and ast.typeNodeKind(let.type_annotation) == .optional and
+        ast.namedTypeName(@bitCast(ast.typeNodeData(let.type_annotation))) == null)
+        return CodegenError.UnsupportedConstruct;
     const value_kind = ast.exprKind(let.value);
     // A binding the rest of its scope never names is not declared: its value
     // is evaluated and discarded, or not emitted when it is an empty
@@ -3762,8 +3767,13 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             const first: NodeId = @bitCast(ast.extra.items[al.elements_start]);
             const elem_zig = inferExprZigType(ast, ctx, first);
             // An element type the inference cannot name — a nested collection,
-            // an optional, a component read — has no Zig spelling here.
+            // an optional, a component read — has no Zig spelling here, nor has
+            // an array whose first element the checker wraps into an optional,
+            // or whose later one it wraps where the first is no optional.
             if (elem_zig.len == 0 or std.mem.eql(u8, elem_zig, "struct")) return CodegenError.UnsupportedConstruct;
+            for (ast.extra.items[al.elements_start..][0..al.elements_len], 0..) |e, i| {
+                if (ast.implicit_wraps.contains(e) and (i == 0 or elem_zig[0] != '?')) return CodegenError.UnsupportedConstruct;
+            }
             if (al.is_fill) {
                 try w.print("[_]{s}{{", .{elem_zig});
                 try emitExpr(w, ast, ctx, first);

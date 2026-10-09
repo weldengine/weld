@@ -1236,38 +1236,36 @@ pub const Parser = struct {
     fn parseType(self: *Parser) ParseError!NodeId {
         // Map sugar `[K : V]` (collections, `etch-grammar.md` §278): a
         // type beginning with `[` is always a map type — array / slice are the
-        // postfix `T[...]` form handled below.
-        if (self.peek() == .lbracket) {
-            return try self.parseOptionalSuffix(try self.parseMapTypeSugar());
-        }
-        var base = try self.parseBaseType();
-        // Postfix `T[N]` (fixed) / `T[]` (dynamic slice) array types
-        // (`etch-grammar.md` §264), left-associative so `T[2][3]` nests.
-        while (self.peek() == .lbracket) {
-            _ = try self.advance(); // '['
-            var size: NodeId = NodeId.none;
-            if (self.peek() != .rbracket) {
-                size = try self.parseExpr(0);
-            }
-            const closing = try self.expect(.rbracket, "expected ']' to close array type");
-            const base_span = self.arena.typeNodeSpan(base);
-            base = try self.arena.addArrayType(self.gpa, base, size, .{
-                .byte_start = base_span.byte_start,
-                .byte_end = closing.span.byte_end,
-            });
-        }
-        return try self.parseOptionalSuffix(base);
+        // postfix `T[...]` form.
+        const base = if (self.peek() == .lbracket) try self.parseMapTypeSugar() else try self.parseBaseType();
+        return self.parseTypeSuffixes(base);
     }
 
-    /// `base`, or `base?` (`etch-grammar.md` §267).
-    fn parseOptionalSuffix(self: *Parser, base: NodeId) ParseError!NodeId {
-        if (self.peek() != .question) return base;
-        const q = try self.advance();
-        const base_span = self.arena.typeNodeSpan(base);
-        return try self.arena.addOptionalType(self.gpa, base, .{
-            .byte_start = base_span.byte_start,
-            .byte_end = q.span.byte_end,
-        });
+    /// `base` and its postfix `[N]`, `[]` and `?` (`etch-grammar.md` §264,
+    /// §267), in any order, each wrapping the type before it; a `?` never
+    /// follows a `?`, and `??` is the coalescing operator.
+    fn parseTypeSuffixes(self: *Parser, base: NodeId) ParseError!NodeId {
+        const start = self.arena.typeNodeSpan(base).byte_start;
+        var t = base;
+        var after_optional = false;
+        while (true) {
+            switch (self.peek()) {
+                .lbracket => {
+                    _ = try self.advance(); // '['
+                    const size: NodeId = if (self.peek() == .rbracket) NodeId.none else try self.parseExpr(0);
+                    const closing = try self.expect(.rbracket, "expected ']' to close array type");
+                    t = try self.arena.addArrayType(self.gpa, t, size, .{ .byte_start = start, .byte_end = closing.span.byte_end });
+                    after_optional = false;
+                },
+                .question => {
+                    if (after_optional) return t;
+                    const q = try self.advance();
+                    t = try self.arena.addOptionalType(self.gpa, t, .{ .byte_start = start, .byte_end = q.span.byte_end });
+                    after_optional = true;
+                },
+                else => return t,
+            }
+        }
     }
 
     /// Parse a base type: a primitive / engine / user type identifier, with
@@ -8426,6 +8424,122 @@ test "parser builds optional type + none/some + if let / while let" {
     }
     try std.testing.expectEqual(@as(usize, 1), if_let_bindings);
     try std.testing.expect(result.ast.while_stmts.items[0].let_binding != 0);
+}
+
+/// The shape the parser gave the type node `node`.
+fn typeShape(gpa: std.mem.Allocator, a: *const AstArena, node: NodeId, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    const data = a.typeNodeData(node);
+    switch (a.typeNodeKind(node)) {
+        .named => return out.appendSlice(gpa, a.strings.slice(a.namedTypeName(node).?)),
+        .optional => {
+            try out.appendSlice(gpa, "opt(");
+            try typeShape(gpa, a, @bitCast(data), out);
+        },
+        .slice, .array => {
+            try out.appendSlice(gpa, if (a.typeNodeKind(node) == .slice) "dyn(" else "fix(");
+            try typeShape(gpa, a, a.array_types.items[data].elem, out);
+        },
+        .map_type => {
+            try out.appendSlice(gpa, "map(");
+            try typeShape(gpa, a, a.map_types.items[data].key, out);
+            try out.append(gpa, ',');
+            try typeShape(gpa, a, a.map_types.items[data].value, out);
+        },
+        .set_type => {
+            try out.appendSlice(gpa, "set(");
+            try typeShape(gpa, a, a.set_types.items[data].elem, out);
+        },
+        else => return out.appendSlice(gpa, "<other>"),
+    }
+    try out.append(gpa, ')');
+}
+
+test "parser composes the array and optional type suffixes in any order" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { src: []const u8, shape: []const u8 }{
+        .{ .src = "type A = int?[]", .shape = "dyn(opt(int))" },
+        .{ .src = "type A = int[]?", .shape = "opt(dyn(int))" },
+        .{ .src = "type A = int?[3]", .shape = "fix(opt(int))" },
+        .{ .src = "type A = int[3][]?", .shape = "opt(dyn(fix(int)))" },
+        .{ .src = "type A = int?[]?", .shape = "opt(dyn(opt(int)))" },
+        .{ .src = "type A = int?[2]?[]", .shape = "dyn(opt(fix(opt(int))))" },
+        .{ .src = "type A = int[2][3]", .shape = "fix(fix(int))" },
+        .{ .src = "type A = [int: int?[]]", .shape = "map(int,dyn(opt(int)))" },
+        .{ .src = "type A = [int: int][]", .shape = "dyn(map(int,int))" },
+        .{ .src = "type A = [int: int]?[]", .shape = "dyn(opt(map(int,int)))" },
+        .{ .src = "type A = Set<int?>[]", .shape = "dyn(set(opt(int)))" },
+    };
+    for (cases) |c| {
+        var result = try parseClean(gpa, c.src);
+        defer result.deinit(gpa);
+        var shape: std.ArrayListUnmanaged(u8) = .empty;
+        defer shape.deinit(gpa);
+        try typeShape(gpa, &result.ast, result.ast.type_alias_decls.items[0].target, &shape);
+        try std.testing.expectEqualStrings(c.shape, shape.items);
+    }
+}
+
+test "parser refuses an optional suffix directly after one" {
+    const gpa = std.testing.allocator;
+    for ([_][]const u8{ "type A = int??", "type A = int? ?", "type A = int?[]??", "type A = [int: int]? ?" }) |src| {
+        var result = try parse(gpa, src);
+        defer result.deinit(gpa);
+        try std.testing.expect(result.diagnostics.len > 0);
+    }
+}
+
+test "parser spans each type suffix from its base" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { src: []const u8, outer: []const u8, inner: []const u8 }{
+        .{ .src = "type A = int?[3]", .outer = "int?[3]", .inner = "int?" },
+        .{ .src = "type A = [int: int]?[]", .outer = "[int: int]?[]", .inner = "[int: int]?" },
+    };
+    for (cases) |c| {
+        var result = try parseClean(gpa, c.src);
+        defer result.deinit(gpa);
+        const outer = result.ast.type_alias_decls.items[0].target;
+        const inner = result.ast.array_types.items[result.ast.typeNodeData(outer)].elem;
+        const outer_span = result.ast.typeNodeSpan(outer);
+        const inner_span = result.ast.typeNodeSpan(inner);
+        try std.testing.expectEqualStrings(c.outer, c.src[outer_span.byte_start..outer_span.byte_end]);
+        try std.testing.expectEqualStrings(c.inner, c.src[inner_span.byte_start..inner_span.byte_end]);
+    }
+}
+
+test "parser reads a suffixed type at every position a type is written" {
+    const gpa = std.testing.allocator;
+    var result = try parseClean(gpa,
+        \\struct P { x: int = 0 }
+        \\struct S { o: int?[]? = none }
+        \\struct Box<T> { v: T }
+        \\component C { a: int?[3] }
+        \\resource R { xs: int?[] }
+        \\event E { xs: int?[] }
+        \\enum V { one(int?[], P?) }
+        \\type A = int?[]
+        \\const K: int?[2] = [1, none]
+        \\fn f(xs: int?[], m: [int: P?[]], b: Box<int?[]>) -> int?[]? {
+        \\  none
+        \\}
+        \\rule g(xs: int?[]) {
+        \\  let a: int?[] = []
+        \\  let c = |ys: int?[]| ys.len()
+        \\  let d = 1 as int?[]
+        \\}
+    );
+    defer result.deinit(gpa);
+    const a = &result.ast;
+    var optional_elements: usize = 0;
+    for (0..a.type_nodes.len) |i| {
+        const node: NodeId = .{ .category = .type_node, .index = @intCast(i) };
+        switch (a.typeNodeKind(node)) {
+            .array, .slice => if (a.typeNodeKind(a.array_types.items[a.typeNodeData(node)].elem) == .optional) {
+                optional_elements += 1;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 15), optional_elements);
 }
 
 test "parser builds generic params + bounds + where + generic type" {

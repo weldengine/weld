@@ -160,3 +160,26 @@ test "an unknown method return type is refused by the checker" {
 test "a known fn return type is accepted by the checker" {
     try std.testing.expect(!try reports(std.testing.allocator, "fn f() -> int { 0 }", "unsupported return type"));
 }
+
+test "the codegen refuses a dynamic array of optionals" {
+    try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "rule r() {\n  let a: int?[] = [1, none]\n}", true));
+}
+
+test "the codegen refuses an array literal whose element the checker wraps" {
+    try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "rule r() {\n  let a = [1, none]\n}", true));
+    try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "rule r() {\n  let a: int?[2] = [1, none]\n}", true));
+    try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "rule r() {\n  let a: int?[2] = [1, 2]\n}", true));
+    try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "rule r() {\n  let c = true\n  let a: int?[2] = [if c { 1 } else { none }, 2]\n}", true));
+}
+
+test "the codegen refuses an optional of a payload it cannot name" {
+    try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "rule r() {\n  let o: int[2]? = [1, 2]\n}", true));
+}
+
+test "the codegen lowers an array of optional bindings" {
+    try lowerSource(std.testing.allocator, "rule r() {\n  let o: int? = some(1)\n  let a = [o, none]\n  let b: int?[2] = [o, none]\n  let c: int?[2] = [o, 1]\n}", true);
+}
+
+test "the codegen refuses the equality of arrays of optionals" {
+    try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "rule r() {\n  let o: int? = some(1)\n  let a: int?[2] = [o, none]\n  let e = a == a\n}", true));
+}

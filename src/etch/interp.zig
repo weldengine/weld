@@ -19697,6 +19697,17 @@ test "a loop's break values take the type its slot expects" {
     try expectRuns(&break_runs);
 }
 
+const optional_element_runs = [_]ScopeRun{
+    .{ .name = "anonymous elements and none in an array of optionals", .out = 15, .src = value_prelude ++ "rule r() when resource Out {\n  let os: P?[] = [.{ x: 1 }, none]\n  let a = os[0] ?? P { x: 0 }\n  let b = os[1] ?? P { x: 5 }\n  get_mut(Out).n = a.x * 10 + b.x\n}\n" },
+    .{ .name = "a value and none pushed onto optionals", .out = 49, .src = value_prelude ++ "rule r() when resource Out {\n  let mut xs: int?[] = []\n  xs.push(4)\n  xs.push(none)\n  get_mut(Out).n = (xs[0] ?? 0) * 10 + (xs[1] ?? 7) + xs.len()\n}\n" },
+    .{ .name = "fixed arrays of optionals compared", .out = 11, .src = value_prelude ++ "rule r() when resource Out {\n  let a: int?[2] = [3, none]\n  let b: int?[2] = [3, none]\n  let c: int?[2] = [none, 3]\n  let mut k = 0\n  if a == b {\n    k = k + 10\n  }\n  if a != c {\n    k = k + 1\n  }\n  get_mut(Out).n = k\n}\n" },
+    .{ .name = "an anonymous literal written to an optional element", .out = 6, .src = value_prelude ++ "rule r() when resource Out {\n  let mut os: P?[] = [none]\n  os[0] = .{ x: 6 }\n  get_mut(Out).n = if let p = os[0] { p.x } else { 0 }\n}\n" },
+};
+
+test "an array of optionals runs as its type says" {
+    try expectRuns(&optional_element_runs);
+}
+
 const value_runs = [_]ScopeRun{
     .{ .name = "a struct read into a binding is a copy", .out = 12, .src = value_prelude ++
         \\rule r() when resource Out {
