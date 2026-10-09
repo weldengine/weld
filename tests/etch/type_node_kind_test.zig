@@ -183,3 +183,7 @@ test "the codegen lowers an array of optional bindings" {
 test "the codegen refuses the equality of arrays of optionals" {
     try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "rule r() {\n  let o: int? = some(1)\n  let a: int?[2] = [o, none]\n  let e = a == a\n}", true));
 }
+
+test "the codegen refuses an array of enum variants" {
+    try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let ds: Dir[2] = [.north, .south]\n  let n = ds.len()\n}", true));
+}

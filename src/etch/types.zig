@@ -616,6 +616,9 @@ pub const TypeChecker = struct {
     unresolved_shorthands: std.AutoArrayHashMapUnmanaged(u32, void) = .empty,
     /// The enum each resolved `.variant` shorthand names.
     shorthand_enums: std.AutoHashMapUnmanaged(u32, DeclRef) = .empty,
+    /// The shorthands already reported as naming no variant of their slot's
+    /// type, so one fitted in two places is reported once.
+    shorthand_misses: std.AutoHashMapUnmanaged(u32, void) = .empty,
     /// Set while `valueCompares` runs: the value is compared with the slot, not
     /// stored in it, so it is never wrapped.
     comparing: bool = false,
@@ -887,6 +890,7 @@ pub const TypeChecker = struct {
         self.foreign_events.deinit(self.gpa);
         self.range_reported.deinit(self.gpa);
         self.unresolved_shorthands.deinit(self.gpa);
+        self.shorthand_misses.deinit(self.gpa);
         self.shorthand_enums.deinit(self.gpa);
         for (self.payloads.items) |p| self.gpa.destroy(p);
         self.payloads.deinit(self.gpa);
@@ -2650,7 +2654,7 @@ pub const TypeChecker = struct {
     /// declared field run (over `arena.fields`): `code_unknown` if the field is
     /// absent; `code_type` (when non-null) if a builtin/struct/enum value type
     /// mismatches. Checked against the declared field type with no rule
-    /// context, a `.variant` against a declared enum. Permissive
+    /// context. Permissive
     /// on non-builtin declared types (no false positives on Vec3-from-array).
     fn checkInstanceField(self: *TypeChecker, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: DiagnosticCode) !void {
         if (field.name == 0) return; // spread — not produced in component/resource bodies
@@ -2667,10 +2671,7 @@ pub const TypeChecker = struct {
             try self.emit(code_unknown, .error_, self.arena.exprSpan(field.value), "'{s}' has no field '{s}'", .{ owner, self.arena.strings.slice(field.name) });
             return;
         };
-        const actual = if (d == .enum_t and self.arena.exprKind(field.value) == .tag_path)
-            try self.checkEnumShorthand(field.value, d.enum_t)
-        else
-            try self.checkExpr(field.value, declaredSlot(d), null);
+        const actual = try self.checkExpr(field.value, declaredSlot(d), null);
         const mismatch = !try self.valueFits(d, field.value, actual);
         if (mismatch) {
             try self.emit(code_type, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{self.arena.strings.slice(field.name)});
@@ -3007,10 +3008,7 @@ pub const TypeChecker = struct {
             return;
         };
         const declared = self.foreignType(decl_arena, tn);
-        const actual = if (declared == .enum_t and self.arena.exprKind(field.value) == .tag_path)
-            try self.checkEnumShorthand(field.value, declared.enum_t)
-        else
-            try self.checkExpr(field.value, declaredSlot(declared), null);
+        const actual = try self.checkExpr(field.value, declaredSlot(declared), null);
         if (!try self.valueFits(declared, field.value, actual)) {
             try self.emit(code_type, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{field_name_bytes});
         }
@@ -5515,8 +5513,7 @@ pub const TypeChecker = struct {
         if (target == .enum_t) try self.fitShorthands(target.enum_t, value);
         if (!value.isNone() and self.arena.isEnumShorthand(value) and target != .unknown and target != .generic) {
             if (target == .enum_t) return declared != .optional or try self.wrapsInto(value, optionalDepth(declared));
-            _ = self.unresolved_shorthands.swapRemove(value.raw());
-            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "'.{s}' names an enum variant where no enum is expected", .{self.arena.strings.slice(self.arena.exprData(value))});
+            try self.refuseShorthand(value, null);
             return true;
         }
         if (self.lengthMisfits(declared, value)) return false;
@@ -7915,8 +7912,9 @@ pub const TypeChecker = struct {
     }
 
     /// Type `id` against the type its slot expects (`etch-resolver-types.md`
-    /// §4.1): an anonymous `.{ … }` takes the struct it names, under any
-    /// optional, as an element, a map key or value or `some`'s payload, and as
+    /// §4.1): a `.variant` takes the enum and an anonymous `.{ … }` the struct
+    /// it names, under any optional, as an element, a map key or value or
+    /// `some`'s payload, and as
     /// the value of a block, an `if`, a `match` or a loop's `break`; an array
     /// literal takes the element of the array it fills, and `[]` needs a slot
     /// (§4.2, E0207).
@@ -7925,8 +7923,13 @@ pub const TypeChecker = struct {
         while (target == .optional) target = target.optional.*;
         const data = self.arena.exprData(id);
         switch (self.arena.exprKind(id)) {
+            .tag_path => if (self.arena.isEnumShorthand(id) and target != .unknown and target != .generic) {
+                if (target == .enum_t) return self.checkEnumShorthand(id, target.enum_t);
+                try self.refuseShorthand(id, null);
+                return ResolvedType.unknown;
+            },
             .struct_lit => if (target == .struct_t and self.arena.struct_lits.items[data].type_name == 0) return self.checkStructLitAgainst(id, data, target.struct_t, ctx_opt),
-            .some_lit => if (expected == .optional) return self.optionalOf(try self.checkExpr(@bitCast(data), expected.optional.*, ctx_opt)),
+            .some_lit => if (expected != .unknown) return self.optionalOf(try self.checkExpr(@bitCast(data), if (expected == .optional) expected.optional.* else expected, ctx_opt)),
             .array_lit => if (target != .unknown) return self.synthArrayLit(id, data, ctx_opt, if (isArray(target)) declaredSlot(arrayElem(target).*) else ResolvedType.unknown),
             .map_lit => if (target == .map_t) return self.synthMapLit(id, data, ctx_opt, declaredSlot(target.map_t.key.*), target.map_t.value.*),
             .block_expr => return self.synthBlock(data, ctx_opt, expected),
@@ -9150,11 +9153,6 @@ pub const TypeChecker = struct {
         return false;
     }
 
-    /// Type a struct literal `T { f: v, … }`. `T` must name a
-    /// declared struct; each provided field must exist on it with a matching
-    /// value type. Fields may be omitted (the codegen / interpreter fill the
-    /// struct's declared defaults). The result type is `.struct_t = T`. The
-    /// anonymous `.{ … }` form (deferred) carries `type_name == 0`.
     /// Resolve an enum-variant shorthand `.variant` against an expected enum
     /// type — check mode, resolver-types §3.5/§4. In
     /// expression position the parser stores the bare `tag_path` with the
@@ -9173,8 +9171,21 @@ pub const TypeChecker = struct {
         }
         _ = self.shorthand_enums.remove(value.raw());
         _ = self.arena.enum_shorthands.remove(value.raw());
-        try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "enum '{s}' has no variant '{s}'", .{ declBytes(enum_ref), self.arena.strings.slice(variant) });
+        try self.refuseShorthand(value, enum_ref);
         return ResolvedType.unknown;
+    }
+
+    /// E0105 on the shorthand `value`, naming no variant of `enum_ref`, or where
+    /// no enum is expected; once per shorthand.
+    fn refuseShorthand(self: *TypeChecker, value: NodeId, enum_ref: ?DeclRef) TypeError!void {
+        _ = self.unresolved_shorthands.swapRemove(value.raw());
+        if ((try self.shorthand_misses.fetchPut(self.gpa, value.raw(), {})) != null) return;
+        const variant = self.arena.strings.slice(self.arena.exprData(value));
+        if (enum_ref) |e| {
+            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "enum '{s}' has no variant '{s}'", .{ declBytes(e), variant });
+        } else {
+            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "'.{s}' names an enum variant where no enum is expected", .{variant});
+        }
     }
 
     /// Hand the backends a shorthand's enum. They run one file, so an enum of
@@ -9376,7 +9387,6 @@ pub const TypeChecker = struct {
             .tag_path => if (self.arena.isEnumShorthand(value)) {
                 _ = try self.checkEnumShorthand(value, enum_name);
             },
-            .some_lit => try self.fitShorthands(enum_name, @bitCast(self.arena.exprData(value))),
             .block_expr => try self.fitShorthands(enum_name, self.arena.block_exprs.items[self.arena.exprData(value)].value),
             .if_expr => {
                 const ife = self.arena.if_exprs.items[self.arena.exprData(value)];
@@ -9415,6 +9425,11 @@ pub const TypeChecker = struct {
         self.unresolved_shorthands.clearRetainingCapacity();
     }
 
+    /// Type a struct literal `T { f: v, … }`. `T` must name a
+    /// declared struct; each provided field must exist on it with a matching
+    /// value type. Fields may be omitted (the codegen / interpreter fill the
+    /// struct's declared defaults). The result type is `.struct_t = T`. The
+    /// anonymous `.{ … }` form, `type_name == 0`, needs its slot's struct.
     fn synthStructLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const sl = self.arena.struct_lits.items[data];
         if (sl.type_name == 0) {
@@ -9454,12 +9469,7 @@ pub const TypeChecker = struct {
                     break;
                 }
             }
-            const actual = blk: {
-                if (declared != null and declared.? == .enum_t and self.arena.exprKind(flit.value) == .tag_path) {
-                    break :blk try self.checkEnumShorthand(flit.value, declared.?.enum_t);
-                }
-                break :blk try self.checkExpr(flit.value, declaredSlot(declared orelse .unknown), ctx_opt);
-            };
+            const actual = try self.checkExpr(flit.value, declaredSlot(declared orelse .unknown), ctx_opt);
             if (declared) |d| {
                 if (!try self.valueFits(d, flit.value, actual)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "struct-literal field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
@@ -18627,6 +18637,16 @@ test "== refuses a type that is not Eq, and an ordering a type that is not Ord" 
 }
 
 const shorthand_refused = [_]UnitCase{
+    .{ .name = "an element naming no variant of its enum, two others naming it", .code = .enum_variant_not_found, .src = "enum Dir { north }\nenum Pole { up }\nenum Axis { up }\nrule r() {\n  let ds: Dir[] = [.up]\n}" },
+    .{ .name = "an element of an int array", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let xs: int[] = [.north]\n}" },
+    .{ .name = "an element naming no variant, beside one that does", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let ds: Dir[] = [.north, .west]\n}" },
+    .{ .name = "a branch naming no variant", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let c = true\n  let d: Dir = if c { .north } else { .west }\n}" },
+    .{ .name = "a struct literal's enum field", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nstruct T { d: Dir = .north }\nrule r() {\n  let t = T { d: .west }\n}" },
+    .{ .name = "a key naming no variant of its enum, two others naming it", .code = .enum_variant_not_found, .src = "enum Dir { north }\nenum Pole { up }\nenum Axis { up }\nrule r() {\n  let m: [Dir: int] = [.up: 1]\n}" },
+    .{ .name = "a closure's element read at a call where no enum is expected", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let f = |x| {\n    let mut y = [x]\n    y = [.north]\n    0\n  }\n  let k = f(1)\n}" },
+    .{ .name = "some of a variant where the enum itself is expected", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let d: Dir = some(.north)\n}" },
+    .{ .name = "a scene resource's enum field", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nresource Nav { d: Dir = .north }\ncomponent C { v: int = 0 }\nscene \"S\" {\n  resources { Nav { d: .west } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
+    .{ .name = "a closure reading the variant of two enums, nothing expected", .code = .ambiguous_enum_variant, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let f = |x| {\n    let mut y = x\n    y = .north\n    y\n  }\n  let a = f(Dir.south)\n  let b = f(Pole.south)\n}" },
     .{ .name = "a data entry's enum field", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nstruct Item { d: Dir = .north }\ndata Db: Item {\n  e: { d: .west },\n}" },
     .{ .name = "a let annotation's enum has no such variant", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let e: Dir = .west\n}" },
     .{ .name = "a let annotation is not an enum", .code = .enum_variant_not_found, .src = "enum Dir { north, south }\nrule r() {\n  let x: int = .south\n}" },
@@ -18647,6 +18667,55 @@ test "a .variant shorthand resolves against the expected type, else against the 
         defer r.deinit(gpa);
         try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
         if (r.diagnostics.items.len != 1 or r.diagnostics.items[0].code != c.code) {
+            wrong += 1;
+            std.debug.print("{s}:\n", .{c.name});
+            for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+const shorthand_accepted = [_]UnitCase{
+    .{ .name = "elements of a dynamic array", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let ds: Dir[] = [.north, .south]\n}" },
+    .{ .name = "elements of a fixed array", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let ds: Dir[2] = [.south, .north]\n}" },
+    .{ .name = "a fill", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let ds: Dir[3] = [.south; 3]\n}" },
+    .{ .name = "elements of an optional array", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let os: Dir[]? = [.north]\n}" },
+    .{ .name = "elements under some", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let os: Dir[]? = some([.north])\n}" },
+    .{ .name = "a map value", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let m: [int: Dir] = [1: .south]\n}" },
+    .{ .name = "a map key", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let m: [Dir: int] = [.south: 1]\n}" },
+    .{ .name = "elements of nested arrays", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let dss: Dir[][] = [[.south]]\n}" },
+    .{ .name = "elements of a block's value", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let ds: Dir[] = { [.south] }\n}" },
+    .{ .name = "elements of an if's branches", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let c = true\n  let ds: Dir[] = if c { [.south] } else { [.north, .north] }\n}" },
+    .{ .name = "elements of a match's arms", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let k = 0\n  let ds: Dir[] = match k {\n    0 => [.south],\n    _ => [.north],\n  }\n}" },
+    .{ .name = "elements passed to a fn", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nfn count(ds: Dir[]) -> int {\n  ds.len()\n}\nrule r() {\n  let k = count([.south])\n}" },
+    .{ .name = "elements passed to a generic fn", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nfn count_g<T>(ds: Dir[], t: T) -> int {\n  ds.len()\n}\nrule r() {\n  let k = count_g([.south], 1)\n}" },
+    .{ .name = "elements passed to a method", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nstruct Q { n: int = 0 }\nimpl Q {\n  fn count(self, ds: Dir[]) -> int {\n    ds.len()\n  }\n}\nrule r() {\n  let q = Q { n: 1 }\n  let k = q.count([.south])\n}" },
+    .{ .name = "elements passed to an annotated closure", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let f = |ds: Dir[]| ds.len()\n  let k = f([.south])\n}" },
+    .{ .name = "elements returned", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nfn mk() -> Dir[] {\n  return [.south]\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "elements as a fn's tail", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nfn mk2() -> Dir[2] {\n  [.north, .south]\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "elements as a method's tail", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nstruct Q2 { n: int = 0 }\nimpl Q2 {\n  fn dirs(self) -> Dir[] {\n    [.south]\n  }\n}\nrule r() {\n  let x = 1\n}" },
+    .{ .name = "elements pushed", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut dss: Dir[][] = []\n  dss.push([.south])\n}" },
+    .{ .name = "elements inserted as a map value", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut m: [int: Dir[]] = [:]\n  m.insert(1, [.south])\n}" },
+    .{ .name = "elements assigned", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut ds: Dir[] = [Dir.north]\n  ds = [.south]\n}" },
+    .{ .name = "elements written to an element", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut dss: Dir[][] = [[Dir.north]]\n  dss[0] = [.south]\n}" },
+    .{ .name = "elements as a ?? default", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let o: Dir[]? = none\n  let ds = o ?? [.south]\n}" },
+    .{ .name = "elements as a struct literal's field", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nstruct H { ds: Dir[]? = none }\nrule r() {\n  let h = H { ds: [.south] }\n}" },
+    .{ .name = "elements of a key inserted", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut m: [Dir[2]: int] = [:]\n  m.insert([.north, .south], 5)\n}" },
+    .{ .name = "elements of a key read", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let m: [Dir[2]: int] = [:]\n  let v = m[[.south, .north]] ?? 0\n}" },
+    .{ .name = "elements of an element inserted into a set", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let mut s: Set<Dir[2]> = Set.new()\n  s.insert([.north, .south])\n}" },
+    .{ .name = "elements of an element looked up in a set", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nrule r() {\n  let s: Set<Dir[2]> = Set.new()\n  let b = s.contains([.north, .south])\n}" },
+    .{ .name = "the one enum naming the variant, passed for a type parameter", .code = .type_mismatch, .src = "enum Dir { north, south }\nfn id<T>(t: T) -> int {\n  0\n}\nrule r() {\n  let k = id(.north)\n}" },
+    .{ .name = "elements of a scene resource's array field", .code = .type_mismatch, .src = "enum Dir { north, south }\nenum Pole { north, south }\nresource Nav { dirs: Dir[] }\ncomponent C { v: int = 0 }\nscene \"S\" {\n  resources { Nav { dirs: [.north] } }\n  entity \"e\" { uuid: \"7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e\" C { v: 1 } }\n}" },
+};
+
+test "a .variant takes the enum its slot's element, key or value names" {
+    const gpa = std.testing.allocator;
+    var wrong: usize = 0;
+    for (shorthand_accepted) |c| {
+        var r = try parseAndCheck(gpa, c.src);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+        if (r.diagnostics.items.len != 0) {
             wrong += 1;
             std.debug.print("{s}:\n", .{c.name});
             for (r.diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.code.code(), d.primary_message });

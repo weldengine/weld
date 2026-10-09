@@ -776,6 +776,21 @@ test "== and != follow Eq at run time, and an ordered type orders" {
 }
 
 const shorthand_runs = [_]RunCase{
+    .{ .name = "an expected element: elements of a dynamic array", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let ds: Dir[] = [.south, .north]\n  assert(ds[0] == Dir.south)\n  assert(ds[1] == Dir.north)\n}" },
+    .{ .name = "an expected element: elements of a fixed array", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let ds: Dir[2] = [.north, .south]\n  assert(ds[1] == Dir.south)\n}" },
+    .{ .name = "an expected element: a fill", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let ds: Dir[3] = [.south; 3]\n  assert(ds[2] == Dir.south)\n}" },
+    .{ .name = "an expected element: elements of an optional array", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let os: Dir[]? = [.south]\n  if let ds = os { assert(ds[0] == Dir.south) } else { assert(false) }\n}" },
+    .{ .name = "an expected element: a map value", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let m: [int: Dir] = [1: .south]\n  assert(m[1] == some(Dir.south))\n}" },
+    .{ .name = "an expected element: a map key", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let m: [Dir: int] = [.south: 7]\n  assert(m[Dir.south] == some(7))\n}" },
+    .{ .name = "an expected element: a block's value under an optional", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let o: Dir? = { .south }\n  assert(o == some(Dir.south))\n}" },
+    .{ .name = "an expected element: an if's branch beside none", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let c = true\n  let o: Dir? = if c { .south } else { none }\n  assert(o == some(Dir.south))\n}" },
+    .{ .name = "an expected element: a match arm beside none", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let o: Dir? = match 1 { 1 => .south, _ => none }\n  assert(o == some(Dir.south))\n}" },
+    .{ .name = "an expected element: elements of an if's branches", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let c = true\n  let ds: Dir[] = if c { [.south] } else { [.north, .north] }\n  assert(ds[0] == Dir.south)\n}" },
+    .{ .name = "an expected element: elements of nested arrays", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let dss: Dir[][] = [[.south]]\n  assert(dss[0][0] == Dir.south)\n}" },
+    .{ .name = "an expected element: elements passed to a fn", .src = "enum Dir { north, south }\nenum Pole { north, south }\nfn first(ds: Dir[]) -> Dir {\n  ds[0]\n}\ntest \"t\" {\n  assert(first([.north, .south]) == Dir.north)\n}" },
+    .{ .name = "an expected element: elements returned", .src = "enum Dir { north, south }\nenum Pole { north, south }\nfn mk() -> Dir[] {\n  [.south]\n}\ntest \"t\" {\n  let ds = mk()\n  assert(ds[0] == Dir.south)\n}" },
+    .{ .name = "an expected element: elements pushed", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let mut dss: Dir[][] = []\n  dss.push([.south])\n  assert(dss[0][0] == Dir.south)\n}" },
+    .{ .name = "an expected element: elements of an array of optionals", .src = "enum Dir { north, south }\nenum Pole { north, south }\ntest \"t\" {\n  let os: Dir?[] = [.south, none]\n  assert(os[0] == some(Dir.south))\n}" },
     .{ .name = "a let with an enum annotation", .src = "enum Dir { north, south }\ntest \"t\" {\n  let e: Dir = .south\n  assert(e == Dir.south)\n}" },
     .{ .name = "a fn argument", .src = "enum Dir { north, south }\nfn is_south(d: Dir) -> bool { d == Dir.south }\ntest \"t\" {\n  assert(is_south(.south))\n}" },
     .{ .name = "a return value, trailing and by return", .src = "enum Dir { north, south }\nfn g() -> Dir { .south }\nfn h() -> Dir {\n  return .north\n}\ntest \"t\" {\n  assert(g() == Dir.south)\n  assert(h() == Dir.north)\n}" },
